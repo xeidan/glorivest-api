@@ -86,7 +86,7 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 function sendOtpEmail(email, otp) {
   const msg = {
     to: email,
-    from: process.env.EMAIL_USER,
+    from: { email: process.env.EMAIL_USER }, // ✅ fixed
     subject: 'Your OTP Code',
     text: `Your OTP is: ${otp}`,
   };
@@ -99,9 +99,9 @@ function sendOtpEmail(email, otp) {
 function sendReferralNotification(inviterEmail, newUserEmail) {
   const msg = {
     to: inviterEmail,
-    from: process.env.EMAIL_USER,
+    from: { email: process.env.EMAIL_USER }, // ✅ fixed
     subject: '🎉 You Just Got a Referral!',
-    text: `Hi there,\n\n${newUserEmail} just signed up using your referral code.\n\nOnce they deposit, you'll receive 5% of their deposit amount as a reward.\n\nKeep sharing and earning!\n\n– The glorivest Team`
+    text: `Hi there,\n\n${newUserEmail} just signed up using your referral code.\n\nOnce they deposit, you'll receive 5% of their deposit amount as a reward.\n\nKeep sharing and earning!\n\n– The Glorivest Team`
   };
 
   return sgMail.send(msg).catch(error => {
@@ -109,6 +109,7 @@ function sendReferralNotification(inviterEmail, newUserEmail) {
     // Do not throw here to avoid interrupting signup flow
   });
 }
+
 
 
 // ====== RAVE ID GENERATOR ======
