@@ -13,8 +13,6 @@ const app = express();
 app.set('trust proxy', 1);
 
 // ===== CORS CONFIG =====
-app.options('*', cors()); // 👈 respond to preflight
-
 const allowedOrigins = [
   'http://127.0.0.1:5500',
   'http://localhost:5500',
@@ -39,6 +37,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }));
+
+app.options('*', cors()); // 👈 respond to preflight
 
 app.use(express.json());
 app.use(morgan('combined'));
