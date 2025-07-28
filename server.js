@@ -41,8 +41,11 @@ app.use(cors({
 app.options('*', cors()); // optional preflight support
 
 app.get('/test-cors', (req, res) => {
-  res.json({ message: 'CORS is working!' });
+  console.log('✅ /test-cors HIT');
+  res.setHeader('Access-Control-Allow-Origin', '*'); // temporary test only
+  res.json({ message: 'CORS working!' });
 });
+
 
 // ===== Body Parser and Routes (after CORS) =====
 app.use(express.json());
