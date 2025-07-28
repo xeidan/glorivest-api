@@ -279,6 +279,10 @@ app.post('/resend-verification', async (req, res) => {
   }
 });
 
+app.get('/test-cors', (req, res) => {
+  res.json({ message: 'CORS working' });
+});
+
 
 //login
 app.post('/login', async (req, res) => {
