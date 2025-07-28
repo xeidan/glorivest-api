@@ -25,6 +25,8 @@ const allowedOrigins = [
   'https://glorivest.github.io',
   'https://glorivest.com'
 ];
+app.use(express.json());
+app.use(morgan('combined'));
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -48,10 +50,6 @@ app.get('/test-cors', (req, res) => {
   res.json({ message: 'CORS working!' });
 });
 
-
-// ===== Body Parser and Routes (after CORS) =====
-app.use(express.json());
-app.use(morgan('combined'));
 
 
 //rate limiter
