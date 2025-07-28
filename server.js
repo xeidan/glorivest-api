@@ -40,15 +40,14 @@ app.use(cors({
 
 app.options('*', cors()); // optional preflight support
 
+app.get('/test-cors', (req, res) => {
+  res.json({ message: 'CORS is working!' });
+});
+
 // ===== Body Parser and Routes (after CORS) =====
 app.use(express.json());
 app.use(morgan('combined'));
 
-
-
-app.get('/test-cors', (req, res) => {
-  res.json({ message: 'CORS is working!' });
-});
 
 //rate limiter
 // ==== RATE LIMITERS ====
