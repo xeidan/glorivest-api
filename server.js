@@ -38,7 +38,9 @@ app.use(cors({
   credentials: true,
 }));
 
-app.options('*', cors()); // 👈 respond to preflight
+// must come AFTER app.use(cors(...))
+app.options('*', cors());
+
 
 app.use(express.json());
 app.use(morgan('combined'));
