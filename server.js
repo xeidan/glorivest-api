@@ -38,10 +38,9 @@ app.use(cors({
   credentials: true,
 }));
 
-// must come AFTER app.use(cors(...))
-app.options('*', cors());
+app.options('*', cors()); // optional preflight support
 
-
+// ===== Body Parser and Routes (after CORS) =====
 app.use(express.json());
 app.use(morgan('combined'));
 
