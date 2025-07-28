@@ -98,6 +98,76 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
   }
 });
 
+// ===== LOGIN =====
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ message: 'All fields are required' });
+
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+    const user = result.rows[0];
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) return res.status(401).json({ message: 'Incorrect password' });
+
+    if (!user.is_verified) return res.status(403).json({ message: 'Please verify your account first' });
+
+    const token = jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET || 'secret', {
+      expiresIn: '7d'
+    });
+
+    res.json({ token });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+// ===== REGISTER =====
+app.post('/signup', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ message: 'All fields are required' });
+
+  try {
+    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(409).json({ message: 'Email already in use' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    await pool.query(`
+      INSERT INTO users (email, password, otp, otp_created_at, is_verified, created_at)
+      VALUES ($1, $2, $3, NOW(), false, NOW())
+    `, [email, hashedPassword, otp]);
+
+    const msg = {
+      to: email,
+      from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
+      subject: 'Your Glorivest OTP Code',
+      html: `
+        <div style="font-family: Arial, sans-serif; text-align: center;">
+          <h2>🔐 Verify Your Email</h2>
+          <p>Enter this code in the app to verify your email:</p>
+          <h1 style="font-size: 2rem; color: #00D2B1;">${otp}</h1>
+          <p>Code expires in 10 minutes.</p>
+        </div>
+      `,
+    };
+
+    await sgMail.send(msg);
+
+    res.status(201).json({ message: 'Signup successful. OTP sent.' });
+  } catch (err) {
+    console.error('Signup error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
 // ===== VERIFY OTP =====
 app.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
