@@ -45,14 +45,17 @@ app.use(cors({
 
 app.options('*', cors()); // Handle preflight
 
-// ===== Middleware =====
-app.use(express.json());
-app.use(morgan('dev'));
 
 // ===== Test Route =====
 app.get('/test-cors', (req, res) => {
   res.json({ message: 'CORS is working' });
 });
+
+
+// ===== Middleware =====
+app.use(express.json());
+app.use(morgan('dev'));
+
 
 
 const PORT = process.env.PORT || 3000;
