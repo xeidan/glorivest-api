@@ -43,6 +43,12 @@ app.options('*', cors()); // 👈 respond to preflight
 app.use(express.json());
 app.use(morgan('combined'));
 
+
+
+app.get('/test-cors', (req, res) => {
+  res.json({ message: 'CORS is working!' });
+});
+
 //rate limiter
 // ==== RATE LIMITERS ====
 const authLimiter = rateLimit({
@@ -281,9 +287,6 @@ app.post('/resend-verification', async (req, res) => {
   }
 });
 
-app.get('/test-cors', (req, res) => {
-  res.json({ message: 'CORS working' });
-});
 
 
 //login
