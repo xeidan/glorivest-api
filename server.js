@@ -53,3 +53,10 @@ app.use(morgan('dev'));
 app.get('/test-cors', (req, res) => {
   res.json({ message: 'CORS is working' });
 });
+
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('🔥 Glorivest Backend Booting...');
+  console.log(`Server running on port ${PORT}`);
+});
