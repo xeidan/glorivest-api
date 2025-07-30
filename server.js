@@ -74,7 +74,7 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    await pool.query('UPDATE users SET otp = $1, otp_created_at = NOW() WHERE email = $2', [otp, email]);
+    await pool.query('UPDATE users SET otp = NULL, otp_created_at = NULL, is_verified = true WHERE email = $1', [otp, email]);
 
     const msg = {
       to: email,
