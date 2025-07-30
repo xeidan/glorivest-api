@@ -258,6 +258,36 @@ app.post('/verify-otp', async (req, res) => {
   }
 });
 
+
+// ===== RESET PASSWORD =====
+app.post('/reset-password', async (req, res) => {
+  const { email, newPassword } = req.body;
+  if (!email || !newPassword) {
+    return res.status(400).json({ message: 'Email and new password are required' });
+  }
+
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      'UPDATE users SET password = $1 WHERE email = $2',
+      [hashedPassword, email]
+    );
+
+    res.status(200).json({ message: 'Password reset successful' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+
 // ===== Server Init =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
