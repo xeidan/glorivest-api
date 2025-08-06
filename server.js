@@ -89,7 +89,7 @@ app.get("/account/me", authenticate, async (req, res) => {
     const userId = req.user.id;
 
     const result = await pool.query(`
-      SELECT email, rave_id, balance, reward_balance
+      SELECT email, glorivest_id, balance, reward_balance
       FROM users
       WHERE id = $1
     `, [userId]);
@@ -102,7 +102,7 @@ app.get("/account/me", authenticate, async (req, res) => {
 
     res.json({
       email: user.email,
-      rave_id: user.rave_id,
+      glorivest_id: user.glorivest_id,
       balance: parseFloat(user.balance || 0),
       reward_balance: parseFloat(user.reward_balance || 0)
     });
@@ -111,6 +111,7 @@ app.get("/account/me", authenticate, async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 
