@@ -84,36 +84,36 @@ async function deleteOldUnverifiedUsers() {
 
 
 // ===== ACCOUNT ME =====
-app.get("/account/me", authenticate, async (req, res) => {
-  try {
-    const userId = req.user.id;
+// app.get("/account/me", authenticate, async (req, res) => {
+//   try {
+//     const userId = req.user.id;
 
-    const result = await pool.query(`
-      SELECT email, id, balance, reward_balance
-      FROM users
-      WHERE id = $1
-    `, [userId]);
+//     const result = await pool.query(`
+//       SELECT email, id, balance, reward_balance
+//       FROM users
+//       WHERE id = $1
+//     `, [userId]);
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
+//     if (result.rows.length === 0) {
+//       return res.status(404).json({ message: "User not found" });
+//     }
 
-    const user = result.rows[0];
+//     const user = result.rows[0];
 
-    // Format glorivest_id as GV150000 + user.id
-    const glorivestId = `GV${150000 + user.id}`;
+//     // Format glorivest_id as GV150000 + user.id
+//     const glorivestId = `GV${150000 + user.id}`;
 
-    res.json({
-      email: user.email,
-      glorivest_id: glorivestId,
-      balance: parseFloat(user.balance || 0),
-      reward_balance: parseFloat(user.reward_balance || 0)
-    });
-  } catch (err) {
-    console.error("Error in /account/me:", err);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
+//     res.json({
+//       email: user.email,
+//       glorivest_id: glorivestId,
+//       balance: parseFloat(user.balance || 0),
+//       reward_balance: parseFloat(user.reward_balance || 0)
+//     });
+//   } catch (err) {
+//     console.error("Error in /account/me:", err);
+//     res.status(500).json({ message: "Internal server error" });
+//   }
+// });
 
 
 
