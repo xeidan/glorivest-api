@@ -83,37 +83,54 @@ async function deleteOldUnverifiedUsers() {
 }
 
 
+// ===== AUTH MIDDLEWARE =====
+function authenticate(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.status(401).json({ message: 'Unauthorized: No token provided' });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ message: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+}
+
+
 // ===== ACCOUNT ME =====
-// app.get("/account/me", authenticate, async (req, res) => {
-//   try {
-//     const userId = req.user.id;
+app.get("/account/me", authenticate, async (req, res) => {
+  console.log("🔐 /account/me hit");
+  try {
+    const userId = req.user.id;
+    console.log("User ID:", userId);
 
-//     const result = await pool.query(`
-//       SELECT email, id, balance, reward_balance
-//       FROM users
-//       WHERE id = $1
-//     `, [userId]);
+    const result = await pool.query(`
+      SELECT email, id, balance, reward_balance
+      FROM users
+      WHERE id = $1
+    `, [userId]);
 
-//     if (result.rows.length === 0) {
-//       return res.status(404).json({ message: "User not found" });
-//     }
+    if (result.rows.length === 0) {
+      console.log("User not found");
+      return res.status(404).json({ message: "User not found" });
+    }
 
-//     const user = result.rows[0];
+    const user = result.rows[0];
+    const glorivestId = `GV${150000 + user.id}`;
 
-//     // Format glorivest_id as GV150000 + user.id
-//     const glorivestId = `GV${150000 + user.id}`;
+    res.json({
+      email: user.email,
+      glorivest_id: glorivestId,
+      balance: parseFloat(user.balance || 0),
+      reward_balance: parseFloat(user.reward_balance || 0)
+    });
+  } catch (err) {
+    console.error("Error in /account/me:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
 
-//     res.json({
-//       email: user.email,
-//       glorivest_id: glorivestId,
-//       balance: parseFloat(user.balance || 0),
-//       reward_balance: parseFloat(user.reward_balance || 0)
-//     });
-//   } catch (err) {
-//     console.error("Error in /account/me:", err);
-//     res.status(500).json({ message: "Internal server error" });
-//   }
-// });
 
 
 
