@@ -233,7 +233,7 @@ app.post('/signup', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const referralCode = generateReferralCode(); // e.g. 6-character alphanumeric
+    const referralCode = generateReferralCode();
     const referredBy = referred_by || null;
 
     await client.query('BEGIN');
@@ -247,14 +247,14 @@ app.post('/signup', async (req, res) => {
       VALUES ($1, $2, $3, NOW(), false, NOW(), $4, $5)
       RETURNING id, email
     `, [email, hashedPassword, otp, referralCode, referredBy]);
-    
-    // Get newly created user
-    const userResult = await client.query('SELECT id, email FROM users WHERE email = $1', [email]);
-    const newUser = userResult.rows[0];
-    
-    // Create JWT
-    const token = jwt.sign({ id: newUser.id, email: newUser.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    
+
+    const newUser = result.rows[0];
+
+    const token = jwt.sign(
+      { id: newUser.id, email: newUser.email },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '7d' }
+    );
 
     const msg = {
       to: email,
@@ -283,6 +283,7 @@ app.post('/signup', async (req, res) => {
     client.release();
   }
 });
+
 
 
 
