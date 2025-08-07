@@ -106,7 +106,7 @@ app.get("/account/me", authenticate, async (req, res) => {
     console.log("User ID:", userId);
 
     const result = await pool.query(`
-      SELECT email, id, balance, reward_balance
+      SELECT email, id, balance, reward_balance, referral_code, total_referrals, referral_earnings
       FROM users
       WHERE id = $1
     `, [userId]);
@@ -124,9 +124,9 @@ app.get("/account/me", authenticate, async (req, res) => {
       glorivest_id: glorivestId,
       balance: parseFloat(user.balance || 0),
       reward_balance: parseFloat(user.reward_balance || 0),
-      referral_code: user.referral_code,
+      referral_code: user.referral_code || "N/A",
       total_referrals: user.total_referrals || 0,
-      referral_earnings: user.referral_earnings || 0
+      referral_earnings: parseFloat(user.referral_earnings || 0)
     });
   } catch (err) {
     console.error("Error in /account/me:", err);
@@ -363,7 +363,7 @@ app.post('/reset-password', async (req, res) => {
 app.get('/leaderboard', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT email, COALESCE(reward_balance, 0) AS reward_balance, COALESCE(total_referrals, 0) AS total_referrals
+      SELECT email, referral_earnings, total_referrals, reward_balance
       FROM users
       ORDER BY reward_balance DESC
       LIMIT 10
@@ -375,6 +375,7 @@ app.get('/leaderboard', async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch leaderboard' });
   }
 });
+
 
 
 
