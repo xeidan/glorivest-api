@@ -85,22 +85,29 @@ async function deleteOldUnverifiedUsers() {
 
 // ===== AUTH MIDDLEWARE =====
 function authenticate(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const authHeader = req.headers.authorization;
 
-  if (!token) return res.status(401).json({ message: 'Unauthorized: No token provided' });
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Missing or invalid token" });
+  }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ message: 'Invalid token' });
-    req.user = user;
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // 👈 IMPORTANT: attaches user data to the request
     next();
-  });
+  } catch (err) {
+    return res.status(403).json({ message: "Invalid or expired token" });
+  }
 }
+
+
 
 
 // ===== ACCOUNT ME =====
 app.get("/account/me", authenticate, async (req, res) => {
-  console.log("🔐 /account/me hit");
+  console.log("🔐 /account/me hit", req.headers.authorization);
   try {
     const userId = req.user.id;
     console.log("User ID:", userId);
@@ -188,15 +195,12 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
   }
 });
 
+
 // ===== REFERRAL CODE HELPERS =====
-function generateReferralCode(length = 6) {
-  const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let code = '';
-  for (let i = 0; i < length; i++) {
-    code += charset.charAt(Math.floor(Math.random() * charset.length));
-  }
-  return code;
+function generateReferralCode() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase(); // e.g. "K8T1ZR"
 }
+
 
 async function generateUniqueReferralCode() {
   let code;
@@ -218,42 +222,50 @@ app.post('/signup', async (req, res) => {
   if (!email || !password) return res.status(400).json({ message: 'All fields are required' });
 
   await deleteOldUnverifiedUsers();
-
   const client = await pool.connect();
+
   try {
-    // Check if email already exists
-    const existingUser = await client.query('SELECT * FROM users WHERE email = $1', [email]);
+    // Check if user already exists
+    const existingUser = await client.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existingUser.rows.length > 0) {
       return res.status(409).json({ message: 'Email already in use' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const referralCode = generateReferralCode(); // your helper function
+    const referralCode = generateReferralCode(); // e.g. 6-character alphanumeric
     const referredBy = referred_by || null;
 
     await client.query('BEGIN');
 
-    // INSERT user with all fields
-    await client.query(`
+    const result = await client.query(`
       INSERT INTO users (
         email, password, otp, otp_created_at,
         is_verified, created_at,
         referral_code, referred_by
       )
       VALUES ($1, $2, $3, NOW(), false, NOW(), $4, $5)
+      RETURNING id, email
     `, [email, hashedPassword, otp, referralCode, referredBy]);
+    
+    // Get newly created user
+    const userResult = await client.query('SELECT id, email FROM users WHERE email = $1', [email]);
+    const newUser = userResult.rows[0];
+    
+    // Create JWT
+    const token = jwt.sign({ id: newUser.id, email: newUser.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    
 
     const msg = {
       to: email,
-      from: process.env.FROM_EMAIL || 'noreply@earnrave.com',
+      from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
       subject: 'Your Glorivest OTP Code',
       html: `
         <div style="font-family: Arial, sans-serif; text-align: center;">
           <h2>🔐 Verify Your Email</h2>
           <p>Enter this code in the app to verify your email:</p>
           <h1 style="font-size: 2rem; color: #00D2B1;">${otp}</h1>
-          <p>Code expires in 10 minutes.</p>
+          <p>This code will expire in 10 minutes.</p>
         </div>
       `
     };
@@ -261,7 +273,7 @@ app.post('/signup', async (req, res) => {
     await sgMail.send(msg);
     await client.query('COMMIT');
 
-    res.status(201).json({ message: 'Signup successful. OTP sent.' });
+    res.status(201).json({ message: 'Signup successful. OTP sent.', token });
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -271,7 +283,6 @@ app.post('/signup', async (req, res) => {
     client.release();
   }
 });
-
 
 
 
@@ -305,6 +316,7 @@ app.post('/login', async (req, res) => {
 });
 
 
+
 // ===== VERIFY OTP =====
 app.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
@@ -332,6 +344,7 @@ app.post('/verify-otp', async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 
 
 // ===== RESET PASSWORD =====
@@ -378,8 +391,6 @@ app.get('/leaderboard', async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch leaderboard' });
   }
 });
-
-
 
 
 
