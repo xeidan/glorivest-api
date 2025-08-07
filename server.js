@@ -198,7 +198,7 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
 
 // ===== REFERRAL CODE HELPERS =====
 function generateReferralCode() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase(); // e.g. "K8T1ZR"
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
 
