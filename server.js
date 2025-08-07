@@ -123,15 +123,16 @@ app.get("/account/me", authenticate, async (req, res) => {
       email: user.email,
       glorivest_id: glorivestId,
       balance: parseFloat(user.balance || 0),
-      reward_balance: parseFloat(user.reward_balance || 0)
+      reward_balance: parseFloat(user.reward_balance || 0),
+      referral_code: user.referral_code,
+      total_referrals: user.total_referrals || 0,
+      referral_earnings: user.referral_earnings || 0
     });
   } catch (err) {
     console.error("Error in /account/me:", err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
-
-
 
 
 
@@ -188,41 +189,62 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
   }
 });
 
+// ===== REFERRAL CODE HELPERS =====
+function generateReferralCode(length = 6) {
+  const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < length; i++) {
+    code += charset.charAt(Math.floor(Math.random() * charset.length));
+  }
+  return code;
+}
+
+async function generateUniqueReferralCode() {
+  let code;
+  let exists = true;
+
+  while (exists) {
+    code = generateReferralCode();
+    const result = await pool.query('SELECT 1 FROM users WHERE referral_code = $1', [code]);
+    exists = result.rows.length > 0;
+  }
+
+  return code;
+}
 
 
-// ===== REGISTER =====
+// ===== SIGNUP =====
 app.post('/signup', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, referred_by } = req.body;
   if (!email || !password) return res.status(400).json({ message: 'All fields are required' });
 
   await deleteOldUnverifiedUsers();
 
-
   const client = await pool.connect();
   try {
     // Check if email already exists
-    const existingUser = await client.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (existingUser.rows.length > 0) {
+    const check = await client.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (check.rows.length > 0) {
       return res.status(409).json({ message: 'Email already in use' });
     }
 
-    // Prepare new user data
     const hashedPassword = await bcrypt.hash(password, 10);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const referralCode = await generateUniqueReferralCode();
 
     // Begin transaction
     await client.query('BEGIN');
 
-    // Insert new user
+    // Insert user
     await client.query(`
-      INSERT INTO users (email, password, otp, otp_created_at, is_verified, created_at)
-      VALUES ($1, $2, $3, NOW(), false, NOW())
-    `, [email, hashedPassword, otp]);
+      INSERT INTO users (email, password, otp, otp_created_at, is_verified, created_at, referral_code, referred_by)
+      VALUES ($1, $2, $3, NOW(), false, NOW(), $4, $5)
+    `, [email, hashedPassword, otp, referralCode, referred_by || null]);
 
-    // Prepare email
+    // Send OTP email
     const msg = {
       to: email,
-      from: process.env.FROM_EMAIL || 'noreply@earnrave.com',
+      from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
       subject: 'Your Glorivest OTP Code',
       html: `
         <div style="font-family: Arial, sans-serif; text-align: center;">
@@ -234,15 +256,12 @@ app.post('/signup', async (req, res) => {
       `
     };
 
-    // Attempt to send OTP email
     await sgMail.send(msg);
 
-    // If email sent, commit transaction
     await client.query('COMMIT');
     res.status(201).json({ message: 'Signup successful. OTP sent.' });
 
   } catch (err) {
-    // Roll back insert if anything fails
     await client.query('ROLLBACK');
     console.error('Signup error:', err);
     res.status(500).json({ message: 'Internal server error' });
@@ -250,6 +269,7 @@ app.post('/signup', async (req, res) => {
     client.release();
   }
 });
+
 
 
 
@@ -337,6 +357,25 @@ app.post('/reset-password', async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+
+// ===== LEADERBOARD ROUTE =====
+app.get('/leaderboard', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT email, COALESCE(reward_balance, 0) AS reward_balance, COALESCE(total_referrals, 0) AS total_referrals
+      FROM users
+      ORDER BY reward_balance DESC
+      LIMIT 10
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Leaderboard error:', err);
+    res.status(500).json({ message: 'Failed to fetch leaderboard' });
+  }
+});
+
 
 
 
