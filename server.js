@@ -136,7 +136,6 @@ app.get("/account/me", authenticate, async (req, res) => {
 
 
 
-
 // ===== RESEND OTP =====
 app.post('/resend-otp', otpResendLimiter, async (req, res) => {
   const { email } = req.body;
@@ -223,28 +222,31 @@ app.post('/signup', async (req, res) => {
   const client = await pool.connect();
   try {
     // Check if email already exists
-    const check = await client.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (check.rows.length > 0) {
+    const existingUser = await client.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
       return res.status(409).json({ message: 'Email already in use' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const referralCode = await generateUniqueReferralCode();
+    const referralCode = generateReferralCode(); // your helper function
+    const referredBy = referred_by || null;
 
-    // Begin transaction
     await client.query('BEGIN');
 
-    // Insert user
+    // INSERT user with all fields
     await client.query(`
-      INSERT INTO users (email, password, otp, otp_created_at, is_verified, created_at, referral_code, referred_by)
+      INSERT INTO users (
+        email, password, otp, otp_created_at,
+        is_verified, created_at,
+        referral_code, referred_by
+      )
       VALUES ($1, $2, $3, NOW(), false, NOW(), $4, $5)
-    `, [email, hashedPassword, otp, referralCode, referred_by || null]);
+    `, [email, hashedPassword, otp, referralCode, referredBy]);
 
-    // Send OTP email
     const msg = {
       to: email,
-      from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
+      from: process.env.FROM_EMAIL || 'noreply@earnrave.com',
       subject: 'Your Glorivest OTP Code',
       html: `
         <div style="font-family: Arial, sans-serif; text-align: center;">
@@ -257,8 +259,8 @@ app.post('/signup', async (req, res) => {
     };
 
     await sgMail.send(msg);
-
     await client.query('COMMIT');
+
     res.status(201).json({ message: 'Signup successful. OTP sent.' });
 
   } catch (err) {
@@ -269,6 +271,7 @@ app.post('/signup', async (req, res) => {
     client.release();
   }
 });
+
 
 
 
