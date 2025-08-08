@@ -394,6 +394,125 @@ app.get('/leaderboard', async (req, res) => {
 });
 
 
+// ===== BOT START =====
+app.post('/bot/start', authenticate, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await pool.query('SELECT bot_active, bot_started_at, balance FROM users WHERE id = $1', [userId]);
+
+    if (result.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+    const user = result.rows[0];
+    if (user.balance <= 0) return res.status(400).json({ message: 'Insufficient capital' });
+    if (user.bot_active) return res.status(400).json({ message: 'Bot already running' });
+
+    await pool.query(`
+      UPDATE users
+      SET bot_active = true,
+          bot_started_at = NOW(),
+          bot_ended_at = NULL,
+          eligible_for_withdrawal = false
+      WHERE id = $1
+    `, [userId]);
+
+    res.json({ message: 'Bot started successfully' });
+  } catch (err) {
+    console.error('Start bot error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+
+
+// ===== BOT STOP =====
+app.post('/bot/stop', authenticate, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await pool.query('SELECT bot_active FROM users WHERE id = $1', [userId]);
+    if (result.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+    await pool.query(`
+      UPDATE users
+      SET bot_active = false,
+          bot_started_at = NULL,
+          bot_ended_at = NOW(),
+          eligible_for_withdrawal = false
+    WHERE id = $1
+    `, [userId]);
+
+    res.json({ message: 'Bot stopped and reset.' });
+  } catch (err) {
+    console.error('Stop bot error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+
+
+// ===== BOT STATUS =====
+app.get('/bot/status', authenticate, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await pool.query(`
+      SELECT balance, bot_active, bot_started_at
+      FROM users
+      WHERE id = $1
+    `, [userId]);
+
+    if (result.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+    const { balance, bot_active, bot_started_at } = result.rows[0];
+
+    // Calculate days active
+    let daysActive = 0;
+    if (bot_started_at) {
+      const started = new Date(bot_started_at);
+      const now = new Date();
+      const msInDay = 1000 * 60 * 60 * 24;
+      daysActive = Math.floor((now - started) / msInDay);
+    }
+
+    res.json({
+      balance: parseFloat(balance || 0),
+      bot_active,
+      days_active: daysActive
+    });
+  } catch (err) {
+    console.error('Bot status error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+
+
+// ===== DEPOSIT =====
+app.post('/deposit', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const { amount } = req.body;
+
+  if (!amount || isNaN(amount)) return res.status(400).json({ message: 'Invalid amount' });
+
+  try {
+    await pool.query(`
+      UPDATE users
+      SET balance = balance + $1
+      WHERE id = $2
+    `, [amount, userId]);
+
+    res.json({ message: `Deposited $${amount}` });
+  } catch (err) {
+    console.error('Deposit error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
 
 // ===== Server Init =====
 const PORT = process.env.PORT || 3000;
