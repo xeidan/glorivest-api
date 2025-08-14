@@ -514,6 +514,226 @@ app.post('/deposit', authenticate, async (req, res) => {
 
 
 
+// GET /positions/me
+// Query params:
+// page (default 1), page_size (default 25, max 200)
+// symbol, status (RUNNING|CLOSED|CANCELLED), date_from, date_to (ISO),
+// min_pnl, max_pnl, side (BUY|SELL), sort_by (opened_at|closed_at|pnl|fees), sort_dir (asc|desc)
+app.get('/positions/me', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const {
+    page = '1',
+    page_size = '25',
+    symbol,
+    status,
+    side,
+    date_from,
+    date_to,
+    min_pnl,
+    max_pnl,
+    sort_by = 'opened_at',
+    sort_dir = 'desc'
+  } = req.query;
+
+  const p = Math.max(parseInt(page) || 1, 1);
+  const ps = Math.min(Math.max(parseInt(page_size) || 25, 1), 200);
+  const offset = (p - 1) * ps;
+
+  const where = ['user_id = $1'];
+  const vals = [userId];
+  let i = vals.length + 1;
+
+  if (symbol) { where.push(`symbol = $${i++}`); vals.push(symbol); }
+  if (status) { where.push(`status = $${i++}`); vals.push(status); }
+  if (side)   { where.push(`side = $${i++}`); vals.push(side); }
+  if (date_from) { where.push(`COALESCE(closed_at, opened_at) >= $${i++}`); vals.push(new Date(date_from)); }
+  if (date_to)   { where.push(`COALESCE(closed_at, opened_at) <= $${i++}`); vals.push(new Date(date_to)); }
+  if (min_pnl)   { where.push(`pnl >= $${i++}`); vals.push(min_pnl); }
+  if (max_pnl)   { where.push(`pnl <= $${i++}`); vals.push(max_pnl); }
+
+  const sortable = new Set(['opened_at','closed_at','pnl','fees']);
+  const sb = sortable.has(String(sort_by)) ? String(sort_by) : 'opened_at';
+  const sd = String(sort_dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  try {
+    const countSql = `SELECT COUNT(*) AS cnt FROM positions ${whereSql}`;
+    const { rows: [{ cnt }] } = await pool.query(countSql, vals);
+
+    const sql = `
+      SELECT id, symbol, side, qty, entry_price, exit_price, pnl, fees, status,
+             opened_at, closed_at, duration_sec, strategy
+      FROM positions
+      ${whereSql}
+      ORDER BY ${sb} ${sd}
+      LIMIT ${ps} OFFSET ${offset}
+    `;
+    const { rows } = await pool.query(sql, vals);
+
+    res.json({
+      page: p,
+      page_size: ps,
+      total: Number(cnt),
+      pages: Math.ceil(Number(cnt) / ps),
+      data: rows
+    });
+  } catch (err) {
+    console.error('GET /positions/me error', err);
+    res.status(500).json({ message: 'Failed to fetch positions.' });
+  }
+});
+
+
+
+
+// GET /positions/me/summary
+app.get('/positions/me/summary', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const { date_from, date_to, symbol, status, side } = req.query;
+
+  const where = ['user_id = $1'];
+  const vals = [userId];
+  let i = vals.length + 1;
+
+  if (symbol) { where.push(`symbol = $${i++}`); vals.push(symbol); }
+  if (status) { where.push(`status = $${i++}`); vals.push(status); }
+  if (side)   { where.push(`side = $${i++}`); vals.push(side); }
+  if (date_from) { where.push(`COALESCE(closed_at, opened_at) >= $${i++}`); vals.push(new Date(date_from)); }
+  if (date_to)   { where.push(`COALESCE(closed_at, opened_at) <= $${i++}`); vals.push(new Date(date_to)); }
+
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+
+  try {
+    const kpisSql = `
+      SELECT
+        COUNT(*)::int AS total_trades,
+        SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END)::int AS closed_trades,
+        SUM(CASE WHEN pnl > 0 AND status='CLOSED' THEN 1 ELSE 0 END)::int AS wins,
+        SUM(CASE WHEN pnl <= 0 AND status='CLOSED' THEN 1 ELSE 0 END)::int AS losses,
+        COALESCE(SUM(pnl),0) AS gross_pnl,
+        COALESCE(SUM(fees),0) AS total_fees,
+        COALESCE(SUM(pnl - fees),0) AS net_pnl,
+        COALESCE(AVG(NULLIF(pnl,0)) FILTER (WHERE pnl > 0),0) AS avg_win,
+        COALESCE(AVG(pnl) FILTER (WHERE pnl < 0),0) AS avg_loss,
+        COALESCE(MAX(pnl),0) AS best_trade,
+        COALESCE(MIN(pnl),0) AS worst_trade,
+        COALESCE(AVG(duration_sec),0)::int AS avg_duration_sec,
+        COALESCE(SUM(ABS(qty)),0) AS volume
+      FROM positions
+      ${whereSql}
+    `;
+
+    const { rows: [kpis] } = await pool.query(kpisSql, vals);
+    const winRate = kpis.closed_trades > 0 ? (kpis.wins / kpis.closed_trades) : 0;
+
+    // Daily net PnL for charts
+    const dailySql = `
+      SELECT date_trunc('day', COALESCE(closed_at, opened_at))::date AS day,
+             SUM(COALESCE(pnl,0) - COALESCE(fees,0)) AS net_pnl
+      FROM positions
+      ${whereSql}
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `;
+    const { rows: daily } = await pool.query(dailySql, vals);
+
+    // Build equity curve client-side or here
+    let eq = 0; const equityCurve = daily.map(d => ({ day: d.day, equity: (eq += Number(d.net_pnl)) }));
+
+    res.json({
+      ...kpis,
+      win_rate: winRate,
+      daily,
+      equity_curve: equityCurve
+    });
+  } catch (err) {
+    console.error('GET /positions/me/summary error', err);
+    res.status(500).json({ message: 'Failed to fetch positions summary.' });
+  }
+});
+
+
+
+
+// GET /positions/me/export
+app.get('/positions/me/export', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const { symbol, status, side, date_from, date_to } = req.query;
+
+  const where = ['user_id = $1'];
+  const vals = [userId];
+  let i = vals.length + 1;
+
+  if (symbol) { where.push(`symbol = $${i++}`); vals.push(symbol); }
+  if (status) { where.push(`status = $${i++}`); vals.push(status); }
+  if (side)   { where.push(`side = $${i++}`); vals.push(side); }
+  if (date_from) { where.push(`COALESCE(closed_at, opened_at) >= $${i++}`); vals.push(new Date(date_from)); }
+  if (date_to)   { where.push(`COALESCE(closed_at, opened_at) <= $${i++}`); vals.push(new Date(date_to)); }
+
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+
+  try {
+    const sql = `
+      SELECT id, symbol, side, qty, entry_price, exit_price, pnl, fees, status,
+             opened_at, closed_at, duration_sec, strategy
+      FROM positions
+      ${whereSql}
+      ORDER BY opened_at DESC
+    `;
+    const { rows } = await pool.query(sql, vals);
+
+    // CSV header
+    let csv = 'id,symbol,side,qty,entry_price,exit_price,pnl,fees,status,opened_at,closed_at,duration_sec,strategy\n';
+    for (const r of rows) {
+      const line = [
+        r.id, r.symbol, r.side, r.qty, r.entry_price, r.exit_price,
+        r.pnl, r.fees, r.status,
+        r.opened_at?.toISOString?.() || '',
+        r.closed_at?.toISOString?.() || '',
+        r.duration_sec || '',
+        (r.strategy || '').replaceAll(',', ';')
+      ].join(',');
+      csv += line + '\n';
+    }
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="positions.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error('GET /positions/me/export error', err);
+    res.status(500).json({ message: 'Failed to export positions.' });
+  }
+});
+
+
+// POST /positions (used by your bot)
+// body: { symbol, side, qty, entry_price, exit_price, pnl, fees, status, opened_at, closed_at, strategy, notes }
+app.post('/positions', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const {
+    symbol, side, qty = 1, entry_price, exit_price = null, pnl = 0, fees = 0,
+    status = 'RUNNING', opened_at = new Date(), closed_at = null, strategy = 'AI_BOT_V1', notes = null
+  } = req.body;
+
+  try {
+    const durationSec = closed_at ? Math.round((new Date(closed_at) - new Date(opened_at)) / 1000) : null;
+    const sql = `
+      INSERT INTO positions (user_id, symbol, side, qty, entry_price, exit_price, pnl, fees, status, opened_at, closed_at, duration_sec, strategy, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      RETURNING *
+    `;
+    const vals = [userId, symbol, side, qty, entry_price, exit_price, pnl, fees, status, opened_at, closed_at, durationSec, strategy, notes];
+    const { rows: [row] } = await pool.query(sql, vals);
+    res.json(row);
+  } catch (err) {
+    console.error('POST /positions error', err);
+    res.status(500).json({ message: 'Failed to create position.' });
+  }
+});
+
+
+
 // ===== Server Init =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
