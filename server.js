@@ -514,224 +514,306 @@ app.post('/deposit', authenticate, async (req, res) => {
 
 
 
-// GET /positions/me
-// Query params:
-// page (default 1), page_size (default 25, max 200)
-// symbol, status (RUNNING|CLOSED|CANCELLED), date_from, date_to (ISO),
-// min_pnl, max_pnl, side (BUY|SELL), sort_by (opened_at|closed_at|pnl|fees), sort_dir (asc|desc)
-app.get('/positions/me', authenticate, async (req, res) => {
-  const userId = req.user.id;
-  const {
-    page = '1',
-    page_size = '25',
-    symbol,
-    status,
-    side,
-    date_from,
-    date_to,
-    min_pnl,
-    max_pnl,
-    sort_by = 'opened_at',
-    sort_dir = 'desc'
-  } = req.query;
+// ======= PAYMENTS =======
+// ==== TOP: requires ====
+const Stripe = require('stripe');
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
-  const p = Math.max(parseInt(page) || 1, 1);
-  const ps = Math.min(Math.max(parseInt(page_size) || 25, 1), 200);
-  const offset = (p - 1) * ps;
+const coinbase = require('coinbase-commerce-node');
+const { Client, resources: { Charge } } = coinbase;
+Client.init(process.env.COINBASE_COMMERCE_API_KEY);
 
-  const where = ['user_id = $1'];
-  const vals = [userId];
-  let i = vals.length + 1;
+// raw body for webhook sig verification
+const getRawBody = require('raw-body');
 
-  if (symbol) { where.push(`symbol = $${i++}`); vals.push(symbol); }
-  if (status) { where.push(`status = $${i++}`); vals.push(status); }
-  if (side)   { where.push(`side = $${i++}`); vals.push(side); }
-  if (date_from) { where.push(`COALESCE(closed_at, opened_at) >= $${i++}`); vals.push(new Date(date_from)); }
-  if (date_to)   { where.push(`COALESCE(closed_at, opened_at) <= $${i++}`); vals.push(new Date(date_to)); }
-  if (min_pnl)   { where.push(`pnl >= $${i++}`); vals.push(min_pnl); }
-  if (max_pnl)   { where.push(`pnl <= $${i++}`); vals.push(max_pnl); }
+// ==== BODY PARSERS ====
+// Keep JSON for normal routes
+app.use(express.json());
+// Add raw route bodies only for these webhook paths (before your general app.use(express.json()) if needed)
+const stripeWebhookPath = '/webhooks/stripe';
+const coinbaseWebhookPath = '/webhooks/coinbase';
+app.post(stripeWebhookPath, express.raw({ type: 'application/json' }), stripeWebhookHandler);
+app.post(coinbaseWebhookPath, express.raw({ type: 'application/json' }), coinbaseWebhookHandler);
 
-  const sortable = new Set(['opened_at','closed_at','pnl','fees']);
-  const sb = sortable.has(String(sort_by)) ? String(sort_by) : 'opened_at';
-  const sd = String(sort_dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-
-  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
+// ===== Helpers =====
+async function creditUserBalanceTx(client, userId, cents) {
+  // atomically: mark deposit confirmed + credit users.balance
+  await client.query('BEGIN');
   try {
-    const countSql = `SELECT COUNT(*) AS cnt FROM positions ${whereSql}`;
-    const { rows: [{ cnt }] } = await pool.query(countSql, vals);
+    await client.query(`UPDATE users SET balance = COALESCE(balance,0) + $1/100.0 WHERE id = $2`, [cents, userId]);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  }
+}
 
-    const sql = `
-      SELECT id, symbol, side, qty, entry_price, exit_price, pnl, fees, status,
-             opened_at, closed_at, duration_sec, strategy
-      FROM positions
-      ${whereSql}
-      ORDER BY ${sb} ${sd}
-      LIMIT ${ps} OFFSET ${offset}
-    `;
-    const { rows } = await pool.query(sql, vals);
+// ===== Create FIAT intent (Stripe) =====
+app.post('/deposits/fiat/create', authenticate, async (req, res) => {
+  try {
+    const { amount, currency = 'usd', idempotency_key } = req.body; // amount in major units
+    if (!amount || Number(amount) <= 0) return res.status(400).json({ message: 'Invalid amount' });
 
-    res.json({
-      page: p,
-      page_size: ps,
-      total: Number(cnt),
-      pages: Math.ceil(Number(cnt) / ps),
-      data: rows
-    });
+    const amount_cents = Math.round(Number(amount) * 100);
+    const client = await pool.connect();
+    let dep;
+    try {
+      await client.query('BEGIN');
+      const { rows: [row] } = await client.query(
+        `INSERT INTO deposits (user_id, provider, type, amount_cents, currency, status, idempotency_key)
+         VALUES ($1,'stripe','fiat',$2,$3,'pending',$4) RETURNING *`,
+        [req.user.id, amount_cents, currency.toLowerCase(), idempotency_key || null]
+      );
+      dep = row;
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; }
+    finally { client.release(); }
+
+    const pi = await stripe.paymentIntents.create({
+      amount: amount_cents,
+      currency: currency.toLowerCase(),
+      automatic_payment_methods: { enabled: true },
+      metadata: { deposit_id: dep.id, user_id: req.user.id }
+    }, idempotency_key ? { idempotencyKey: idempotency_key } : undefined);
+
+    await pool.query(`UPDATE deposits SET provider_ref = $1 WHERE id = $2`, [pi.id, dep.id]);
+
+    res.json({ payment_intent_client_secret: pi.client_secret, deposit_id: dep.id });
   } catch (err) {
-    console.error('GET /positions/me error', err);
-    res.status(500).json({ message: 'Failed to fetch positions.' });
+    console.error('create fiat intent error:', err);
+    res.status(500).json({ message: 'Failed to create deposit' });
   }
 });
 
-
-
-
-// GET /positions/me/summary
-app.get('/positions/me/summary', authenticate, async (req, res) => {
-  const userId = req.user.id;
-  const { date_from, date_to, symbol, status, side } = req.query;
-
-  const where = ['user_id = $1'];
-  const vals = [userId];
-  let i = vals.length + 1;
-
-  if (symbol) { where.push(`symbol = $${i++}`); vals.push(symbol); }
-  if (status) { where.push(`status = $${i++}`); vals.push(status); }
-  if (side)   { where.push(`side = $${i++}`); vals.push(side); }
-  if (date_from) { where.push(`COALESCE(closed_at, opened_at) >= $${i++}`); vals.push(new Date(date_from)); }
-  if (date_to)   { where.push(`COALESCE(closed_at, opened_at) <= $${i++}`); vals.push(new Date(date_to)); }
-
-  const whereSql = `WHERE ${where.join(' AND ')}`;
-
+// ===== Stripe webhook =====
+async function stripeWebhookHandler(req, res) {
+  let event;
   try {
-    const kpisSql = `
-      SELECT
-        COUNT(*)::int AS total_trades,
-        SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END)::int AS closed_trades,
-        SUM(CASE WHEN pnl > 0 AND status='CLOSED' THEN 1 ELSE 0 END)::int AS wins,
-        SUM(CASE WHEN pnl <= 0 AND status='CLOSED' THEN 1 ELSE 0 END)::int AS losses,
-        COALESCE(SUM(pnl),0) AS gross_pnl,
-        COALESCE(SUM(fees),0) AS total_fees,
-        COALESCE(SUM(pnl - fees),0) AS net_pnl,
-        COALESCE(AVG(NULLIF(pnl,0)) FILTER (WHERE pnl > 0),0) AS avg_win,
-        COALESCE(AVG(pnl) FILTER (WHERE pnl < 0),0) AS avg_loss,
-        COALESCE(MAX(pnl),0) AS best_trade,
-        COALESCE(MIN(pnl),0) AS worst_trade,
-        COALESCE(AVG(duration_sec),0)::int AS avg_duration_sec,
-        COALESCE(SUM(ABS(qty)),0) AS volume
-      FROM positions
-      ${whereSql}
-    `;
-
-    const { rows: [kpis] } = await pool.query(kpisSql, vals);
-    const winRate = kpis.closed_trades > 0 ? (kpis.wins / kpis.closed_trades) : 0;
-
-    // Daily net PnL for charts
-    const dailySql = `
-      SELECT date_trunc('day', COALESCE(closed_at, opened_at))::date AS day,
-             SUM(COALESCE(pnl,0) - COALESCE(fees,0)) AS net_pnl
-      FROM positions
-      ${whereSql}
-      GROUP BY 1
-      ORDER BY 1 ASC
-    `;
-    const { rows: daily } = await pool.query(dailySql, vals);
-
-    // Build equity curve client-side or here
-    let eq = 0; const equityCurve = daily.map(d => ({ day: d.day, equity: (eq += Number(d.net_pnl)) }));
-
-    res.json({
-      ...kpis,
-      win_rate: winRate,
-      daily,
-      equity_curve: equityCurve
-    });
+    const sig = req.headers['stripe-signature'];
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    console.error('GET /positions/me/summary error', err);
-    res.status(500).json({ message: 'Failed to fetch positions summary.' });
+    console.error('Stripe wh sig error:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'payment_intent.succeeded') {
+    const pi = event.data.object;
+    const providerRef = pi.id;
+    const { rows } = await pool.query(`SELECT * FROM deposits WHERE provider_ref = $1`, [providerRef]);
+    if (!rows.length) return res.json({ ok: true });
+
+    const dep = rows[0];
+    if (dep.status === 'confirmed') return res.json({ ok: true }); // idempotent
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`UPDATE deposits SET status='confirmed' WHERE id = $1`, [dep.id]);
+      await creditUserBalanceTx(client, dep.user_id, dep.amount_cents);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK'); throw e;
+    } finally { client.release(); }
+
+    return res.json({ ok: true });
+  }
+
+  // handle failures/cancellations if you want
+  res.json({ received: true });
+}
+
+// ===== Create CRYPTO charge (Coinbase Commerce) =====
+app.post('/deposits/crypto/create', authenticate, async (req, res) => {
+  try {
+    const { amount, currency = 'USD', idempotency_key } = req.body; // display currency
+    if (!amount || Number(amount) <= 0) return res.status(400).json({ message: 'Invalid amount' });
+
+    const amount_cents = Math.round(Number(amount) * 100);
+
+    // Create DB row first
+    const client = await pool.connect();
+    let dep;
+    try {
+      await client.query('BEGIN');
+      const { rows: [row] } = await client.query(
+        `INSERT INTO deposits (user_id, provider, type, amount_cents, currency, status, idempotency_key)
+         VALUES ($1,'coinbase','crypto',$2,$3,'pending',$4) RETURNING *`,
+        [req.user.id, amount_cents, currency.toLowerCase(), idempotency_key || null]
+      );
+      dep = row;
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; }
+    finally { client.release(); }
+
+    // Coinbase hosted charge
+    const charge = await Charge.create({
+      name: 'Glorivest Deposit',
+      description: `Deposit ${amount} ${currency.toUpperCase()}`,
+      pricing_type: 'fixed_price',
+      local_price: { amount: String(amount), currency: currency.toUpperCase() },
+      metadata: { deposit_id: dep.id, user_id: req.user.id },
+      redirect_url: `${process.env.APP_BASE_URL}/dashboard.html#deposit-success`,
+      cancel_url:   `${process.env.APP_BASE_URL}/dashboard.html#deposit-cancel`
+    });
+
+    await pool.query(`UPDATE deposits SET provider_ref = $1, meta = meta || $2::jsonb WHERE id = $3`,
+      [charge.id, JSON.stringify({ hosted_url: charge.hosted_url }), dep.id]);
+
+    res.json({ hosted_url: charge.hosted_url, charge_id: charge.id, deposit_id: dep.id });
+  } catch (err) {
+    console.error('create crypto charge error:', err);
+    res.status(500).json({ message: 'Failed to create crypto deposit' });
   }
 });
 
-
-
-
-// GET /positions/me/export
-app.get('/positions/me/export', authenticate, async (req, res) => {
-  const userId = req.user.id;
-  const { symbol, status, side, date_from, date_to } = req.query;
-
-  const where = ['user_id = $1'];
-  const vals = [userId];
-  let i = vals.length + 1;
-
-  if (symbol) { where.push(`symbol = $${i++}`); vals.push(symbol); }
-  if (status) { where.push(`status = $${i++}`); vals.push(status); }
-  if (side)   { where.push(`side = $${i++}`); vals.push(side); }
-  if (date_from) { where.push(`COALESCE(closed_at, opened_at) >= $${i++}`); vals.push(new Date(date_from)); }
-  if (date_to)   { where.push(`COALESCE(closed_at, opened_at) <= $${i++}`); vals.push(new Date(date_to)); }
-
-  const whereSql = `WHERE ${where.join(' AND ')}`;
-
+// ===== Coinbase webhook =====
+async function coinbaseWebhookHandler(req, res) {
   try {
-    const sql = `
-      SELECT id, symbol, side, qty, entry_price, exit_price, pnl, fees, status,
-             opened_at, closed_at, duration_sec, strategy
-      FROM positions
-      ${whereSql}
-      ORDER BY opened_at DESC
-    `;
-    const { rows } = await pool.query(sql, vals);
+    const sig = req.headers['x-cc-webhook-signature'];
+    const raw = req.body; // already raw
+    const event = coinbase.Webhook.verifyEventBody(
+      raw,
+      sig,
+      process.env.COINBASE_COMMERCE_WEBHOOK_SECRET
+    );
 
-    // CSV header
-    let csv = 'id,symbol,side,qty,entry_price,exit_price,pnl,fees,status,opened_at,closed_at,duration_sec,strategy\n';
-    for (const r of rows) {
-      const line = [
-        r.id, r.symbol, r.side, r.qty, r.entry_price, r.exit_price,
-        r.pnl, r.fees, r.status,
-        r.opened_at?.toISOString?.() || '',
-        r.closed_at?.toISOString?.() || '',
-        r.duration_sec || '',
-        (r.strategy || '').replaceAll(',', ';')
-      ].join(',');
-      csv += line + '\n';
+    if (event.type === 'charge:confirmed' || event.type === 'charge:resolved') {
+      const charge = event.data;
+      const providerRef = charge.id;
+      const { rows } = await pool.query(`SELECT * FROM deposits WHERE provider_ref = $1`, [providerRef]);
+      if (!rows.length) return res.json({ ok: true });
+
+      const dep = rows[0];
+      if (dep.status === 'confirmed') return res.json({ ok: true });
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`UPDATE deposits SET status='confirmed' WHERE id = $1`, [dep.id]);
+        await creditUserBalanceTx(client, dep.user_id, dep.amount_cents);
+        await client.query('COMMIT');
+      } catch (e) { await client.query('ROLLBACK'); throw e; }
+      finally { client.release(); }
+
+      return res.json({ ok: true });
     }
 
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="positions.csv"');
-    res.send(csv);
+    if (event.type === 'charge:failed' || event.type === 'charge:delayed') {
+      const charge = event.data;
+      await pool.query(`UPDATE deposits SET status='failed' WHERE provider_ref = $1`, [charge.id]);
+    }
+
+    res.json({ received: true });
   } catch (err) {
-    console.error('GET /positions/me/export error', err);
-    res.status(500).json({ message: 'Failed to export positions.' });
+    console.error('Coinbase wh error:', err);
+    res.status(400).send('Bad webhook');
   }
+}
+
+
+
+
+
+
+
+async function startCryptoDeposit(amount, currency='USD'){
+  const res = await fetch('/deposits/crypto/create', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${localStorage.getItem('token')}` },
+    body: JSON.stringify({ amount, currency, idempotency_key: crypto.randomUUID() })
+  });
+  const { hosted_url, deposit_id } = await res.json();
+  window.open(hosted_url, '_blank');
+
+  // poll status (simple)
+  const poll = setInterval(async () => {
+    const r = await fetch(`/deposits/${deposit_id}`, { headers:{ Authorization:`Bearer ${localStorage.getItem('token')}` }});
+    const d = await r.json();
+    if (d.status === 'confirmed') {
+      clearInterval(poll);
+      alert('Crypto deposit confirmed!');
+      document.dispatchEvent(new CustomEvent('balances:refresh'));
+    }
+  }, 5000);
+}
+
+
+// ====== Deposits =======
+app.get('/deposits/:id', authenticate, async (req, res) => {
+  const { rows } = await pool.query(`SELECT id, user_id, status, amount_cents, currency, provider, type FROM deposits WHERE id = $1 AND user_id = $2`, [req.params.id, req.user.id]);
+  if (!rows.length) return res.status(404).json({ message: 'Not found' });
+  res.json(rows[0]);
 });
 
 
-// POST /positions (used by your bot)
-// body: { symbol, side, qty, entry_price, exit_price, pnl, fees, status, opened_at, closed_at, strategy, notes }
-app.post('/positions', authenticate, async (req, res) => {
-  const userId = req.user.id;
-  const {
-    symbol, side, qty = 1, entry_price, exit_price = null, pnl = 0, fees = 0,
-    status = 'RUNNING', opened_at = new Date(), closed_at = null, strategy = 'AI_BOT_V1', notes = null
-  } = req.body;
 
+// ====== STRIPE =======
+// server.js (back‑end)
+// Stripe
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Coinbase Commerce
+const coinbase = require('coinbase-commerce-node');
+const { Charge } = coinbase.resources;
+coinbase.Client.init(process.env.COINBASE_COMMERCE_API_KEY);
+
+// Create Stripe Checkout Session
+app.post('/payments/stripe/checkout', authenticate, async (req, res) => {
   try {
-    const durationSec = closed_at ? Math.round((new Date(closed_at) - new Date(opened_at)) / 1000) : null;
-    const sql = `
-      INSERT INTO positions (user_id, symbol, side, qty, entry_price, exit_price, pnl, fees, status, opened_at, closed_at, duration_sec, strategy, notes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-      RETURNING *
-    `;
-    const vals = [userId, symbol, side, qty, entry_price, exit_price, pnl, fees, status, opened_at, closed_at, durationSec, strategy, notes];
-    const { rows: [row] } = await pool.query(sql, vals);
-    res.json(row);
+    const { amount, currency='usd', idempotency_key } = req.body;
+    if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum deposit is $20' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      customer_email: req.user.email,
+      line_items: [{
+        price_data: {
+          currency,
+          product_data: { name: 'Glorivest Deposit' },
+          unit_amount: Math.round(Number(amount) * 100),
+        },
+        quantity: 1,
+      }],
+      success_url: process.env.APP_BASE_URL + '/?deposit=success',
+      cancel_url:  process.env.APP_BASE_URL + '/?deposit=cancel',
+      metadata: { user_id: req.user.id }
+    }, { idempotencyKey: idempotency_key });
+
+    res.json({ checkout_url: session.url });
   } catch (err) {
-    console.error('POST /positions error', err);
-    res.status(500).json({ message: 'Failed to create position.' });
+    console.error('Stripe checkout error:', err);
+    res.status(500).json({ message: 'Failed to start checkout' });
   }
 });
 
+// Create Coinbase Commerce Charge
+app.post('/payments/coinbase/charge', authenticate, async (req, res) => {
+  try {
+    const { amount, currency='USD', idempotency_key } = req.body;
+    if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum deposit is $20' });
+
+    const charge = await Charge.create({
+      name: 'Glorivest Deposit',
+      description: `User #${req.user.id} deposit`,
+      local_price: { amount: String(Number(amount).toFixed(2)), currency },
+      pricing_type: 'fixed_price',
+      metadata: { user_id: String(req.user.id) }
+    });
+
+    // Save a deposit row if you track them (recommended)
+    // await pool.query(`INSERT INTO deposits(...) VALUES (...)`)
+
+    res.json({
+      hosted_url: charge.hosted_url,
+      deposit_id: charge.id, // use charge.id to look up later via webhook table, or map to your deposits row
+    });
+  } catch (err) {
+    console.error('Coinbase charge error:', err);
+    res.status(500).json({ message: 'Failed to create crypto charge' });
+  }
+});
 
 
 // ===== Server Init =====
