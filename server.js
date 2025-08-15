@@ -490,138 +490,7 @@ app.get('/bot/status', authenticate, async (req, res) => {
 
 
 
-
-// ===== DEPOSIT =====
-app.post('/deposit', authenticate, async (req, res) => {
-  const userId = req.user.id;
-  const { amount } = req.body;
-
-  if (!amount || isNaN(amount)) return res.status(400).json({ message: 'Invalid amount' });
-
-  try {
-    await pool.query(`
-      UPDATE users
-      SET balance = balance + $1
-      WHERE id = $2
-    `, [amount, userId]);
-
-    res.json({ message: `Deposited $${amount}` });
-  } catch (err) {
-    console.error('Deposit error:', err);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-
-
 // ======= PAYMENTS =======
-// ==== TOP: requires ====
-const Stripe = require('stripe');
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-
-const coinbase = require('coinbase-commerce-node');
-const { Client, resources: { Charge } } = coinbase;
-Client.init(process.env.COINBASE_COMMERCE_API_KEY);
-
-// raw body for webhook sig verification
-const getRawBody = require('raw-body');
-
-// ==== BODY PARSERS ====
-// Keep JSON for normal routes
-app.use(express.json());
-// Add raw route bodies only for these webhook paths (before your general app.use(express.json()) if needed)
-const stripeWebhookPath = '/webhooks/stripe';
-const coinbaseWebhookPath = '/webhooks/coinbase';
-app.post(stripeWebhookPath, express.raw({ type: 'application/json' }), stripeWebhookHandler);
-app.post(coinbaseWebhookPath, express.raw({ type: 'application/json' }), coinbaseWebhookHandler);
-
-// ===== Helpers =====
-async function creditUserBalanceTx(client, userId, cents) {
-  // atomically: mark deposit confirmed + credit users.balance
-  await client.query('BEGIN');
-  try {
-    await client.query(`UPDATE users SET balance = COALESCE(balance,0) + $1/100.0 WHERE id = $2`, [cents, userId]);
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  }
-}
-
-// ===== Create FIAT intent (Stripe) =====
-app.post('/deposits/fiat/create', authenticate, async (req, res) => {
-  try {
-    const { amount, currency = 'usd', idempotency_key } = req.body; // amount in major units
-    if (!amount || Number(amount) <= 0) return res.status(400).json({ message: 'Invalid amount' });
-
-    const amount_cents = Math.round(Number(amount) * 100);
-    const client = await pool.connect();
-    let dep;
-    try {
-      await client.query('BEGIN');
-      const { rows: [row] } = await client.query(
-        `INSERT INTO deposits (user_id, provider, type, amount_cents, currency, status, idempotency_key)
-         VALUES ($1,'stripe','fiat',$2,$3,'pending',$4) RETURNING *`,
-        [req.user.id, amount_cents, currency.toLowerCase(), idempotency_key || null]
-      );
-      dep = row;
-      await client.query('COMMIT');
-    } catch (e) { await client.query('ROLLBACK'); throw e; }
-    finally { client.release(); }
-
-    const pi = await stripe.paymentIntents.create({
-      amount: amount_cents,
-      currency: currency.toLowerCase(),
-      automatic_payment_methods: { enabled: true },
-      metadata: { deposit_id: dep.id, user_id: req.user.id }
-    }, idempotency_key ? { idempotencyKey: idempotency_key } : undefined);
-
-    await pool.query(`UPDATE deposits SET provider_ref = $1 WHERE id = $2`, [pi.id, dep.id]);
-
-    res.json({ payment_intent_client_secret: pi.client_secret, deposit_id: dep.id });
-  } catch (err) {
-    console.error('create fiat intent error:', err);
-    res.status(500).json({ message: 'Failed to create deposit' });
-  }
-});
-
-// ===== Stripe webhook =====
-async function stripeWebhookHandler(req, res) {
-  let event;
-  try {
-    const sig = req.headers['stripe-signature'];
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error('Stripe wh sig error:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  if (event.type === 'payment_intent.succeeded') {
-    const pi = event.data.object;
-    const providerRef = pi.id;
-    const { rows } = await pool.query(`SELECT * FROM deposits WHERE provider_ref = $1`, [providerRef]);
-    if (!rows.length) return res.json({ ok: true });
-
-    const dep = rows[0];
-    if (dep.status === 'confirmed') return res.json({ ok: true }); // idempotent
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(`UPDATE deposits SET status='confirmed' WHERE id = $1`, [dep.id]);
-      await creditUserBalanceTx(client, dep.user_id, dep.amount_cents);
-      await client.query('COMMIT');
-    } catch (e) {
-      await client.query('ROLLBACK'); throw e;
-    } finally { client.release(); }
-
-    return res.json({ ok: true });
-  }
-
-  // handle failures/cancellations if you want
-  res.json({ received: true });
-}
-
 // ===== Create CRYPTO charge (Coinbase Commerce) =====
 app.post('/deposits/crypto/create', authenticate, async (req, res) => {
   try {
@@ -715,29 +584,6 @@ async function coinbaseWebhookHandler(req, res) {
 
 
 
-
-async function startCryptoDeposit(amount, currency='USD'){
-  const res = await fetch('/deposits/crypto/create', {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${localStorage.getItem('token')}` },
-    body: JSON.stringify({ amount, currency, idempotency_key: crypto.randomUUID() })
-  });
-  const { hosted_url, deposit_id } = await res.json();
-  window.open(hosted_url, '_blank');
-
-  // poll status (simple)
-  const poll = setInterval(async () => {
-    const r = await fetch(`/deposits/${deposit_id}`, { headers:{ Authorization:`Bearer ${localStorage.getItem('token')}` }});
-    const d = await r.json();
-    if (d.status === 'confirmed') {
-      clearInterval(poll);
-      alert('Crypto deposit confirmed!');
-      document.dispatchEvent(new CustomEvent('balances:refresh'));
-    }
-  }, 5000);
-}
-
-
 // ====== Deposits =======
 app.get('/deposits/:id', authenticate, async (req, res) => {
   const { rows } = await pool.query(`SELECT id, user_id, status, amount_cents, currency, provider, type FROM deposits WHERE id = $1 AND user_id = $2`, [req.params.id, req.user.id]);
@@ -748,7 +594,6 @@ app.get('/deposits/:id', authenticate, async (req, res) => {
 
 
 // ====== STRIPE =======
-// server.js (back‑end)
 // Stripe
 const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
