@@ -490,171 +490,198 @@ app.get('/bot/status', authenticate, async (req, res) => {
 
 
 
-// // ======= PAYMENTS =======
-// // ===== Create CRYPTO charge (Coinbase Commerce) =====
-// app.post('/deposits/crypto/create', authenticate, async (req, res) => {
-//   try {
-//     const { amount, currency = 'USD', idempotency_key } = req.body; // display currency
-//     if (!amount || Number(amount) <= 0) return res.status(400).json({ message: 'Invalid amount' });
+// ======= PAYMENTS =======
 
-//     const amount_cents = Math.round(Number(amount) * 100);
+// ===== Create CRYPTO charge (Coinbase Commerce) =====
+app.post('/deposits/crypto/create', authenticate, async (req, res) => {
+  try {
+    const { amount, currency = 'USD', idempotency_key } = req.body;
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
 
-//     // Create DB row first
-//     const client = await pool.connect();
-//     let dep;
-//     try {
-//       await client.query('BEGIN');
-//       const { rows: [row] } = await client.query(
-//         `INSERT INTO deposits (user_id, provider, type, amount_cents, currency, status, idempotency_key)
-//          VALUES ($1,'coinbase','crypto',$2,$3,'pending',$4) RETURNING *`,
-//         [req.user.id, amount_cents, currency.toLowerCase(), idempotency_key || null]
-//       );
-//       dep = row;
-//       await client.query('COMMIT');
-//     } catch (e) { await client.query('ROLLBACK'); throw e; }
-//     finally { client.release(); }
+    const amount_cents = Math.round(Number(amount) * 100);
 
-//     // Coinbase hosted charge
-//     const charge = await Charge.create({
-//       name: 'Glorivest Deposit',
-//       description: `Deposit ${amount} ${currency.toUpperCase()}`,
-//       pricing_type: 'fixed_price',
-//       local_price: { amount: String(amount), currency: currency.toUpperCase() },
-//       metadata: { deposit_id: dep.id, user_id: req.user.id },
-//       redirect_url: `${process.env.APP_BASE_URL}/dashboard.html#deposit-success`,
-//       cancel_url:   `${process.env.APP_BASE_URL}/dashboard.html#deposit-cancel`
-//     });
+    // Create DB row first
+    const client = await pool.connect();
+    let dep;
+    try {
+      await client.query('BEGIN');
+      const { rows: [row] } = await client.query(
+        `INSERT INTO deposits (user_id, provider, type, amount_cents, currency, status, idempotency_key)
+         VALUES ($1, 'coinbase', 'crypto', $2, $3, 'pending', $4)
+         RETURNING *`,
+        [req.user.id, amount_cents, currency.toLowerCase(), idempotency_key || null]
+      );
+      dep = row;
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
-//     await pool.query(`UPDATE deposits SET provider_ref = $1, meta = meta || $2::jsonb WHERE id = $3`,
-//       [charge.id, JSON.stringify({ hosted_url: charge.hosted_url }), dep.id]);
+    // Coinbase hosted charge
+    const charge = await Charge.create({
+      name: 'Glorivest Deposit',
+      description: `Deposit ${amount} ${currency.toUpperCase()}`,
+      pricing_type: 'fixed_price',
+      local_price: { amount: String(amount), currency: currency.toUpperCase() },
+      metadata: { deposit_id: dep.id, user_id: req.user.id },
+      redirect_url: `${process.env.APP_BASE_URL}/dashboard.html#deposit-success`,
+      cancel_url: `${process.env.APP_BASE_URL}/dashboard.html#deposit-cancel`
+    });
 
-//     res.json({ hosted_url: charge.hosted_url, charge_id: charge.id, deposit_id: dep.id });
-//   } catch (err) {
-//     console.error('create crypto charge error:', err);
-//     res.status(500).json({ message: 'Failed to create crypto deposit' });
-//   }
-// });
+    await pool.query(
+      `UPDATE deposits SET provider_ref = $1, meta = meta || $2::jsonb WHERE id = $3`,
+      [charge.id, JSON.stringify({ hosted_url: charge.hosted_url }), dep.id]
+    );
 
-// // ===== Coinbase webhook =====
-// async function coinbaseWebhookHandler(req, res) {
-//   try {
-//     const sig = req.headers['x-cc-webhook-signature'];
-//     const raw = req.body; // already raw
-//     const event = coinbase.Webhook.verifyEventBody(
-//       raw,
-//       sig,
-//       process.env.COINBASE_COMMERCE_WEBHOOK_SECRET
-//     );
+    res.json({ hosted_url: charge.hosted_url, charge_id: charge.id, deposit_id: dep.id });
+  } catch (err) {
+    console.error('create crypto charge error:', err);
+    res.status(500).json({ message: 'Failed to create crypto deposit' });
+  }
+});
 
-//     if (event.type === 'charge:confirmed' || event.type === 'charge:resolved') {
-//       const charge = event.data;
-//       const providerRef = charge.id;
-//       const { rows } = await pool.query(`SELECT * FROM deposits WHERE provider_ref = $1`, [providerRef]);
-//       if (!rows.length) return res.json({ ok: true });
+// ===== Coinbase webhook =====
+async function coinbaseWebhookHandler(req, res) {
+  try {
+    const sig = req.headers['x-cc-webhook-signature'];
+    const raw = req.body;
+    const event = coinbase.Webhook.verifyEventBody(
+      raw,
+      sig,
+      process.env.COINBASE_COMMERCE_WEBHOOK_SECRET
+    );
 
-//       const dep = rows[0];
-//       if (dep.status === 'confirmed') return res.json({ ok: true });
+    if (event.type === 'charge:confirmed' || event.type === 'charge:resolved') {
+      const charge = event.data;
+      const providerRef = charge.id;
+      const { rows } = await pool.query(
+        `SELECT * FROM deposits WHERE provider_ref = $1`,
+        [providerRef]
+      );
+      if (!rows.length) return res.json({ ok: true });
 
-//       const client = await pool.connect();
-//       try {
-//         await client.query('BEGIN');
-//         await client.query(`UPDATE deposits SET status='confirmed' WHERE id = $1`, [dep.id]);
-//         await creditUserBalanceTx(client, dep.user_id, dep.amount_cents);
-//         await client.query('COMMIT');
-//       } catch (e) { await client.query('ROLLBACK'); throw e; }
-//       finally { client.release(); }
+      const dep = rows[0];
+      if (dep.status === 'confirmed') return res.json({ ok: true });
 
-//       return res.json({ ok: true });
-//     }
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `UPDATE deposits SET status = 'confirmed' WHERE id = $1`,
+          [dep.id]
+        );
+        await creditUserBalanceTx(client, dep.user_id, dep.amount_cents);
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
 
-//     if (event.type === 'charge:failed' || event.type === 'charge:delayed') {
-//       const charge = event.data;
-//       await pool.query(`UPDATE deposits SET status='failed' WHERE provider_ref = $1`, [charge.id]);
-//     }
+      return res.json({ ok: true });
+    }
 
-//     res.json({ received: true });
-//   } catch (err) {
-//     console.error('Coinbase wh error:', err);
-//     res.status(400).send('Bad webhook');
-//   }
-// }
+    if (event.type === 'charge:failed' || event.type === 'charge:delayed') {
+      const charge = event.data;
+      await pool.query(
+        `UPDATE deposits SET status = 'failed' WHERE provider_ref = $1`,
+        [charge.id]
+      );
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error('Coinbase wh error:', err);
+    res.status(400).send('Bad webhook');
+  }
+}
+
+// ====== Deposits =======
+app.get('/deposits/:id', authenticate, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, user_id, status, amount_cents, currency, provider, type 
+     FROM deposits 
+     WHERE id = $1 AND user_id = $2`,
+    [req.params.id, req.user.id]
+  );
+  if (!rows.length) return res.status(404).json({ message: 'Not found' });
+  res.json(rows[0]);
+});
+
+// ====== STRIPE =======
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Coinbase Commerce
+const coinbase = require('coinbase-commerce-node');
+const { Charge } = coinbase.resources;
+coinbase.Client.init(process.env.COINBASE_COMMERCE_API_KEY);
+
+// Create Stripe Checkout Session
+app.post('/payments/stripe/checkout', authenticate, async (req, res) => {
+  try {
+    const { amount, currency = 'usd', idempotency_key } = req.body;
+    if (!amount || amount < 20) {
+      return res.status(400).json({ message: 'Minimum deposit is $20' });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      customer_email: req.user.email,
+      line_items: [{
+        price_data: {
+          currency,
+          product_data: { name: 'Glorivest Deposit' },
+          unit_amount: Math.round(Number(amount) * 100)
+        },
+        quantity: 1
+      }],
+      success_url: process.env.APP_BASE_URL + '/?deposit=success',
+      cancel_url: process.env.APP_BASE_URL + '/?deposit=cancel',
+      metadata: { user_id: req.user.id }
+    }, { idempotencyKey: idempotency_key });
+
+    res.json({ checkout_url: session.url });
+  } catch (err) {
+    console.error('Stripe checkout error:', err);
+    res.status(500).json({ message: 'Failed to start checkout' });
+  }
+});
+
+// Create Coinbase Commerce Charge
+app.post('/payments/coinbase/charge', authenticate, async (req, res) => {
+  try {
+    const { amount, currency = 'USD', idempotency_key } = req.body;
+    if (!amount || amount < 20) {
+      return res.status(400).json({ message: 'Minimum deposit is $20' });
+    }
+
+    const charge = await Charge.create({
+      name: 'Glorivest Deposit',
+      description: `User #${req.user.id} deposit`,
+      local_price: { amount: String(Number(amount).toFixed(2)), currency },
+      pricing_type: 'fixed_price',
+      metadata: { user_id: String(req.user.id) }
+    });
+
+    res.json({
+      hosted_url: charge.hosted_url,
+      deposit_id: charge.id
+    });
+  } catch (err) {
+    console.error('Coinbase charge error:', err);
+    res.status(500).json({ message: 'Failed to create crypto charge' });
+  }
+});
 
 
-
-// // ====== Deposits =======
-// app.get('/deposits/:id', authenticate, async (req, res) => {
-//   const { rows } = await pool.query(`SELECT id, user_id, status, amount_cents, currency, provider, type FROM deposits WHERE id = $1 AND user_id = $2`, [req.params.id, req.user.id]);
-//   if (!rows.length) return res.status(404).json({ message: 'Not found' });
-//   res.json(rows[0]);
-// });
-
-
-// // ====== STRIPE =======
-// // Stripe
-// const Stripe = require('stripe');
-// const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
-// // Coinbase Commerce
-// const coinbase = require('coinbase-commerce-node');
-// const { Charge } = coinbase.resources;
-// coinbase.Client.init(process.env.COINBASE_COMMERCE_API_KEY);
-
-// // Create Stripe Checkout Session
-// app.post('/payments/stripe/checkout', authenticate, async (req, res) => {
-//   try {
-//     const { amount, currency='usd', idempotency_key } = req.body;
-//     if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum deposit is $20' });
-
-//     const session = await stripe.checkout.sessions.create({
-//       mode: 'payment',
-//       payment_method_types: ['card'],
-//       customer_email: req.user.email,
-//       line_items: [{
-//         price_data: {
-//           currency,
-//           product_data: { name: 'Glorivest Deposit' },
-//           unit_amount: Math.round(Number(amount) * 100),
-//         },
-//         quantity: 1,
-//       }],
-//       success_url: process.env.APP_BASE_URL + '/?deposit=success',
-//       cancel_url:  process.env.APP_BASE_URL + '/?deposit=cancel',
-//       metadata: { user_id: req.user.id }
-//     }, { idempotencyKey: idempotency_key });
-
-//     res.json({ checkout_url: session.url });
-//   } catch (err) {
-//     console.error('Stripe checkout error:', err);
-//     res.status(500).json({ message: 'Failed to start checkout' });
-//   }
-// });
-
-// // Create Coinbase Commerce Charge
-// app.post('/payments/coinbase/charge', authenticate, async (req, res) => {
-//   try {
-//     const { amount, currency='USD', idempotency_key } = req.body;
-//     if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum deposit is $20' });
-
-//     const charge = await Charge.create({
-//       name: 'Glorivest Deposit',
-//       description: `User #${req.user.id} deposit`,
-//       local_price: { amount: String(Number(amount).toFixed(2)), currency },
-//       pricing_type: 'fixed_price',
-//       metadata: { user_id: String(req.user.id) }
-//     });
-
-//     // Save a deposit row if you track them (recommended)
-//     // await pool.query(`INSERT INTO deposits(...) VALUES (...)`)
-
-//     res.json({
-//       hosted_url: charge.hosted_url,
-//       deposit_id: charge.id, // use charge.id to look up later via webhook table, or map to your deposits row
-//     });
-//   } catch (err) {
-//     console.error('Coinbase charge error:', err);
-//     res.status(500).json({ message: 'Failed to create crypto charge' });
-//   }
-// });
 
 
 // ===== Server Init =====
