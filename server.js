@@ -12,14 +12,184 @@ const sgMail = require('@sendgrid/mail');
 const app = express();
 app.set('trust proxy', 1);
 
+// === CRYPTO IMPORTS (add under your other requires) ===
+const crypto = require('crypto');
+const fetch = require('node-fetch'); // for TronGrid polling
+
+let TronWeb = require('tronweb');
+TronWeb = TronWeb && (TronWeb.default || TronWeb.TronWeb || TronWeb); // pick the constructor
+
+
+const {
+  Connection, Keypair, PublicKey, clusterApiUrl,
+  sendAndConfirmTransaction, Transaction
+} = require('@solana/web3.js');
+
+const {
+  getAssociatedTokenAddress,
+  getOrCreateAssociatedTokenAccount,
+  createTransferInstruction
+} = require('@solana/spl-token');
+
+
 // ===== Setup SendGrid =====
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // ===== PostgreSQL Connection =====
+// const pool = new Pool({
+//   connectionString: process.env.DATABASE_URL,
+//   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+// });
+// ===== PostgreSQL Connection =====
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  // Force SSL for RDS (dev-safe). In prod, use the AWS CA cert instead.
+  ssl: { rejectUnauthorized: false }
 });
+
+
+
+// === CRYPTO CONFIG & INIT ===
+const ENC_KEY_HEX = process.env.ENCRYPTION_KEY; // 64 hex chars
+if (!ENC_KEY_HEX || ENC_KEY_HEX.length !== 64) {
+  console.error('ENCRYPTION_KEY missing or invalid (use `openssl rand -hex 32`)');
+  process.exit(1);
+}
+const ENC_KEY = Buffer.from(ENC_KEY_HEX, 'hex');
+
+const TRON_FULLHOST = process.env.TRON_FULLHOST || 'https://api.trongrid.io';
+const TRONGRID_API_KEY = process.env.TRONGRID_API_KEY || '';
+const USDT_TRON_CONTRACT = process.env.USDT_TRON_CONTRACT || 'TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8';
+
+const SOLANA_RPC = process.env.SOLANA_RPC || clusterApiUrl('mainnet-beta');
+const SOL_USDC_MINT = new PublicKey(process.env.SOL_USDC_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+const WEBHOOK_HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET || '';
+const TRON_REQUIRED_CONFS = Number(process.env.TRON_REQUIRED_CONFS || 6);
+const SOL_REQUIRED_FINALITY = 'finalized';
+const SWEEP_DUST_THRESHOLD = Number(process.env.SWEEP_DUST_THRESHOLD || 0.5); // USDT, default 0.5
+
+// Init SDKs
+const tronWeb = new TronWeb({
+  fullHost: TRON_FULLHOST,
+  headers: TRONGRID_API_KEY ? { 'TRON-PRO-API-KEY': TRONGRID_API_KEY } : {}
+});
+const solConn = new Connection(SOLANA_RPC, 'confirmed');
+
+// === Small helpers ===
+function aesEncrypt(plainText) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENC_KEY, iv);
+  const enc = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, enc]).toString('base64'); // iv(12)+tag(16)+enc
+}
+function aesDecrypt(b64) {
+  const buf = Buffer.from(b64, 'base64');
+  const iv = buf.slice(0,12);
+  const tag = buf.slice(12,28);
+  const enc = buf.slice(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENC_KEY, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+}
+async function withTx(fn) {
+  const c = await pool.connect();
+  try { await c.query('BEGIN'); const r = await fn(c); await c.query('COMMIT'); return r; }
+  catch (e) { await c.query('ROLLBACK'); throw e; }
+  finally { c.release(); }
+}
+async function getUserBalance(userId) {
+  const { rows } = await pool.query('SELECT balance FROM users WHERE id=$1', [userId]);
+  return parseFloat(rows?.[0]?.balance || 0);
+}
+async function creditUserBalance(userId, amount) {
+  await pool.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2', [amount, userId]);
+}
+async function debitUserBalance(userId, amount) {
+  await withTx(async (c) => {
+    const { rows } = await c.query('SELECT balance FROM users WHERE id=$1 FOR UPDATE', [userId]);
+    const cur = parseFloat(rows?.[0]?.balance || 0);
+    if (cur < amount) throw new Error('Insufficient balance');
+    await c.query('UPDATE users SET balance=$1 WHERE id=$2', [cur - amount, userId]);
+  });
+}
+
+// Settings KV (used by Tron poller)
+async function getSetting(key) {
+  const { rows } = await pool.query('SELECT value FROM settings WHERE key=$1', [key]);
+  return rows[0]?.value || null;
+}
+async function setSetting(key, value) {
+  await pool.query(
+    'INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value',
+    [key, String(value)]
+  );
+}
+
+// Ensure the crypto tables exist (no-op if created already)
+(async function bootstrapCryptoTables() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS wallets (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        network TEXT NOT NULL,
+        token TEXT NOT NULL,
+        address TEXT NOT NULL UNIQUE,
+        token_account TEXT,
+        priv_enc TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS deposits (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        network TEXT NOT NULL,
+        token TEXT NOT NULL,
+        tx_hash TEXT NOT NULL UNIQUE,
+        from_addr TEXT,
+        to_addr TEXT,
+        amount NUMERIC(38,8) NOT NULL,
+        confirmations INTEGER DEFAULT 0,
+        status TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS withdrawals (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        network TEXT NOT NULL,
+        token TEXT NOT NULL,
+        to_addr TEXT NOT NULL,
+        amount NUMERIC(38,8) NOT NULL,
+        tx_hash TEXT,
+        status TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+    await pool.query(`
+      ALTER TABLE deposits
+      ADD COLUMN IF NOT EXISTS swept BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS sweep_tx_hash TEXT;
+    
+      ALTER TABLE withdrawals
+      ADD COLUMN IF NOT EXISTS fee_amount NUMERIC(38,8) DEFAULT 0;
+    `);
+    
+    console.log('✅ Crypto tables ready');
+  } catch (e) {
+    console.error('DB bootstrap (crypto) failed:', e);
+    process.exit(1);
+  }
+})();
+
+
 
 // ===== CORS Config =====
 const allowedOrigins = [
@@ -50,8 +220,17 @@ app.use(cors({
 
 app.options('*', cors());
 
+
 // ===== Middleware =====
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/webhooks/solana')) {
+      req.rawBody = buf;
+    }
+  }
+}));
+
+
 app.use(morgan('dev'));
 
 // ===== Test CORS =====
@@ -286,8 +465,6 @@ app.post('/signup', async (req, res) => {
 
 
 
-
-
 // ===== LOGIN =====
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
@@ -490,97 +667,485 @@ app.get('/bot/status', authenticate, async (req, res) => {
 
 
 
-// // ======= PAYMENTS =======
-// // ===== Create CRYPTO charge (Coinbase Commerce) =====
-// app.post('/deposits/crypto/create', authenticate, async (req, res) => {
-//   try {
-//     const { amount, currency = 'USD', idempotency_key } = req.body; // display currency
-//     if (!amount || Number(amount) <= 0) return res.status(400).json({ message: 'Invalid amount' });
+// === WALLETS (TRON only) ===
 
-//     const amount_cents = Math.round(Number(amount) * 100);
+// Create a new TRON wallet for a user
+// POST /wallet/new  (body can be empty; defaults to tron)
+// Create (or return existing) TRON wallet — enforce ONE per user
+// Create (or return existing) TRON wallet — enforce ONE per user
+app.post('/wallet/new', authenticate, async (req, res) => {
+  try {
+    // 0) If user already has a TRON wallet, just return it
+    const { rows: existing } = await pool.query(
+      `SELECT address
+       FROM wallets
+       WHERE user_id=$1 AND network='tron'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (existing.length) {
+      return res.json({ network: 'tron', token: 'USDT', address: existing[0].address });
+    }
 
-//     // Create DB row first
-//     const client = await pool.connect();
-//     let dep;
-//     try {
-//       await client.query('BEGIN');
-//       const { rows: [row] } = await client.query(
-//         `INSERT INTO deposits (user_id, provider, type, amount_cents, currency, status, idempotency_key)
-//          VALUES ($1,'coinbase','crypto',$2,$3,'pending',$4) RETURNING *`,
-//         [req.user.id, amount_cents, currency.toLowerCase(), idempotency_key || null]
-//       );
-//       dep = row;
-//       await client.query('COMMIT');
-//     } catch (e) { await client.query('ROLLBACK'); throw e; }
-//     finally { client.release(); }
+    // 1) Create a new TRON wallet
+    let acct;
+    try {
+      acct = await tronWeb.createAccount();
+    } catch (e) {
+      console.error('tronWeb.createAccount() failed, falling back:', e?.message || e);
+    }
 
-//     // Coinbase hosted charge
-//     const charge = await Charge.create({
-//       name: 'Glorivest Deposit',
-//       description: `Deposit ${amount} ${currency.toUpperCase()}`,
-//       pricing_type: 'fixed_price',
-//       local_price: { amount: String(amount), currency: currency.toUpperCase() },
-//       metadata: { deposit_id: dep.id, user_id: req.user.id },
-//       redirect_url: `${process.env.APP_BASE_URL}/dashboard.html#deposit-success`,
-//       cancel_url:   `${process.env.APP_BASE_URL}/dashboard.html#deposit-cancel`
-//     });
+    // 2) Fallback generation if needed
+    if (!acct || !acct.privateKey) {
+      const gen = TronWeb?.utils?.accounts?.generateAccount
+        ? TronWeb.utils.accounts.generateAccount()
+        : null;
 
-//     await pool.query(`UPDATE deposits SET provider_ref = $1, meta = meta || $2::jsonb WHERE id = $3`,
-//       [charge.id, JSON.stringify({ hosted_url: charge.hosted_url }), dep.id]);
+      if (gen?.privateKey) {
+        const base58 = tronWeb.address.fromPrivateKey(gen.privateKey);
+        acct = {
+          privateKey: gen.privateKey,
+          address: {
+            base58,
+            hex: tronWeb.address.toHex(base58),
+          }
+        };
+      }
+    }
 
-//     res.json({ hosted_url: charge.hosted_url, charge_id: charge.id, deposit_id: dep.id });
-//   } catch (err) {
-//     console.error('create crypto charge error:', err);
-//     res.status(500).json({ message: 'Failed to create crypto deposit' });
-//   }
-// });
+    if (!acct?.privateKey || !acct?.address?.base58) {
+      throw new Error('Failed to generate TRON account (no privateKey/address)');
+    }
 
-// // ===== Coinbase webhook =====
-// async function coinbaseWebhookHandler(req, res) {
-//   try {
-//     const sig = req.headers['x-cc-webhook-signature'];
-//     const raw = req.body; // already raw
-//     const event = coinbase.Webhook.verifyEventBody(
-//       raw,
-//       sig,
-//       process.env.COINBASE_COMMERCE_WEBHOOK_SECRET
-//     );
+    const address = acct.address.base58;
+    const priv_enc = aesEncrypt(acct.privateKey); // hex -> encrypted
 
-//     if (event.type === 'charge:confirmed' || event.type === 'charge:resolved') {
-//       const charge = event.data;
-//       const providerRef = charge.id;
-//       const { rows } = await pool.query(`SELECT * FROM deposits WHERE provider_ref = $1`, [providerRef]);
-//       if (!rows.length) return res.json({ ok: true });
+    await pool.query(
+      `INSERT INTO wallets (user_id, network, token, address, priv_enc)
+       VALUES ($1,'tron','USDT',$2,$3)`,
+      [req.user.id, address, priv_enc]
+    );
 
-//       const dep = rows[0];
-//       if (dep.status === 'confirmed') return res.json({ ok: true });
-
-//       const client = await pool.connect();
-//       try {
-//         await client.query('BEGIN');
-//         await client.query(`UPDATE deposits SET status='confirmed' WHERE id = $1`, [dep.id]);
-//         await creditUserBalanceTx(client, dep.user_id, dep.amount_cents);
-//         await client.query('COMMIT');
-//       } catch (e) { await client.query('ROLLBACK'); throw e; }
-//       finally { client.release(); }
-
-//       return res.json({ ok: true });
-//     }
-
-//     if (event.type === 'charge:failed' || event.type === 'charge:delayed') {
-//       const charge = event.data;
-//       await pool.query(`UPDATE deposits SET status='failed' WHERE provider_ref = $1`, [charge.id]);
-//     }
-
-//     res.json({ received: true });
-//   } catch (err) {
-//     console.error('Coinbase wh error:', err);
-//     res.status(400).send('Bad webhook');
-//   }
-// }
+    return res.json({ network: 'tron', token: 'USDT', address });
+  } catch (e) {
+    console.error('wallet/new error:', e?.stack || e);
+    res.status(500).json({ message: 'Internal server error', detail: String(e?.message || e) });
+  }
+});
 
 
 
+// Get existing TRON wallet
+// GET /wallet/tron
+app.get('/wallet/:network', authenticate, async (req, res) => {
+  const network = req.params.network;
+  if (network !== 'tron') return res.status(400).json({ message: 'Unsupported network' });
+
+  const { rows } = await pool.query(
+    `SELECT network, token, address
+     FROM wallets WHERE user_id=$1 AND network='tron'
+     ORDER BY id DESC LIMIT 1`,
+    [req.user.id]
+  );
+  if (!rows.length) return res.status(404).json({ message: 'No wallet. Create one.' });
+  res.json(rows[0]);
+});
+
+
+
+
+// ======= WITHDRAWAL (TRON USDT via OMNIBUS) =======
+// Body: { network: 'tron', token: 'USDT', amount: number, to: string }
+app.post('/withdraw', authenticate, async (req, res) => {
+  try {
+    const { network, token, amount, to } = req.body;
+
+    // Hard validation: TRON USDT only
+    if (network !== 'tron' || token !== 'USDT') {
+      return res.status(400).json({ message: 'Use USDT on Tron' });
+    }
+
+    // Fail fast if omnibus not configured
+    if (!OMNIBUS_TRON_PRIV || !OMNIBUS_TRON_ADDR) {
+      return res.status(500).json({ message: 'Omnibus TRON not configured' });
+    }
+
+    // Validate destination address
+    if (!tronWeb.isAddress(to)) {
+      return res.status(400).json({ message: 'Invalid TRON address' });
+    }
+
+    // Integer math (micro-USDT)
+    const grossU = Math.round(Number(amount) * 1e6);
+    if (!grossU || grossU <= 0) return res.status(400).json({ message: 'Invalid amount' });
+
+    const feeU = Math.max(Math.floor(grossU * 1 / 100), 1); // 1% fee, at least 1 micro
+    const netU = grossU - feeU;
+
+    if (netU <= 0) return res.status(400).json({ message: 'Amount too small after fee' });
+
+    const MIN_NET_U = Math.round((Number(process.env.MIN_WITHDRAW_USDT || 1)) * 1e6);
+    if (netU < MIN_NET_U) return res.status(400).json({ message: `Minimum net withdrawal is ${MIN_NET_U/1e6} USDT` });
+
+    const gross = grossU / 1e6;
+    const fee   = feeU   / 1e6;
+    const net   = netU   / 1e6;
+
+    // 1) Debit + create withdrawal row in a single transaction
+    let wid;
+    await withTx(async (c) => {
+      // lock & check balance
+      const { rows } = await c.query('SELECT balance FROM users WHERE id=$1 FOR UPDATE', [req.user.id]);
+      const cur = Number(rows?.[0]?.balance || 0);
+      if (cur < gross) throw new Error('Insufficient balance');
+
+      // debit gross
+      await c.query('UPDATE users SET balance=$1 WHERE id=$2', [Number((cur - gross).toFixed(6)), req.user.id]);
+
+      // create withdrawal row
+      const ins = await c.query(
+        `INSERT INTO withdrawals (user_id, network, token, to_addr, amount, fee_amount, status)
+         VALUES ($1,'tron','USDT',$2,$3,$4,'requested') RETURNING id`,
+        [req.user.id, to, gross, fee]
+      );
+      wid = ins.rows[0].id;
+    });
+
+    // 2) Check omnibus liquidity BEFORE broadcasting
+    const avail = await tronUsdtBalanceOf(OMNIBUS_TRON_ADDR);
+    if (avail < net) {
+      // Re-credit and mark failed
+      await withTx(async (c) => {
+        await c.query(`UPDATE withdrawals SET status='failed' WHERE id=$1`, [wid]);
+        await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`, [gross, req.user.id]);
+      });
+      return res.status(400).json({ message: 'Insufficient omnibus liquidity' });
+    }
+
+    // 3) Broadcast from OMNIBUS (TRC-20)
+    const contract = await tronUsdtContract();
+    const amountSun = BigInt(netU).toString();
+
+    let txSig;
+    try {
+      txSig = await contract.transfer(to, amountSun).send({ privateKey: OMNIBUS_TRON_PRIV });
+    } catch (broadcastErr) {
+      // Re-credit and mark failed if broadcast errors
+      await withTx(async (c) => {
+        await c.query(`UPDATE withdrawals SET status='failed' WHERE id=$1`, [wid]);
+        await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`, [gross, req.user.id]);
+      });
+      throw broadcastErr;
+    }
+
+    // 4) Update withdrawal status → broadcasted, then confirm async
+    await pool.query(`UPDATE withdrawals SET tx_hash=$1, status='broadcasted' WHERE id=$2`, [txSig, wid]);
+
+    setTimeout(async () => {
+      try {
+        await pool.query(`UPDATE withdrawals SET status='confirmed' WHERE id=$1`, [wid]);
+      } catch (e) {
+        console.error('withdraw confirm error', e);
+      }
+    }, 5000);
+
+    res.json({ message: 'Withdrawal initiated', fee, net, tx_hash: txSig });
+  } catch (e) {
+    console.error('withdraw error', e);
+    res.status(400).json({ message: e.message || 'Withdraw failed' });
+  }
+});
+
+
+
+
+
+// ===== BALANCE (TRON USDT only, with breakdown) =====
+app.get('/balance', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Total internal credited balance (source of truth for user funds)
+    const total = await getUserBalance(userId);
+
+    // Pending deposits (seen on-chain but not confirmed in app yet)
+    const { rows: [pDep] } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+       FROM deposits
+       WHERE user_id=$1
+         AND network='tron' AND token='USDT'
+         AND status != 'confirmed'`,
+      [userId]
+    );
+    const pending_deposits = Number(pDep.sum || 0);
+
+    // Confirmed but NOT yet swept to omnibus (still at user deposit address)
+    const { rows: [cUnswept] } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+       FROM deposits
+       WHERE user_id=$1
+         AND network='tron' AND token='USDT'
+         AND status='confirmed' AND (swept IS NOT TRUE)`,
+      [userId]
+    );
+    const confirmed_unswept = Number(cUnswept.sum || 0);
+
+    // Confirmed AND swept to omnibus
+    const { rows: [cSwept] } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+       FROM deposits
+       WHERE user_id=$1
+         AND network='tron' AND token='USDT'
+         AND status='confirmed' AND swept IS TRUE`,
+      [userId]
+    );
+    const confirmed_swept = Number(cSwept.sum || 0);
+
+    // Pending withdrawals (requested or broadcasted but not confirmed yet)
+    const { rows: [pWdr] } = await pool.query(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+       FROM withdrawals
+       WHERE user_id=$1
+         AND network='tron' AND token='USDT'
+         AND status IN ('requested','broadcasted')`,
+      [userId]
+    );
+    const pending_withdrawals = Number(pWdr.sum || 0);
+
+    // Withdrawable now (no 30-day locks yet): total minus pending withdrawals
+    const withdrawable = Math.max(Number((total - pending_withdrawals).toFixed(6)), 0);
+
+    // Optional: when did we last poll Tron?
+    const last_poll_ts = await getSetting('tron_since_ts');
+
+    res.json({
+      currency: 'USDT',
+      chain: 'tron',
+      total_usd: Number(total.toFixed(6)),
+      pending_deposits_usd: Number(pending_deposits.toFixed(6)),
+      confirmed_unswept_usd: Number(confirmed_unswept.toFixed(6)),
+      confirmed_swept_usd: Number(confirmed_swept.toFixed(6)),
+      pending_withdrawals_usd: Number(pending_withdrawals.toFixed(6)),
+      withdrawable_usd: withdrawable,
+      meta: { last_tron_poll_ts: last_poll_ts ? Number(last_poll_ts) : null }
+    });
+  } catch (e) {
+    console.error('GET /balance error:', e);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+
+
+
+// === OMNIBUS HOT WALLET (TRON only) ===
+const OMNIBUS_TRON_PRIV = process.env.OMNIBUS_TRON_PRIVATE_KEY || null;  // hex
+const OMNIBUS_TRON_ADDR = process.env.OMNIBUS_TRON_ADDRESS || null;      // base58
+
+// === Token helpers (TRON) ===
+async function tronUsdtContract() {
+  return await tronWeb.contract().at(USDT_TRON_CONTRACT);
+}
+async function tronUsdtBalanceOf(base58Addr) {
+  const c = await tronUsdtContract();
+  const raw = await c.balanceOf(tronWeb.address.toHex(base58Addr)).call();
+  return Number(raw?.toString?.()) / 1e6; // 6 decimals
+}
+
+
+
+
+// === DEPOSITS: detect TRON USDT credits (poller) ===
+
+// Convert TronGrid event address → base58 "T..." for DB matching
+function eventToBase58(addr) {
+  if (!addr) return null;
+  try {
+    if (addr.startsWith('0x') && addr.length === 42) {
+      return tronWeb.address.fromHex('41' + addr.slice(2));
+    }
+    if (addr.startsWith('41') && addr.length === 42) {
+      return tronWeb.address.fromHex(addr);
+    }
+    if (addr.startsWith('T')) return addr; // already base58
+  } catch (_) {}
+  return null;
+}
+
+// Upsert a deposit row
+async function upsertDeposit(d) {
+  const { user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status } = d;
+  try {
+    await pool.query(
+      `INSERT INTO deposits (user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (tx_hash) DO UPDATE
+         SET confirmations = EXCLUDED.confirmations,
+             status        = EXCLUDED.status`,
+      [user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status]
+    );
+  } catch (e) { console.error('upsertDeposit', e); }
+}
+
+// Mark confirmed and credit internal balance
+async function confirmAndCredit(tx_hash) {
+  await withTx(async (c) => {
+    const { rows } = await c.query('SELECT * FROM deposits WHERE tx_hash=$1 FOR UPDATE', [tx_hash]);
+    if (!rows.length) return;
+    const d = rows[0];
+    if (d.status === 'confirmed') return;
+    await c.query('UPDATE deposits SET status=$1 WHERE tx_hash=$2', ['confirmed', tx_hash]);
+    await c.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2', [Number(d.amount), d.user_id]);
+  });
+}
+
+// Poll TronGrid TRC20 events and credit matching user deposit addresses
+async function pollTron() {
+  try {
+    const sinceTs = Number(await getSetting('tron_since_ts')) || 0;
+
+    const u = new URL(`${TRON_FULLHOST}/v1/contracts/${USDT_TRON_CONTRACT}/events`);
+    u.searchParams.set('event_name', 'Transfer');
+    if (sinceTs) u.searchParams.set('min_timestamp', String(sinceTs));
+    u.searchParams.set('limit', '200');
+
+    const headers = TRONGRID_API_KEY ? { 'TRON-PRO-API-KEY': TRONGRID_API_KEY } : {};
+    const resp = await fetch(u.toString(), { headers });
+    if (!resp.ok) { console.error('Tron poll http', resp.status); return; }
+
+    const data = await resp.json();
+    const events = data?.data || [];
+    console.log(`[pollTron] fetched ${events.length} events`);
+
+    // map our base58 deposit addresses -> user_id
+    const { rows: tronWallets } = await pool.query(
+      `SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'`
+    );
+    const addrToUser = new Map(tronWallets.map(w => [w.address, w.user_id]));
+
+    let maxTs = sinceTs;
+
+    for (const ev of events) {
+      const ts = Number(ev.block_timestamp || 0);
+      if (ts > maxTs) maxTs = ts;
+
+      const tx       = ev.transaction_id;
+      const fromEv   = ev.result?.from;
+      const toEv     = ev.result?.to;
+      const valueRaw = ev.result?.value; // string (6 decimals for USDT)
+      if (!tx || !toEv || valueRaw == null) continue;
+
+      const toBase58   = eventToBase58(toEv);
+      const fromBase58 = eventToBase58(fromEv);
+      if (!toBase58) continue;
+
+      const userId = addrToUser.get(toBase58);
+      if (!userId) continue; // not one of ours
+
+      const amount = Number(valueRaw) / 1e6;
+      console.log('[pollTron] match', { tx, toBase58, amount });
+
+      await upsertDeposit({
+        user_id: userId,
+        network: 'tron',
+        token: 'USDT',
+        tx_hash: tx,
+        from_addr: fromBase58 || null,
+        to_addr: toBase58,
+        amount,
+        confirmations: TRON_REQUIRED_CONFS,
+        status: 'pending'
+      });
+
+      // MVP: confirm immediately (prod: wait real confs)
+      await confirmAndCredit(tx);
+    }
+
+    await setSetting('tron_since_ts', maxTs);
+  } catch (e) {
+    console.error('pollTron error', e?.message || e);
+  }
+}
+
+// run poller every ~20s
+setInterval(pollTron, 20_000);
+
+// manual trigger
+app.get('/deposits/tron/refresh', async (_req, res) => {
+  try {
+    await pollTron();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('manual pollTron error:', e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+
+
+
+
+
+// ========== SWEEPER (TRON only, every 60s) ==========
+async function sweepTronOnce() {
+  if (!OMNIBUS_TRON_PRIV || !OMNIBUS_TRON_ADDR) return;
+
+  try {
+    const contract = await tronUsdtContract();
+    const { rows: tronWallets } = await pool.query(
+      `SELECT id, user_id, address, priv_enc
+       FROM wallets
+       WHERE network='tron' AND token='USDT'`
+    );
+
+    for (const w of tronWallets) {
+      const addr = w.address;
+      if (addr === OMNIBUS_TRON_ADDR) continue; // don't sweep the omnibus itself, safety
+
+      let bal;
+      try {
+        bal = await tronUsdtBalanceOf(addr);
+      } catch (e) {
+        console.error('Tron balanceOf failed for', addr, e?.message || e);
+        continue;
+      }
+      if (!bal || bal < SWEEP_DUST_THRESHOLD) continue; // skip dust
+
+      try {
+        const amountSun = BigInt(Math.floor(bal * 1e6)).toString();
+        const perUserPrivHex = aesDecrypt(w.priv_enc); // user deposit privkey (hex)
+
+        const tx = await contract.transfer(OMNIBUS_TRON_ADDR, amountSun)
+          .send({ privateKey: perUserPrivHex });
+
+        await pool.query(
+          `UPDATE deposits SET swept=true, sweep_tx_hash=$1
+           WHERE to_addr=$2 AND network='tron' AND token='USDT'`,
+          [tx, addr]
+        );
+        console.log(`🔁 Swept TRON USDT ${bal} from ${addr} -> ${OMNIBUS_TRON_ADDR} tx=${tx}`);
+      } catch (e) {
+        console.error(`TRON sweep failed for ${addr}:`, e?.message || e);
+      }
+    }
+  } catch (e) {
+    console.error('sweepTronOnce fatal:', e?.message || e);
+  }
+}
+
+setInterval(sweepTronOnce, 60_000);
+
+app.get('/deposits/tron/refresh', async (_req, res) => {
+  try {
+    await pollTron();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('manual pollTron error:', e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
 
 
 
