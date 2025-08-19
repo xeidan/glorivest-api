@@ -957,24 +957,22 @@ async function tronUsdtBalanceOf(base58Addr) {
 
 
 
+
+
+
 // === DEPOSITS: detect TRON USDT credits (poller) ===
 
 // Convert TronGrid event address → base58 "T..." for DB matching
-function eventToBase58(addr) {
-  if (!addr) return null;
-  try {
-    if (addr.startsWith('0x') && addr.length === 42) {
-      return tronWeb.address.fromHex('41' + addr.slice(2));
-    }
-    if (addr.startsWith('41') && addr.length === 42) {
-      return tronWeb.address.fromHex(addr);
-    }
-    if (addr.startsWith('T')) return addr; // already base58
-  } catch (_) {}
-  return null;
+function evAddrToBase58(hexLike) {
+  if (!hexLike) return null;
+  let h = String(hexLike);
+  // make it TRON-hex (starts with 41...) so TronWeb can convert to Base58
+  if (h.startsWith('0x') || h.startsWith('0X')) h = '41' + h.slice(2);
+  try { return tronWeb.address.fromHex(h); }
+  catch { return null; }
 }
 
-// Upsert a deposit row
+// === Deposit helpers (TRON) ===
 async function upsertDeposit(d) {
   const { user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status } = d;
   try {
@@ -983,25 +981,30 @@ async function upsertDeposit(d) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (tx_hash) DO UPDATE
          SET confirmations = EXCLUDED.confirmations,
-             status        = EXCLUDED.status`,
+             status = EXCLUDED.status`,
       [user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status]
     );
-  } catch (e) { console.error('upsertDeposit', e); }
+  } catch (e) {
+    console.error('upsertDeposit error:', e);
+  }
 }
 
-// Mark confirmed and credit internal balance
 async function confirmAndCredit(tx_hash) {
   await withTx(async (c) => {
     const { rows } = await c.query('SELECT * FROM deposits WHERE tx_hash=$1 FOR UPDATE', [tx_hash]);
     if (!rows.length) return;
     const d = rows[0];
     if (d.status === 'confirmed') return;
+
     await c.query('UPDATE deposits SET status=$1 WHERE tx_hash=$2', ['confirmed', tx_hash]);
+    // 1:1 credit (USDT ≈ USD)
     await c.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2', [Number(d.amount), d.user_id]);
   });
 }
 
+
 // Poll TronGrid TRC20 events and credit matching user deposit addresses
+// === TronGrid poller: watches USDT TRC20 Transfer events and credits matches ===
 async function pollTron() {
   try {
     const sinceTs = Number(await getSetting('tron_since_ts')) || 0;
@@ -1017,62 +1020,50 @@ async function pollTron() {
 
     const data = await resp.json();
     const events = data?.data || [];
-    console.log(`[pollTron] fetched ${events.length} events`);
+    if (!events.length) return;
 
-    // map our base58 deposit addresses -> user_id
-    const { rows: tronWallets } = await pool.query(
+    // Build a map of deposit Base58 address -> user_id
+    const { rows: wallets } = await pool.query(
       `SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'`
     );
-    const addrToUser = new Map(tronWallets.map(w => [w.address, w.user_id]));
+    const addrToUser = new Map(wallets.map(w => [w.address, w.user_id]));
 
     let maxTs = sinceTs;
-
     for (const ev of events) {
       const ts = Number(ev.block_timestamp || 0);
       if (ts > maxTs) maxTs = ts;
 
-      const tx       = ev.transaction_id;
-      const fromEv   = ev.result?.from;
-      const toEv     = ev.result?.to;
-      const valueRaw = ev.result?.value; // string (6 decimals for USDT)
-      if (!tx || !toEv || valueRaw == null) continue;
+      const tx = ev.transaction_id;
+      const from = ev.result?.from ? evAddrToBase58(ev.result.from) : null;
+      const to   = ev.result?.to   ? evAddrToBase58(ev.result.to)   : null;
+      const valueRaw = ev.result?.value; // USDT has 6 decimals
+      if (!tx || !to || valueRaw == null) continue;
 
-      const toBase58   = eventToBase58(toEv);
-      const fromBase58 = eventToBase58(fromEv);
-      if (!toBase58) continue;
-
-      const userId = addrToUser.get(toBase58);
-      if (!userId) continue; // not one of ours
+      const userId = addrToUser.get(to);
+      if (!userId) continue; // not our deposit address
 
       const amount = Number(valueRaw) / 1e6;
-      console.log('[pollTron] match', { tx, toBase58, amount });
 
       await upsertDeposit({
-        user_id: userId,
-        network: 'tron',
-        token: 'USDT',
-        tx_hash: tx,
-        from_addr: fromBase58 || null,
-        to_addr: toBase58,
-        amount,
-        confirmations: TRON_REQUIRED_CONFS,
-        status: 'pending'
+        user_id: userId, network: 'tron', token: 'USDT',
+        tx_hash: tx, from_addr: from, to_addr: to,
+        amount, confirmations: TRON_REQUIRED_CONFS, status: 'pending'
       });
 
-      // MVP: confirm immediately (prod: wait real confs)
+      // MVP: credit immediately (in prod, wait for real confs)
       await confirmAndCredit(tx);
     }
 
     await setSetting('tron_since_ts', maxTs);
   } catch (e) {
-    console.error('pollTron error', e?.message || e);
+    console.error('pollTron error:', e?.message || e);
   }
 }
 
-// run poller every ~20s
+// run it forever; fast enough for MVP
 setInterval(pollTron, 20_000);
 
-// manual trigger
+// manual debug endpoint (you already added; keep it)
 app.get('/deposits/tron/refresh', async (_req, res) => {
   try {
     await pollTron();
@@ -1082,6 +1073,9 @@ app.get('/deposits/tron/refresh', async (_req, res) => {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
+
+
+
 
 
 
