@@ -1015,17 +1015,25 @@ async function upsertDeposit(d) {
   const { user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status } = d;
   try {
     await pool.query(
-      `INSERT INTO deposits (user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       ON CONFLICT (tx_hash) DO UPDATE
-         SET confirmations = EXCLUDED.confirmations,
-             status = EXCLUDED.status`,
+      `
+      INSERT INTO deposits (user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      ON CONFLICT (tx_hash) DO UPDATE
+      SET
+        confirmations = GREATEST(deposits.confirmations, EXCLUDED.confirmations),
+        status = CASE
+                   WHEN deposits.status = 'confirmed' THEN 'confirmed'
+                   ELSE EXCLUDED.status
+                 END
+      `,
       [user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status]
     );
   } catch (e) {
     console.error('upsertDeposit error:', e);
   }
 }
+
+
 
 async function confirmAndCredit(tx_hash) {
   await withTx(async (c) => {
@@ -1040,56 +1048,85 @@ async function confirmAndCredit(tx_hash) {
   });
 }
 
-// Poll TronGrid TRC20 events and credit matching user deposit addresses (account-centric)
+// Poll TronGrid for USDT TRC20 transfers into user deposit addresses.
+// - Uses settings.tron_since_ts as a low-water mark (ms since epoch).
+// - Upserts deposits without ever downgrading a confirmed row.
+// - Confirms & credits once per tx (safe to re-run thanks to upsert logic).
 async function pollTron() {
   try {
     const sinceTs = Number(await getSetting('tron_since_ts')) || 0;
+    const headers = TRON_HEADERS || {};
+    let maxTs = sinceTs;
 
-    // All user deposit addresses (TRON, USDT)
+    // Get all TRON USDT deposit addresses we manage
     const { rows: wallets } = await pool.query(
-      `SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'`
+      "SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'"
     );
 
     if (!wallets.length) {
+      // Nothing to watch; still move the cursor so we don't spam settings with 0
       await setSetting('tron_since_ts', sinceTs || Date.now());
       return;
     }
 
-    let maxTs = sinceTs;
-
     for (const w of wallets) {
-      const u = new URL(`${TRON_FULLHOST}/v1/accounts/${w.address}/transactions/trc20`);
+      const addr = w.address;
+
+      // Query transfers TO this address for the configured USDT contract
+      const u = new URL(`${TRON_FULLHOST}/v1/accounts/${addr}/transactions/trc20`);
       u.searchParams.set('only_to', 'true');
       u.searchParams.set('limit', '200');
       u.searchParams.set('contract_address', USDT_TRON_CONTRACT);
       if (sinceTs) u.searchParams.set('min_timestamp', String(sinceTs));
 
-      const resp = await fetch(u.toString(), { headers: TRON_HEADERS });
-      if (!resp.ok) {
-        console.error('[acctPoll] http', resp.status, w.address);
+      let resp;
+      try {
+        resp = await fetch(u.toString(), { headers });
+      } catch (netErr) {
+        console.error('[pollTron] fetch error', addr, netErr?.message || netErr);
         continue;
       }
 
-      const data = await resp.json();
-      const txs = data?.data || [];
+      // 404 for brand-new/empty accounts is normal → just skip
+      if (resp.status === 404) {
+        continue;
+      }
+      if (!resp.ok) {
+        console.error('[pollTron] http', resp.status, addr);
+        continue;
+      }
+
+      let json;
+      try {
+        json = await resp.json();
+      } catch (e) {
+        console.error('[pollTron] json parse failed for', addr, e?.message || e);
+        continue;
+      }
+
+      const txs = json?.data || [];
       if (!txs.length) continue;
 
       for (const t of txs) {
         const ts = Number(t.block_timestamp || 0);
-        if (ts > maxTs) maxTs = ts;
+        if (Number.isFinite(ts) && ts > maxTs) maxTs = ts;
 
         const tx = t.transaction_id;
-        const to = t.to || null;     // base58 target
-        const from = t.from || null; // base58 source
+        const to = t.to || null;
+        const from = t.from || null;
 
-        if (!tx || to !== w.address) continue;
+        if (!tx || to !== addr) continue;
 
-        // value is string in base units; use decimals (USDT = 6)
-        const decimals = Number(t.decimals ?? 6);
-        const amount = Number(t.value) / (10 ** decimals);
-        if (!Number.isFinite(amount) || amount <= 0) continue;
+        // Prefer token_info.decimals; fall back to t.decimals or 6
+        const decimals = Number(
+          (t.token_info && t.token_info.decimals) ?? t.decimals ?? 6
+        );
+        const raw = Number(t.value);
+        if (!Number.isFinite(raw) || raw <= 0) continue;
 
-        // Upsert + credit immediately (MVP)
+        const amount = raw / Math.pow(10, decimals);
+
+        // 1) Upsert without ever downgrading a confirmed row
         await upsertDeposit({
           user_id: w.user_id,
           network: 'tron',
@@ -1098,20 +1135,27 @@ async function pollTron() {
           from_addr: from,
           to_addr: to,
           amount,
-          confirmations: TRON_REQUIRED_CONFS,
+          confirmations: TRON_REQUIRED_CONFS, // MVP: we treat as fully confirmed
           status: 'pending'
         });
 
-        await confirmAndCredit(tx);
-        console.log(`[credit] +${amount} USDT -> user ${w.user_id} addr ${to} tx ${tx}`);
+        // 2) Confirm & credit (idempotent thanks to upsert + confirmAndCredit guard)
+        try {
+          await confirmAndCredit(tx);
+          console.log(`[credit] +${amount} USDT -> user ${w.user_id} addr ${to} tx ${tx}`);
+        } catch (e) {
+          console.error('confirmAndCredit error', tx, e?.message || e);
+        }
       }
     }
 
-    await setSetting('tron_since_ts', maxTs || Date.now());
+    // Advance the cursor by +1ms to avoid re-fetching boundary events
+    await setSetting('tron_since_ts', maxTs ? (maxTs + 1) : Date.now());
   } catch (e) {
     console.error('pollTron error:', e?.message || e);
   }
 }
+
 
 // Poller (20s)
 setInterval(pollTron, 20_000);
