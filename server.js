@@ -1035,36 +1035,38 @@ async function upsertDeposit(d) {
 
 
 
+// return true only when we transition -> confirmed and add balance
 async function confirmAndCredit(tx_hash) {
-  await withTx(async (c) => {
+  return await withTx(async (c) => {
     const { rows } = await c.query('SELECT * FROM deposits WHERE tx_hash=$1 FOR UPDATE', [tx_hash]);
-    if (!rows.length) return;
+    if (!rows.length) return false;
     const d = rows[0];
-    if (d.status === 'confirmed') return;
+    if (d.status === 'confirmed') return false;     // already done → no credit
 
     await c.query('UPDATE deposits SET status=$1 WHERE tx_hash=$2', ['confirmed', tx_hash]);
-    // 1:1 credit (USDT ≈ USD)
     await c.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2', [Number(d.amount), d.user_id]);
+    return true;                                     // credited now
   });
 }
 
+
 // Poll TronGrid for USDT TRC20 transfers into user deposit addresses.
-// - Uses settings.tron_since_ts as a low-water mark (ms since epoch).
-// - Upserts deposits without ever downgrading a confirmed row.
-// - Confirms & credits once per tx (safe to re-run thanks to upsert logic).
+// - Uses settings.tron_since_ts (ms) as a low‑water mark
+// - Never downgrades confirmed rows (requires your updated upsertDeposit)
+// - Only logs when a credit actually happened
+// - Advances cursor by +1ms to avoid boundary repeats
 async function pollTron() {
   try {
     const sinceTs = Number(await getSetting('tron_since_ts')) || 0;
     const headers = TRON_HEADERS || {};
     let maxTs = sinceTs;
 
-    // Get all TRON USDT deposit addresses we manage
+    // All TRON USDT deposit addresses we manage
     const { rows: wallets } = await pool.query(
       "SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'"
     );
 
     if (!wallets.length) {
-      // Nothing to watch; still move the cursor so we don't spam settings with 0
       await setSetting('tron_since_ts', sinceTs || Date.now());
       return;
     }
@@ -1072,7 +1074,7 @@ async function pollTron() {
     for (const w of wallets) {
       const addr = w.address;
 
-      // Query transfers TO this address for the configured USDT contract
+      // Transfers TO this address for our USDT contract
       const u = new URL(`${TRON_FULLHOST}/v1/accounts/${addr}/transactions/trc20`);
       u.searchParams.set('only_to', 'true');
       u.searchParams.set('limit', '200');
@@ -1087,10 +1089,8 @@ async function pollTron() {
         continue;
       }
 
-      // 404 for brand-new/empty accounts is normal → just skip
-      if (resp.status === 404) {
-        continue;
-      }
+      // 404 is normal for empty/new accounts
+      if (resp.status === 404) continue;
       if (!resp.ok) {
         console.error('[pollTron] http', resp.status, addr);
         continue;
@@ -1114,19 +1114,16 @@ async function pollTron() {
         const tx = t.transaction_id;
         const to = t.to || null;
         const from = t.from || null;
-
         if (!tx || to !== addr) continue;
 
-        // Prefer token_info.decimals; fall back to t.decimals or 6
-        const decimals = Number(
-          (t.token_info && t.token_info.decimals) ?? t.decimals ?? 6
-        );
+        // decimals pref: token_info.decimals → t.decimals → 6
+        const decimals = Number((t.token_info && t.token_info.decimals) ?? t.decimals ?? 6);
         const raw = Number(t.value);
         if (!Number.isFinite(raw) || raw <= 0) continue;
 
         const amount = raw / Math.pow(10, decimals);
 
-        // 1) Upsert without ever downgrading a confirmed row
+        // 1) Upsert (non‑downgrading)
         await upsertDeposit({
           user_id: w.user_id,
           network: 'tron',
@@ -1135,26 +1132,30 @@ async function pollTron() {
           from_addr: from,
           to_addr: to,
           amount,
-          confirmations: TRON_REQUIRED_CONFS, // MVP: we treat as fully confirmed
+          confirmations: TRON_REQUIRED_CONFS, // MVP: treat as fully confirmed
           status: 'pending'
         });
 
-        // 2) Confirm & credit (idempotent thanks to upsert + confirmAndCredit guard)
+        // 2) Confirm & credit ONCE; log only if it actually credited
+        let didCredit = false;
         try {
-          await confirmAndCredit(tx);
-          console.log(`[credit] +${amount} USDT -> user ${w.user_id} addr ${to} tx ${tx}`);
+          didCredit = await confirmAndCredit(tx); // <- your confirm returns boolean now
         } catch (e) {
           console.error('confirmAndCredit error', tx, e?.message || e);
+        }
+        if (didCredit) {
+          console.log(`[credit] +${amount} USDT -> user ${w.user_id} addr ${to} tx ${tx}`);
         }
       }
     }
 
-    // Advance the cursor by +1ms to avoid re-fetching boundary events
+    // Advance by +1ms to avoid boundary re-fetch
     await setSetting('tron_since_ts', maxTs ? (maxTs + 1) : Date.now());
   } catch (e) {
     console.error('pollTron error:', e?.message || e);
   }
 }
+
 
 
 // Poller (20s)
@@ -1174,7 +1175,6 @@ app.get('/deposits/tron/refresh', async (_req, res) => {
 // ========== SWEEPER (TRON only, every 60s) ==========
 async function sweepTronOnce() {
   if (!OMNIBUS_TRON_PRIV || !OMNIBUS_TRON_ADDR) return;
-
   try {
     const contract = await tronUsdtContract();
     const { rows: tronWallets } = await pool.query(
@@ -1184,28 +1184,51 @@ async function sweepTronOnce() {
     );
 
     for (const w of tronWallets) {
-      const addr = (w.address || '').trim();
-      if (!addr || addr === OMNIBUS_TRON_ADDR) continue; // safety
+      const addr = w.address;
+      if (addr === OMNIBUS_TRON_ADDR) continue;
 
       let bal;
       try {
-        bal = await tronUsdtBalanceOf(addr); // base58 helper with fallback
+        bal = await tronUsdtBalanceOf(addr);
       } catch (e) {
         console.error('Tron balanceOf failed for', addr, e?.message || e);
         continue;
       }
-      if (!bal || bal < SWEEP_DUST_THRESHOLD) continue; // skip dust
+      if (!bal || bal < SWEEP_DUST_THRESHOLD) continue;
+
+      // 🔒 verify the decrypted key actually controls this address
+      let perUserPrivHex;
+      try {
+        perUserPrivHex = aesDecrypt(w.priv_enc);
+      } catch (e) {
+        console.error('decrypt priv_enc failed for', addr, e?.message || e);
+        continue;
+      }
+      let derived;
+      try {
+        derived = tronWeb.address.fromPrivateKey(perUserPrivHex); // base58
+      } catch (e) {
+        console.error('fromPrivateKey failed for', addr, e?.message || e);
+        continue;
+      }
+      if (derived !== addr) {
+        console.error('sweep skip: priv key/address mismatch', { addr, derived });
+        continue; // never try to sign from a mismatched key
+      }
 
       try {
-        const amountSun = BigInt(Math.floor(bal * 1e6)).toString();
-        const perUserPrivHex = aesDecrypt(w.priv_enc); // user deposit privkey (hex)
+        // make sure the tx is authored by the deposit address
+        tronWeb.setAddress(addr);
 
-        const tx = await contract.transfer(OMNIBUS_TRON_ADDR, amountSun)
-          .send({ privateKey: perUserPrivHex });
+        const amountSun = BigInt(Math.floor(bal * 1e6)).toString();
+        const tx = await contract
+          .transfer(OMNIBUS_TRON_ADDR, amountSun)
+          .send({ privateKey: perUserPrivHex }); // signs as 'addr'
 
         await pool.query(
-          `UPDATE deposits SET swept=true, sweep_tx_hash=$1
-           WHERE to_addr=$2 AND network='tron' AND token='USDT'`,
+          `UPDATE deposits
+             SET swept = true, sweep_tx_hash = $1
+           WHERE to_addr = $2 AND network='tron' AND token='USDT'`,
           [tx, addr]
         );
         console.log(`🔁 Swept TRON USDT ${bal} from ${addr} -> ${OMNIBUS_TRON_ADDR} tx=${tx}`);
@@ -1217,6 +1240,7 @@ async function sweepTronOnce() {
     console.error('sweepTronOnce fatal:', e?.message || e);
   }
 }
+
 
 setInterval(sweepTronOnce, 60_000);
 
