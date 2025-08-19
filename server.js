@@ -57,24 +57,13 @@ if (!ENC_KEY_HEX || ENC_KEY_HEX.length !== 64) {
 }
 const ENC_KEY = Buffer.from(ENC_KEY_HEX, 'hex');
 
-const TRON_FULLHOST = process.env.TRON_FULLHOST || 'https://api.trongrid.io';
-const TRONGRID_API_KEY = process.env.TRONGRID_API_KEY || '';
-const USDT_TRON_CONTRACT = process.env.USDT_TRON_CONTRACT || 'TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8';
-
-const SOLANA_RPC = process.env.SOLANA_RPC || clusterApiUrl('mainnet-beta');
-const SOL_USDC_MINT = new PublicKey(process.env.SOL_USDC_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 
 const WEBHOOK_HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET || '';
 const TRON_REQUIRED_CONFS = Number(process.env.TRON_REQUIRED_CONFS || 6);
 const SOL_REQUIRED_FINALITY = 'finalized';
 const SWEEP_DUST_THRESHOLD = Number(process.env.SWEEP_DUST_THRESHOLD || 0.5); // USDT, default 0.5
 
-// Init SDKs
-const tronWeb = new TronWeb({
-  fullHost: TRON_FULLHOST,
-  headers: TRONGRID_API_KEY ? { 'TRON-PRO-API-KEY': TRONGRID_API_KEY } : {}
-});
-const solConn = new Connection(SOLANA_RPC, 'confirmed');
+
 
 // === Small helpers ===
 function aesEncrypt(plainText) {
@@ -863,62 +852,83 @@ app.post('/withdraw', authenticate, async (req, res) => {
 
 // ===== BALANCE (TRON USDT only, with breakdown) =====
 app.get('/balance', authenticate, async (req, res) => {
+  const userId = req.user.id;
+
+  // Helper to run a safe SUM with legacy support (amount OR amount_cents/100.0)
+  const safeSum = async (sql, params, label) => {
+    try {
+      const { rows: [r] } = await pool.query(sql, params);
+      const n = Number(r?.sum ?? 0);
+      return Number.isFinite(n) ? n : 0;
+    } catch (err) {
+      console.error(`[balance] ${label} query failed:`, err);
+      return 0; // never throw; keep the endpoint alive
+    }
+  };
+
   try {
-    const userId = req.user.id;
+    // 1) Source of truth: internal ledger balance
+    const totalRaw = await getUserBalance(userId);
+    const total = Number.isFinite(Number(totalRaw)) ? Number(totalRaw) : 0;
 
-    // Total internal credited balance (source of truth for user funds)
-    const total = await getUserBalance(userId);
+    // Expression for legacy/modern amounts
+    const sumExpr = 'COALESCE(SUM(COALESCE(amount, amount_cents/100.0)), 0) AS sum';
 
-    // Pending deposits (seen on-chain but not confirmed in app yet)
-    const { rows: [pDep] } = await pool.query(
-      `SELECT COALESCE(SUM(amount),0) AS sum
-       FROM deposits
-       WHERE user_id=$1
-         AND network='tron' AND token='USDT'
-         AND status != 'confirmed'`,
-      [userId]
-    );
-    const pending_deposits = Number(pDep.sum || 0);
+    // 2) Pending deposits (not yet confirmed)
+    const pending_deposits = await safeSum(`
+      SELECT ${sumExpr}
+      FROM deposits
+      WHERE user_id = $1
+        AND network = 'tron'
+        AND token   = 'USDT'
+        AND status <> 'confirmed'
+    `, [userId], 'pending_deposits');
 
-    // Confirmed but NOT yet swept to omnibus (still at user deposit address)
-    const { rows: [cUnswept] } = await pool.query(
-      `SELECT COALESCE(SUM(amount),0) AS sum
-       FROM deposits
-       WHERE user_id=$1
-         AND network='tron' AND token='USDT'
-         AND status='confirmed' AND (swept IS NOT TRUE)`,
-      [userId]
-    );
-    const confirmed_unswept = Number(cUnswept.sum || 0);
+    // 3) Confirmed but NOT swept
+    const confirmed_unswept = await safeSum(`
+      SELECT ${sumExpr}
+      FROM deposits
+      WHERE user_id = $1
+        AND network = 'tron'
+        AND token   = 'USDT'
+        AND status  = 'confirmed'
+        AND (swept IS NOT TRUE)
+    `, [userId], 'confirmed_unswept');
 
-    // Confirmed AND swept to omnibus
-    const { rows: [cSwept] } = await pool.query(
-      `SELECT COALESCE(SUM(amount),0) AS sum
-       FROM deposits
-       WHERE user_id=$1
-         AND network='tron' AND token='USDT'
-         AND status='confirmed' AND swept IS TRUE`,
-      [userId]
-    );
-    const confirmed_swept = Number(cSwept.sum || 0);
+    // 4) Confirmed AND swept
+    const confirmed_swept = await safeSum(`
+      SELECT ${sumExpr}
+      FROM deposits
+      WHERE user_id = $1
+        AND network = 'tron'
+        AND token   = 'USDT'
+      AND status  = 'confirmed'
+        AND swept   IS TRUE
+    `, [userId], 'confirmed_swept');
 
-    // Pending withdrawals (requested or broadcasted but not confirmed yet)
-    const { rows: [pWdr] } = await pool.query(
-      `SELECT COALESCE(SUM(amount),0) AS sum
-       FROM withdrawals
-       WHERE user_id=$1
-         AND network='tron' AND token='USDT'
-         AND status IN ('requested','broadcasted')`,
-      [userId]
-    );
-    const pending_withdrawals = Number(pWdr.sum || 0);
+    // 5) Pending withdrawals (requested/broadcasted)
+    const pending_withdrawals = await safeSum(`
+      SELECT ${sumExpr}
+      FROM withdrawals
+      WHERE user_id = $1
+        AND network = 'tron'
+        AND token   = 'USDT'
+        AND status IN ('requested','broadcasted')
+    `, [userId], 'pending_withdrawals');
 
-    // Withdrawable now (no 30-day locks yet): total minus pending withdrawals
+    // 6) Withdrawable now
     const withdrawable = Math.max(Number((total - pending_withdrawals).toFixed(6)), 0);
 
-    // Optional: when did we last poll Tron?
-    const last_poll_ts = await getSetting('tron_since_ts');
+    // 7) Meta: last poll ts (optional)
+    let last_poll_ts = null;
+    try {
+      const v = await getSetting('tron_since_ts');
+      last_poll_ts = v ? Number(v) : null;
+    } catch (e) {
+      console.warn('[balance] getSetting tron_since_ts failed:', e?.message || e);
+    }
 
+    // 8) Respond
     res.json({
       currency: 'USDT',
       chain: 'tron',
@@ -928,10 +938,10 @@ app.get('/balance', authenticate, async (req, res) => {
       confirmed_swept_usd: Number(confirmed_swept.toFixed(6)),
       pending_withdrawals_usd: Number(pending_withdrawals.toFixed(6)),
       withdrawable_usd: withdrawable,
-      meta: { last_tron_poll_ts: last_poll_ts ? Number(last_poll_ts) : null }
+      meta: { last_tron_poll_ts: last_poll_ts }
     });
   } catch (e) {
-    console.error('GET /balance error:', e);
+    console.error('GET /balance fatal:', e);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
@@ -941,35 +951,66 @@ app.get('/balance', authenticate, async (req, res) => {
 
 
 // === OMNIBUS HOT WALLET (TRON only) ===
-const OMNIBUS_TRON_PRIV = process.env.OMNIBUS_TRON_PRIVATE_KEY || null;  // hex
-const OMNIBUS_TRON_ADDR = process.env.OMNIBUS_TRON_ADDRESS || null;      // base58
+const OMNIBUS_TRON_PRIV = (process.env.OMNIBUS_TRON_PRIVATE_KEY || '').trim();  // hex
+const OMNIBUS_TRON_ADDR = (process.env.OMNIBUS_TRON_ADDRESS || '').trim();      // base58
 
-// === Token helpers (TRON) ===
+// === Trimmed + canonical TRON config (keep ONLY this set) ===
+const TRON_FULLHOST = (process.env.TRON_FULLHOST || 'https://api.trongrid.io').trim();
+const TRONGRID_API_KEY = (process.env.TRONGRID_API_KEY || '').trim();
+const USDT_TRON_CONTRACT = (process.env.USDT_TRON_CONTRACT || 'TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8').trim();
+const TRON_HEADERS = TRONGRID_API_KEY ? { 'TRON-PRO-API-KEY': TRONGRID_API_KEY } : {};
+
+// Init SDK (use the same headers everywhere)
+const tronWeb = new TronWeb({
+  fullHost: TRON_FULLHOST,
+  headers: TRON_HEADERS
+});
+
+
+// === Token helpers (TRON) — SINGLE SOURCE OF TRUTH ===
 async function tronUsdtContract() {
-  return await tronWeb.contract().at(USDT_TRON_CONTRACT);
+  return tronWeb.contract().at(USDT_TRON_CONTRACT);
 }
+
+/**
+ * Prefer base58 address, and pass `{ from: base58 }` to .call()
+ * Falls back to TronGrid /v1/accounts/{addr}/tokens if node call fails/returns 0.
+ */
 async function tronUsdtBalanceOf(base58Addr) {
   const c = await tronUsdtContract();
-  const raw = await c.balanceOf(tronWeb.address.toHex(base58Addr)).call();
-  return Number(raw?.toString?.()) / 1e6; // 6 decimals
+  try {
+    tronWeb.setAddress(base58Addr);                          // set owner context
+    const hex = tronWeb.address.toHex(base58Addr);           // pass hex to balanceOf
+    const raw = await c.balanceOf(hex).call({ from: base58Addr });
+    const s = raw && raw._hex ? BigInt(raw._hex).toString() : (raw?.toString?.() ?? '0');
+    const val = Number(s) / 1e6;
+    if (Number.isFinite(val) && val > 0) return val;
+    return await tronUsdtBalanceOfViaTronGrid(base58Addr);
+  } catch (e) {
+    return await tronUsdtBalanceOfViaTronGrid(base58Addr);
+  }
 }
 
 
+
+async function tronUsdtBalanceOfViaTronGrid(base58Addr) {
+  const url = new URL(`${TRON_FULLHOST}/v1/accounts/${base58Addr}/tokens`);
+  url.searchParams.set('contract_address', USDT_TRON_CONTRACT);
+  const resp = await fetch(url.toString(), { headers: TRON_HEADERS });
+  if (resp.status === 404) return 0;          // empty account → zero balance
+  if (!resp.ok) throw new Error(`TronGrid tokens HTTP ${resp.status}`);
+  const json = await resp.json();
+  const tok = (json?.data || []).find(x => (x?.tokenId || '').trim() === USDT_TRON_CONTRACT);
+  if (!tok) return 0;
+  const dec = Number(tok.tokenDecimal ?? 6);
+  const bal = Number(tok.balance || 0);
+  return bal / (10 ** dec);
+}
 
 
 // === DEPOSITS: detect TRON USDT credits (poller) ===
 
-// Convert TronGrid event address → base58 "T..." for DB matching
-function evAddrToBase58(hexLike) {
-  if (!hexLike) return null;
-  let h = String(hexLike);
-  // make it TRON-hex (starts with 41...) so TronWeb can convert to Base58
-  if (h.startsWith('0x') || h.startsWith('0X')) h = '41' + h.slice(2);
-  try { return tronWeb.address.fromHex(h); }
-  catch { return null; }
-}
-
-// === Deposit helpers (TRON) ===
+// Deposit helpers
 async function upsertDeposit(d) {
   const { user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status } = d;
   try {
@@ -999,14 +1040,10 @@ async function confirmAndCredit(tx_hash) {
   });
 }
 
-
-// Poll TronGrid TRC20 events and credit matching user deposit addresses
-// === TronGrid poller: watches USDT TRC20 Transfer events and credits matches ===
-// === DEPOSITS: detect TRON USDT credits (account-centric poller) ===
+// Poll TronGrid TRC20 events and credit matching user deposit addresses (account-centric)
 async function pollTron() {
   try {
     const sinceTs = Number(await getSetting('tron_since_ts')) || 0;
-    const headers = TRONGRID_API_KEY ? { 'TRON-PRO-API-KEY': TRONGRID_API_KEY } : {};
 
     // All user deposit addresses (TRON, USDT)
     const { rows: wallets } = await pool.query(
@@ -1021,14 +1058,13 @@ async function pollTron() {
     let maxTs = sinceTs;
 
     for (const w of wallets) {
-      // Query transfers TO this address for the USDT contract
       const u = new URL(`${TRON_FULLHOST}/v1/accounts/${w.address}/transactions/trc20`);
       u.searchParams.set('only_to', 'true');
       u.searchParams.set('limit', '200');
       u.searchParams.set('contract_address', USDT_TRON_CONTRACT);
       if (sinceTs) u.searchParams.set('min_timestamp', String(sinceTs));
 
-      const resp = await fetch(u.toString(), { headers });
+      const resp = await fetch(u.toString(), { headers: TRON_HEADERS });
       if (!resp.ok) {
         console.error('[acctPoll] http', resp.status, w.address);
         continue;
@@ -1048,7 +1084,7 @@ async function pollTron() {
 
         if (!tx || to !== w.address) continue;
 
-        // value is a string in base units; use decimals field (USDT = 6)
+        // value is string in base units; use decimals (USDT = 6)
         const decimals = Number(t.decimals ?? 6);
         const amount = Number(t.value) / (10 ** decimals);
         if (!Number.isFinite(amount) || amount <= 0) continue;
@@ -1077,26 +1113,10 @@ async function pollTron() {
   }
 }
 
-
-// run it forever; fast enough for MVP
+// Poller (20s)
 setInterval(pollTron, 20_000);
 
-
-// === Token helpers (TRON) ===
-async function tronUsdtContract() {
-  return await tronWeb.contract().at(USDT_TRON_CONTRACT);
-}
-async function tronUsdtBalanceOf(base58Addr) {
-  const c = await tronUsdtContract();
-  const hex = tronWeb.address.toHex(base58Addr);
-  tronWeb.setAddress(base58Addr);               // <-- important for .call()
-  const raw = await c.balanceOf(hex).call();
-  const s = raw?.toString?.() ?? '0';
-  return Number(s) / 1e6; // USDT has 6 decimals
-}
-
-
-// manual debug endpoint (you already added; keep it)
+// Manual refresh (single definition)
 app.get('/deposits/tron/refresh', async (_req, res) => {
   try {
     await pollTron();
@@ -1106,14 +1126,6 @@ app.get('/deposits/tron/refresh', async (_req, res) => {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
-
-
-
-
-
-
-
-
 
 // ========== SWEEPER (TRON only, every 60s) ==========
 async function sweepTronOnce() {
@@ -1128,12 +1140,12 @@ async function sweepTronOnce() {
     );
 
     for (const w of tronWallets) {
-      const addr = w.address;
-      if (addr === OMNIBUS_TRON_ADDR) continue; // don't sweep the omnibus itself, safety
+      const addr = (w.address || '').trim();
+      if (!addr || addr === OMNIBUS_TRON_ADDR) continue; // safety
 
       let bal;
       try {
-        bal = await tronUsdtBalanceOf(addr);
+        bal = await tronUsdtBalanceOf(addr); // base58 helper with fallback
       } catch (e) {
         console.error('Tron balanceOf failed for', addr, e?.message || e);
         continue;
@@ -1163,17 +1175,6 @@ async function sweepTronOnce() {
 }
 
 setInterval(sweepTronOnce, 60_000);
-
-app.get('/deposits/tron/refresh', async (_req, res) => {
-  try {
-    await pollTron();
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('manual pollTron error:', e);
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
-
 
 
 // ===== Server Init =====
