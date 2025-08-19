@@ -957,9 +957,6 @@ async function tronUsdtBalanceOf(base58Addr) {
 
 
 
-
-
-
 // === DEPOSITS: detect TRON USDT credits (poller) ===
 
 // Convert TronGrid event address → base58 "T..." for DB matching
@@ -1005,63 +1002,99 @@ async function confirmAndCredit(tx_hash) {
 
 // Poll TronGrid TRC20 events and credit matching user deposit addresses
 // === TronGrid poller: watches USDT TRC20 Transfer events and credits matches ===
+// === DEPOSITS: detect TRON USDT credits (account-centric poller) ===
 async function pollTron() {
   try {
     const sinceTs = Number(await getSetting('tron_since_ts')) || 0;
-
-    const u = new URL(`${TRON_FULLHOST}/v1/contracts/${USDT_TRON_CONTRACT}/events`);
-    u.searchParams.set('event_name', 'Transfer');
-    if (sinceTs) u.searchParams.set('min_timestamp', String(sinceTs));
-    u.searchParams.set('limit', '200');
-
     const headers = TRONGRID_API_KEY ? { 'TRON-PRO-API-KEY': TRONGRID_API_KEY } : {};
-    const resp = await fetch(u.toString(), { headers });
-    if (!resp.ok) { console.error('Tron poll http', resp.status); return; }
 
-    const data = await resp.json();
-    const events = data?.data || [];
-    if (!events.length) return;
-
-    // Build a map of deposit Base58 address -> user_id
+    // All user deposit addresses (TRON, USDT)
     const { rows: wallets } = await pool.query(
       `SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'`
     );
-    const addrToUser = new Map(wallets.map(w => [w.address, w.user_id]));
 
-    let maxTs = sinceTs;
-    for (const ev of events) {
-      const ts = Number(ev.block_timestamp || 0);
-      if (ts > maxTs) maxTs = ts;
-
-      const tx = ev.transaction_id;
-      const from = ev.result?.from ? evAddrToBase58(ev.result.from) : null;
-      const to   = ev.result?.to   ? evAddrToBase58(ev.result.to)   : null;
-      const valueRaw = ev.result?.value; // USDT has 6 decimals
-      if (!tx || !to || valueRaw == null) continue;
-
-      const userId = addrToUser.get(to);
-      if (!userId) continue; // not our deposit address
-
-      const amount = Number(valueRaw) / 1e6;
-
-      await upsertDeposit({
-        user_id: userId, network: 'tron', token: 'USDT',
-        tx_hash: tx, from_addr: from, to_addr: to,
-        amount, confirmations: TRON_REQUIRED_CONFS, status: 'pending'
-      });
-
-      // MVP: credit immediately (in prod, wait for real confs)
-      await confirmAndCredit(tx);
+    if (!wallets.length) {
+      await setSetting('tron_since_ts', sinceTs || Date.now());
+      return;
     }
 
-    await setSetting('tron_since_ts', maxTs);
+    let maxTs = sinceTs;
+
+    for (const w of wallets) {
+      // Query transfers TO this address for the USDT contract
+      const u = new URL(`${TRON_FULLHOST}/v1/accounts/${w.address}/transactions/trc20`);
+      u.searchParams.set('only_to', 'true');
+      u.searchParams.set('limit', '200');
+      u.searchParams.set('contract_address', USDT_TRON_CONTRACT);
+      if (sinceTs) u.searchParams.set('min_timestamp', String(sinceTs));
+
+      const resp = await fetch(u.toString(), { headers });
+      if (!resp.ok) {
+        console.error('[acctPoll] http', resp.status, w.address);
+        continue;
+      }
+
+      const data = await resp.json();
+      const txs = data?.data || [];
+      if (!txs.length) continue;
+
+      for (const t of txs) {
+        const ts = Number(t.block_timestamp || 0);
+        if (ts > maxTs) maxTs = ts;
+
+        const tx = t.transaction_id;
+        const to = t.to || null;     // base58 target
+        const from = t.from || null; // base58 source
+
+        if (!tx || to !== w.address) continue;
+
+        // value is a string in base units; use decimals field (USDT = 6)
+        const decimals = Number(t.decimals ?? 6);
+        const amount = Number(t.value) / (10 ** decimals);
+        if (!Number.isFinite(amount) || amount <= 0) continue;
+
+        // Upsert + credit immediately (MVP)
+        await upsertDeposit({
+          user_id: w.user_id,
+          network: 'tron',
+          token: 'USDT',
+          tx_hash: tx,
+          from_addr: from,
+          to_addr: to,
+          amount,
+          confirmations: TRON_REQUIRED_CONFS,
+          status: 'pending'
+        });
+
+        await confirmAndCredit(tx);
+        console.log(`[credit] +${amount} USDT -> user ${w.user_id} addr ${to} tx ${tx}`);
+      }
+    }
+
+    await setSetting('tron_since_ts', maxTs || Date.now());
   } catch (e) {
     console.error('pollTron error:', e?.message || e);
   }
 }
 
+
 // run it forever; fast enough for MVP
 setInterval(pollTron, 20_000);
+
+
+// === Token helpers (TRON) ===
+async function tronUsdtContract() {
+  return await tronWeb.contract().at(USDT_TRON_CONTRACT);
+}
+async function tronUsdtBalanceOf(base58Addr) {
+  const c = await tronUsdtContract();
+  const hex = tronWeb.address.toHex(base58Addr);
+  tronWeb.setAddress(base58Addr);               // <-- important for .call()
+  const raw = await c.balanceOf(hex).call();
+  const s = raw?.toString?.() ?? '0';
+  return Number(s) / 1e6; // USDT has 6 decimals
+}
+
 
 // manual debug endpoint (you already added; keep it)
 app.get('/deposits/tron/refresh', async (_req, res) => {
