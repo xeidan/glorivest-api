@@ -1187,8 +1187,8 @@ async function sweepTronOnce() {
     const { rows: tronWallets } = await pool.query(
       `SELECT id, user_id, address, priv_enc
          FROM wallets
-        WHERE network='tron' AND token='USDT'`
-    );
+        WHERE network='tron' AND token='USDT' AND sweep_enabled = true`
+    );    
 
     for (const w of tronWallets) {
       const addr = w.address;
