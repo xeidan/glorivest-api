@@ -662,22 +662,36 @@ app.get('/bot/status', authenticate, async (req, res) => {
 // POST /wallet/new  (body can be empty; defaults to tron)
 // Create (or return existing) TRON wallet — enforce ONE per user
 // Create (or return existing) TRON wallet — enforce ONE per user
+// Create (or rotate) a TRON USDT deposit wallet for the user
 app.post('/wallet/new', authenticate, async (req, res) => {
   try {
-    // 0) If user already has a TRON wallet, just return it
+    // 0) Look for the most recent TRON/USDT wallet for this user
     const { rows: existing } = await pool.query(
-      `SELECT address
-       FROM wallets
-       WHERE user_id=$1 AND network='tron'
-       ORDER BY id DESC
-       LIMIT 1`,
+      `SELECT id, address, priv_enc
+         FROM wallets
+        WHERE user_id = $1 AND network = 'tron' AND token = 'USDT'
+     ORDER BY id DESC
+        LIMIT 1`,
       [req.user.id]
     );
+
     if (existing.length) {
-      return res.json({ network: 'tron', token: 'USDT', address: existing[0].address });
+      const row = existing[0];
+
+      // If the latest wallet has a valid encrypted key, reuse it
+      if (row.priv_enc && row.priv_enc.trim() !== '') {
+        return res.json({ network: 'tron', token: 'USDT', address: row.address });
+      }
+
+      // Otherwise: rotate (create a fresh wallet) — keep the old row for history
+      console.warn('[wallet/new] rotating wallet: existing has no priv_enc', {
+        user_id: req.user.id,
+        wallet_id: row.id,
+        address: row.address
+      });
     }
 
-    // 1) Create a new TRON wallet
+    // 1) Create a new TRON account
     let acct;
     try {
       acct = await tronWeb.createAccount();
@@ -685,7 +699,7 @@ app.post('/wallet/new', authenticate, async (req, res) => {
       console.error('tronWeb.createAccount() failed, falling back:', e?.message || e);
     }
 
-    // 2) Fallback generation if needed
+    // 2) Fallback if createAccount is unavailable
     if (!acct || !acct.privateKey) {
       const gen = TronWeb?.utils?.accounts?.generateAccount
         ? TronWeb.utils.accounts.generateAccount()
@@ -697,7 +711,7 @@ app.post('/wallet/new', authenticate, async (req, res) => {
           privateKey: gen.privateKey,
           address: {
             base58,
-            hex: tronWeb.address.toHex(base58),
+            hex: tronWeb.address.toHex(base58)
           }
         };
       }
@@ -707,12 +721,14 @@ app.post('/wallet/new', authenticate, async (req, res) => {
       throw new Error('Failed to generate TRON account (no privateKey/address)');
     }
 
-    const address = acct.address.base58;
-    const priv_enc = aesEncrypt(acct.privateKey); // hex -> encrypted
+    const address = acct.address.base58;      // base58 T... address
+    const privHex = acct.privateKey;          // hex string
+    const priv_enc = aesEncrypt(privHex);     // encrypt before storing
 
+    // 3) Persist new wallet row
     await pool.query(
       `INSERT INTO wallets (user_id, network, token, address, priv_enc)
-       VALUES ($1,'tron','USDT',$2,$3)`,
+       VALUES ($1, 'tron', 'USDT', $2, $3)`,
       [req.user.id, address, priv_enc]
     );
 
@@ -722,6 +738,7 @@ app.post('/wallet/new', authenticate, async (req, res) => {
     res.status(500).json({ message: 'Internal server error', detail: String(e?.message || e) });
   }
 });
+
 
 
 
@@ -851,84 +868,71 @@ app.post('/withdraw', authenticate, async (req, res) => {
 
 
 // ===== BALANCE (TRON USDT only, with breakdown) =====
-app.get('/balance', authenticate, async (req, res) => {
-  const userId = req.user.id;
-
-  // Helper to run a safe SUM with legacy support (amount OR amount_cents/100.0)
-  const safeSum = async (sql, params, label) => {
-    try {
-      const { rows: [r] } = await pool.query(sql, params);
-      const n = Number(r?.sum ?? 0);
-      return Number.isFinite(n) ? n : 0;
-    } catch (err) {
-      console.error(`[balance] ${label} query failed:`, err);
-      return 0; // never throw; keep the endpoint alive
-    }
-  };
-
+// Helper: safe SUM(amount) with logging
+async function safeSumAmount(sql, params) {
   try {
-    // 1) Source of truth: internal ledger balance
-    const totalRaw = await getUserBalance(userId);
-    const total = Number.isFinite(Number(totalRaw)) ? Number(totalRaw) : 0;
+    const { rows: [r] } = await pool.query(sql, params);
+    return Number(r?.sum || 0);
+  } catch (e) {
+    console.error('[balance] sum query failed:', e);
+    return 0;
+  }
+}
 
-    // Expression for legacy/modern amounts
-    const sumExpr = 'COALESCE(SUM(COALESCE(amount, amount_cents/100.0)), 0) AS sum';
+app.get('/balance', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
 
-    // 2) Pending deposits (not yet confirmed)
-    const pending_deposits = await safeSum(`
-      SELECT ${sumExpr}
-      FROM deposits
-      WHERE user_id = $1
-        AND network = 'tron'
-        AND token   = 'USDT'
-        AND status <> 'confirmed'
-    `, [userId], 'pending_deposits');
+    // Source of truth for user funds (internal ledger)
+    const total = Number(await getUserBalance(userId)) || 0;
 
-    // 3) Confirmed but NOT swept
-    const confirmed_unswept = await safeSum(`
-      SELECT ${sumExpr}
-      FROM deposits
-      WHERE user_id = $1
-        AND network = 'tron'
-        AND token   = 'USDT'
-        AND status  = 'confirmed'
-        AND (swept IS NOT TRUE)
-    `, [userId], 'confirmed_unswept');
+    // Pending deposits: seen but not confirmed
+    const pending_deposits = await safeSumAmount(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+         FROM deposits
+        WHERE user_id=$1
+          AND network='tron' AND token='USDT'
+          AND status <> 'confirmed'`,
+      [userId]
+    );
 
-    // 4) Confirmed AND swept
-    const confirmed_swept = await safeSum(`
-      SELECT ${sumExpr}
-      FROM deposits
-      WHERE user_id = $1
-        AND network = 'tron'
-        AND token   = 'USDT'
-      AND status  = 'confirmed'
-        AND swept   IS TRUE
-    `, [userId], 'confirmed_swept');
+    // Confirmed, still sitting at user deposit address
+    const confirmed_unswept = await safeSumAmount(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+         FROM deposits
+        WHERE user_id=$1
+          AND network='tron' AND token='USDT'
+          AND status='confirmed' AND (swept IS NOT TRUE)`,
+      [userId]
+    );
 
-    // 5) Pending withdrawals (requested/broadcasted)
-    const pending_withdrawals = await safeSum(`
-      SELECT ${sumExpr}
-      FROM withdrawals
-      WHERE user_id = $1
-        AND network = 'tron'
-        AND token   = 'USDT'
-        AND status IN ('requested','broadcasted')
-    `, [userId], 'pending_withdrawals');
+    // Confirmed and already swept to omnibus
+    const confirmed_swept = await safeSumAmount(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+         FROM deposits
+        WHERE user_id=$1
+          AND network='tron' AND token='USDT'
+          AND status='confirmed' AND swept IS TRUE`,
+      [userId]
+    );
 
-    // 6) Withdrawable now
+    // Pending withdrawals: requested/broadcasted but not finalized
+    const pending_withdrawals = await safeSumAmount(
+      `SELECT COALESCE(SUM(amount),0) AS sum
+         FROM withdrawals
+        WHERE user_id=$1
+          AND network='tron' AND token='USDT'
+          AND status IN ('requested','broadcasted')`,
+      [userId]
+    );
+
+    // Available to withdraw now (no locks modeled here)
     const withdrawable = Math.max(Number((total - pending_withdrawals).toFixed(6)), 0);
 
-    // 7) Meta: last poll ts (optional)
-    let last_poll_ts = null;
-    try {
-      const v = await getSetting('tron_since_ts');
-      last_poll_ts = v ? Number(v) : null;
-    } catch (e) {
-      console.warn('[balance] getSetting tron_since_ts failed:', e?.message || e);
-    }
+    // Last Tron poll timestamp (ms since epoch)
+    const last_poll_raw = await getSetting('tron_since_ts');
+    const last_poll_ts = last_poll_raw ? Number(last_poll_raw) : null;
 
-    // 8) Respond
     res.json({
       currency: 'USDT',
       chain: 'tron',
@@ -938,13 +942,14 @@ app.get('/balance', authenticate, async (req, res) => {
       confirmed_swept_usd: Number(confirmed_swept.toFixed(6)),
       pending_withdrawals_usd: Number(pending_withdrawals.toFixed(6)),
       withdrawable_usd: withdrawable,
-      meta: { last_tron_poll_ts: last_poll_ts }
+      meta: { last_tron_poll_ts: Number.isFinite(last_poll_ts) ? last_poll_ts : null }
     });
   } catch (e) {
-    console.error('GET /balance fatal:', e);
+    console.error('GET /balance error:', e);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 
 
 
@@ -1175,19 +1180,43 @@ app.get('/deposits/tron/refresh', async (_req, res) => {
 // ========== SWEEPER (TRON only, every 60s) ==========
 async function sweepTronOnce() {
   if (!OMNIBUS_TRON_PRIV || !OMNIBUS_TRON_ADDR) return;
+
   try {
     const contract = await tronUsdtContract();
+
     const { rows: tronWallets } = await pool.query(
       `SELECT id, user_id, address, priv_enc
-       FROM wallets
-       WHERE network='tron' AND token='USDT'`
+         FROM wallets
+        WHERE network='tron' AND token='USDT'`
     );
 
     for (const w of tronWallets) {
       const addr = w.address;
       if (addr === OMNIBUS_TRON_ADDR) continue;
 
-      let bal;
+      // 1) Must have a stored key
+      if (!w.priv_enc) {
+        // log once per wallet id (optional: add a 'last_sweep_error_at' column to throttle)
+        console.error('sweep skip: no priv_enc for', { wallet_id: w.id, addr });
+        continue;
+      }
+
+      // 2) Decrypt & verify key controls the address
+      let perUserPrivHex, derived;
+      try {
+        perUserPrivHex = aesDecrypt(w.priv_enc);
+        derived = tronWeb.address.fromPrivateKey(perUserPrivHex); // base58
+      } catch (e) {
+        console.error('sweep skip: decrypt/derive failed', { wallet_id: w.id, addr, err: e?.message || e });
+        continue;
+      }
+      if (derived !== addr) {
+        console.error('sweep skip: priv key/address mismatch', { wallet_id: w.id, addr, derived });
+        continue; // do not attempt to sign with a mismatched key
+      }
+
+      // 3) Check balance
+      let bal = 0;
       try {
         bal = await tronUsdtBalanceOf(addr);
       } catch (e) {
@@ -1196,29 +1225,9 @@ async function sweepTronOnce() {
       }
       if (!bal || bal < SWEEP_DUST_THRESHOLD) continue;
 
-      // 🔒 verify the decrypted key actually controls this address
-      let perUserPrivHex;
+      // 4) Build & send transfer as the deposit address
       try {
-        perUserPrivHex = aesDecrypt(w.priv_enc);
-      } catch (e) {
-        console.error('decrypt priv_enc failed for', addr, e?.message || e);
-        continue;
-      }
-      let derived;
-      try {
-        derived = tronWeb.address.fromPrivateKey(perUserPrivHex); // base58
-      } catch (e) {
-        console.error('fromPrivateKey failed for', addr, e?.message || e);
-        continue;
-      }
-      if (derived !== addr) {
-        console.error('sweep skip: priv key/address mismatch', { addr, derived });
-        continue; // never try to sign from a mismatched key
-      }
-
-      try {
-        // make sure the tx is authored by the deposit address
-        tronWeb.setAddress(addr);
+        tronWeb.setAddress(addr); // set owner/sender context
 
         const amountSun = BigInt(Math.floor(bal * 1e6)).toString();
         const tx = await contract
@@ -1227,8 +1236,8 @@ async function sweepTronOnce() {
 
         await pool.query(
           `UPDATE deposits
-             SET swept = true, sweep_tx_hash = $1
-           WHERE to_addr = $2 AND network='tron' AND token='USDT'`,
+              SET swept = true, sweep_tx_hash = $1
+            WHERE to_addr = $2 AND network='tron' AND token='USDT'`,
           [tx, addr]
         );
         console.log(`🔁 Swept TRON USDT ${bal} from ${addr} -> ${OMNIBUS_TRON_ADDR} tx=${tx}`);
@@ -1241,8 +1250,11 @@ async function sweepTronOnce() {
   }
 }
 
-
 setInterval(sweepTronOnce, 60_000);
+
+
+
+
 
 
 // ===== Server Init =====
