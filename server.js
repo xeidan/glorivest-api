@@ -15,7 +15,8 @@ app.set('trust proxy', 1);
 
 // === CRYPTO IMPORTS (add under your other requires) ===
 const crypto = require('crypto');
-const fetch = require('node-fetch'); // for TronGrid polling
+- const fetch = require('node-fetch');
+
 
 let TronWeb = require('tronweb');
 TronWeb = TronWeb && (TronWeb.default || TronWeb.TronWeb || TronWeb); // pick the constructor
@@ -1386,14 +1387,6 @@ app.post('/admin/sweep-once', adminAuth, async (_req, res) => {
 
 
 
-// Create Standard account if none exists
-await pool.query(`
-  INSERT INTO accounts (user_id, tier_id, account_code)
-  SELECT $1, at.id, $2
-    FROM account_tiers at
-   WHERE at.code='standard'
-     AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.user_id=$1)
-`, [u.id, genAccountCode(u.id, 1)]);
 
 
 // Admin emails: comma-separated in env: ADMIN_EMAILS="you@domain.com,other@x.com"
