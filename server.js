@@ -7,6 +7,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
+
 const sgMail = require('@sendgrid/mail');
 
 const app = express();
@@ -116,9 +117,12 @@ async function setSetting(key, value) {
   );
 }
 
-// Ensure the crypto tables exist (no-op if created already)
+// === DB bootstrap: crypto + accounts (idempotent) ===
 (async function bootstrapCryptoTables() {
   try {
+    await pool.query('BEGIN');
+
+    // 1) Core crypto tables (yours, unchanged in shape)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
         id SERIAL PRIMARY KEY,
@@ -162,21 +166,101 @@ async function setSetting(key, value) {
         value TEXT NOT NULL
       );
     `);
+
+    // 2) Accounts/Tiers tables (new)
     await pool.query(`
-      ALTER TABLE deposits
-      ADD COLUMN IF NOT EXISTS swept BOOLEAN DEFAULT false,
-      ADD COLUMN IF NOT EXISTS sweep_tx_hash TEXT;
-    
-      ALTER TABLE withdrawals
-      ADD COLUMN IF NOT EXISTS fee_amount NUMERIC(38,8) DEFAULT 0;
+      -- Tiers
+      CREATE TABLE IF NOT EXISTS account_tiers (
+        id SERIAL PRIMARY KEY,
+        code TEXT UNIQUE NOT NULL CHECK (code IN ('standard','pro','elite')),
+        display_name TEXT NOT NULL,
+        return_percent INT NOT NULL,
+        min_deposit_cents INT NOT NULL,
+        fee_cents INT NOT NULL
+      );
+
+      -- Per-user accounts
+      CREATE TABLE IF NOT EXISTS accounts (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        tier_id INT NOT NULL REFERENCES account_tiers(id),
+        account_code TEXT NOT NULL UNIQUE,           -- e.g. GV150123-01 (UI may prefix "#")
+        status TEXT NOT NULL DEFAULT 'active',
+        balance_cents BIGINT NOT NULL DEFAULT 0,
+        profit_cents  BIGINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      -- Account-scoped wallets (for UI linking)
+      CREATE TABLE IF NOT EXISTS account_wallets (
+        id BIGSERIAL PRIMARY KEY,
+        account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        asset TEXT NOT NULL,
+        network TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        address TEXT NOT NULL UNIQUE,
+        priv_enc TEXT,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
     `);
-    
-    console.log('✅ Crypto tables ready');
+
+    // 3) Bring legacy tables up-to-date (safe with IF NOT EXISTS)
+    await pool.query(`
+      -- deposits: your existing extras
+      ALTER TABLE deposits
+        ADD COLUMN IF NOT EXISTS swept BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS sweep_tx_hash TEXT;
+
+      -- withdrawals: your existing extra fee column
+      ALTER TABLE withdrawals
+        ADD COLUMN IF NOT EXISTS fee_amount NUMERIC(38,8) DEFAULT 0;
+
+      -- wallets: columns used by poller/sweeper + link to accounts
+      ALTER TABLE wallets
+        ADD COLUMN IF NOT EXISTS sweep_enabled BOOLEAN DEFAULT true,
+        ADD COLUMN IF NOT EXISTS account_id BIGINT REFERENCES accounts(id);
+
+      -- deposits: link rows to a specific account (nullable)
+      ALTER TABLE deposits
+        ADD COLUMN IF NOT EXISTS account_id BIGINT REFERENCES accounts(id);
+    `);
+
+    // 4) Helpful indexes
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS accounts_user_id_idx ON accounts(user_id);
+      CREATE INDEX IF NOT EXISTS account_wallets_account_id_idx ON account_wallets(account_id);
+      CREATE INDEX IF NOT EXISTS deposits_user_acct_idx ON deposits(user_id, account_id);
+    `);
+
+    await pool.query('COMMIT');
+    console.log('✅ Crypto + Accounts tables ready');
+
+    // 5) Seed/refresh tiers
+    await ensureTierSeed();
   } catch (e) {
-    console.error('DB bootstrap (crypto) failed:', e);
+    try { await pool.query('ROLLBACK'); } catch {}
+    console.error('DB bootstrap failed:', e);
     process.exit(1);
   }
 })();
+
+// Seed/refresh tiers once (idempotent)
+async function ensureTierSeed() {
+  await pool.query(`
+    INSERT INTO account_tiers (code, display_name, return_percent, min_deposit_cents, fee_cents)
+    VALUES 
+      ('standard','Standard Account',15,   2000,    0),
+      ('pro',     'Pro Account',     20,  20000, 2000),
+      ('elite',   'Elite Account',   25, 100000, 5000)
+    ON CONFLICT (code) DO UPDATE
+      SET display_name = EXCLUDED.display_name,
+          return_percent = EXCLUDED.return_percent,
+          min_deposit_cents = EXCLUDED.min_deposit_cents,
+          fee_cents = EXCLUDED.fee_cents;
+  `);
+}
+
 
 
 
@@ -186,6 +270,8 @@ const allowedOrigins = [
   'http://127.0.0.1:5500',
   'http://localhost:5502',
   'http://127.0.0.1:5502',
+  'http://127.0.0.1:5503',
+  'http://localhost:5503',
   'https://glorivest.com',
   'https://www.glorivest.com',
   'https://xeidan.github.io',
@@ -665,71 +751,44 @@ app.get('/bot/status', authenticate, async (req, res) => {
 // Create (or rotate) a TRON USDT deposit wallet for the user
 app.post('/wallet/new', authenticate, async (req, res) => {
   try {
-    // 0) Look for the most recent TRON/USDT wallet for this user
-    const { rows: existing } = await pool.query(
+    // If user already has a usable TRON USDT wallet (with key), return it
+    const { rows: existingFull } = await pool.query(
       `SELECT id, address, priv_enc
          FROM wallets
-        WHERE user_id = $1 AND network = 'tron' AND token = 'USDT'
-     ORDER BY id DESC
-        LIMIT 1`,
+        WHERE user_id=$1 AND network='tron' AND token='USDT'
+        ORDER BY id DESC LIMIT 1`,
       [req.user.id]
     );
 
-    if (existing.length) {
-      const row = existing[0];
-
-      // If the latest wallet has a valid encrypted key, reuse it
-      if (row.priv_enc && row.priv_enc.trim() !== '') {
-        return res.json({ network: 'tron', token: 'USDT', address: row.address });
-      }
-
-      // Otherwise: rotate (create a fresh wallet) — keep the old row for history
-      console.warn('[wallet/new] rotating wallet: existing has no priv_enc', {
-        user_id: req.user.id,
-        wallet_id: row.id,
-        address: row.address
-      });
+    if (existingFull.length && existingFull[0].priv_enc) {
+      return res.json({ network: 'tron', token: 'USDT', address: existingFull[0].address });
     }
 
-    // 1) Create a new TRON account
+    // Otherwise, generate a brand-new wallet and STORE ITS KEY
     let acct;
     try {
       acct = await tronWeb.createAccount();
     } catch (e) {
-      console.error('tronWeb.createAccount() failed, falling back:', e?.message || e);
-    }
-
-    // 2) Fallback if createAccount is unavailable
-    if (!acct || !acct.privateKey) {
-      const gen = TronWeb?.utils?.accounts?.generateAccount
-        ? TronWeb.utils.accounts.generateAccount()
-        : null;
-
-      if (gen?.privateKey) {
-        const base58 = tronWeb.address.fromPrivateKey(gen.privateKey);
-        acct = {
-          privateKey: gen.privateKey,
-          address: {
-            base58,
-            hex: tronWeb.address.toHex(base58)
-          }
-        };
-      }
+      console.error('tronWeb.createAccount failed, fallback:', e?.message || e);
     }
 
     if (!acct?.privateKey || !acct?.address?.base58) {
-      throw new Error('Failed to generate TRON account (no privateKey/address)');
+      const gen = TronWeb?.utils?.accounts?.generateAccount?.();
+      if (!gen?.privateKey) throw new Error('Failed to generate TRON account');
+      const base58 = tronWeb.address.fromPrivateKey(gen.privateKey);
+      acct = { privateKey: gen.privateKey, address: { base58, hex: tronWeb.address.toHex(base58) } };
     }
 
-    const address = acct.address.base58;      // base58 T... address
-    const privHex = acct.privateKey;          // hex string
-    const priv_enc = aesEncrypt(privHex);     // encrypt before storing
+    const address = acct.address.base58;
+    const privEnc = aesEncrypt(acct.privateKey); // AES‑GCM encrypt with your ENC_KEY
 
-    // 3) Persist new wallet row
+    // Insert (or repair a previous keyless row for same user/address)
     await pool.query(
-      `INSERT INTO wallets (user_id, network, token, address, priv_enc)
-       VALUES ($1, 'tron', 'USDT', $2, $3)`,
-      [req.user.id, address, priv_enc]
+      `INSERT INTO wallets (user_id, network, token, address, priv_enc, sweep_enabled)
+       VALUES ($1,'tron','USDT',$2,$3,true)
+       ON CONFLICT (address) DO UPDATE
+         SET priv_enc = COALESCE(wallets.priv_enc, EXCLUDED.priv_enc)`,
+      [req.user.id, address, privEnc]
     );
 
     return res.json({ network: 'tron', token: 'USDT', address });
@@ -1017,26 +1076,24 @@ async function tronUsdtBalanceOfViaTronGrid(base58Addr) {
 
 // Deposit helpers
 async function upsertDeposit(d) {
-  const { user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status } = d;
+  const { user_id, account_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status } = d;
   try {
     await pool.query(
       `
-      INSERT INTO deposits (user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      INSERT INTO deposits (user_id, account_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       ON CONFLICT (tx_hash) DO UPDATE
       SET
         confirmations = GREATEST(deposits.confirmations, EXCLUDED.confirmations),
-        status = CASE
-                   WHEN deposits.status = 'confirmed' THEN 'confirmed'
-                   ELSE EXCLUDED.status
-                 END
+        status = CASE WHEN deposits.status = 'confirmed' THEN 'confirmed' ELSE EXCLUDED.status END
       `,
-      [user_id, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status]
+      [user_id, account_id || null, network, token, tx_hash, from_addr, to_addr, amount, confirmations, status]
     );
   } catch (e) {
     console.error('upsertDeposit error:', e);
   }
 }
+
 
 
 
@@ -1068,8 +1125,9 @@ async function pollTron() {
 
     // All TRON USDT deposit addresses we manage
     const { rows: wallets } = await pool.query(
-      "SELECT user_id, address FROM wallets WHERE network='tron' AND token='USDT'"
+      "SELECT user_id, address, account_id FROM wallets WHERE network='tron' AND token='USDT'"
     );
+    
 
     if (!wallets.length) {
       await setSetting('tron_since_ts', sinceTs || Date.now());
@@ -1131,15 +1189,17 @@ async function pollTron() {
         // 1) Upsert (non‑downgrading)
         await upsertDeposit({
           user_id: w.user_id,
+          account_id: w.account_id || null,   // <-- attach if this wallet belongs to an account
           network: 'tron',
           token: 'USDT',
           tx_hash: tx,
           from_addr: from,
           to_addr: to,
           amount,
-          confirmations: TRON_REQUIRED_CONFS, // MVP: treat as fully confirmed
+          confirmations: TRON_REQUIRED_CONFS,
           status: 'pending'
         });
+        
 
         // 2) Confirm & credit ONCE; log only if it actually credited
         let didCredit = false;
@@ -1160,6 +1220,31 @@ async function pollTron() {
     console.error('pollTron error:', e?.message || e);
   }
 }
+
+
+
+function genAccountCode(userId, seq){
+  // Matches your UI style: "GV{150000 + userId}-{NN}"
+  const base = 150000 + Number(userId || 0);
+  return `GV${base}-${String(seq).padStart(2,'0')}`;
+}
+
+/** Generate a TRON deposit address for an account and return { address, privEnc } */
+async function createTronAddressForAccount() {
+  let acct;
+  try {
+    acct = await tronWeb.createAccount();
+  } catch (e) {
+    const gen = TronWeb?.utils?.accounts?.generateAccount?.();
+    if (!gen?.privateKey) throw new Error('Failed to generate TRON account');
+    const base58 = tronWeb.address.fromPrivateKey(gen.privateKey);
+    acct = { privateKey: gen.privateKey, address: { base58, hex: tronWeb.address.toHex(base58) } };
+  }
+  const address = acct.address.base58;
+  const privEnc = aesEncrypt(acct.privateKey);
+  return { address, privEnc };
+}
+
 
 
 
@@ -1188,7 +1273,7 @@ async function sweepTronOnce() {
       `SELECT id, user_id, address, priv_enc
          FROM wallets
         WHERE network='tron' AND token='USDT' AND sweep_enabled = true`
-    );    
+    );      
 
     for (const w of tronWallets) {
       const addr = w.address;
@@ -1252,6 +1337,193 @@ async function sweepTronOnce() {
 
 setInterval(sweepTronOnce, 60_000);
 
+
+app.post('/admin/wallet/:address/sweep/:action', adminAuth, async (req, res) => {
+  const { address, action } = req.params;
+  const enabled = action === 'enable';
+  await pool.query(
+    `UPDATE wallets SET sweep_enabled=$1 WHERE network='tron' AND token='USDT' AND address=$2`,
+    [enabled, address]
+  );
+  res.json({ address, sweep_enabled: enabled });
+});
+
+
+app.post('/admin/sweep-once', adminAuth, async (_req, res) => {
+  await sweepTronOnce();
+  res.json({ ok: true });
+});
+
+//============================================================
+
+
+
+// POST /accounts  { tier: 'standard' | 'pro' | 'elite' }
+app.post('/accounts', authenticate, async (req, res) => {
+  const { tier } = req.body || {};
+  if (!tier) return res.status(400).json({ message: 'Tier is required' });
+
+  const client = await pool.connect();
+  try {
+    const { rows: [t] } = await client.query(
+      `SELECT id, display_name, return_percent, min_deposit_cents, fee_cents
+         FROM account_tiers WHERE code=$1`, [tier]
+    );
+    if (!t) return res.status(400).json({ message: 'Invalid tier' });
+
+    // per-user sequence = count+1
+    const { rows: [cnt] } = await client.query(
+      `SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1`,
+      [req.user.id]
+    );
+    const seq = (cnt?.c || 0) + 1;
+    const account_code = genAccountCode(req.user.id, seq);
+
+    const { rows: [acc] } = await client.query(`
+      INSERT INTO accounts (user_id, tier_id, account_code)
+      VALUES ($1,$2,$3)
+      RETURNING id, account_code, status, balance_cents, profit_cents, created_at
+    `, [req.user.id, t.id, account_code]);
+
+    res.status(201).json({
+      id: acc.id,
+      account_code: acc.account_code,
+      status: acc.status,
+      balance_cents: acc.balance_cents,
+      profit_cents: acc.profit_cents,
+      created_at: acc.created_at,
+      // include tier fields the frontend uses
+      tier,
+      display_name: t.display_name,
+      return_percent: t.return_percent,
+      min_deposit_cents: t.min_deposit_cents
+    });
+  } catch (e) {
+    console.error('POST /accounts', e);
+    if (String(e.code) === '23505') {
+      return res.status(409).json({ message: 'Account code conflict, retry' });
+    }
+    res.status(500).json({ message: 'Failed to create account' });
+  } finally {
+    client.release();
+  }
+});
+
+
+// GET /accounts
+app.get('/accounts', authenticate, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT a.id, a.account_code, a.status, a.balance_cents, a.profit_cents, a.created_at,
+           at.code AS tier, at.display_name, at.return_percent, at.min_deposit_cents
+    FROM accounts a
+    JOIN account_tiers at ON at.id = a.tier_id
+    WHERE a.user_id = $1
+    ORDER BY a.created_at ASC
+  `, [req.user.id]);
+  res.json(rows);
+});
+
+
+// POST /accounts/:id/wallet/assign  { asset:'USDT', network:'TRON' }
+app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
+  const { id } = req.params;
+  const asset = 'USDT';
+  const network = 'TRON';
+  const symbol = 'USDT-TRC20';
+
+  // 1) Ownership
+  const { rows: [own] } = await pool.query(
+    `SELECT a.id, a.user_id FROM accounts a WHERE a.id=$1 AND a.user_id=$2`,
+    [id, req.user.id]
+  );
+  if (!own) return res.status(404).json({ message: 'Account not found' });
+
+  // 2) Existing (account_wallets) → return
+  const { rows: [aw] } = await pool.query(`
+    SELECT address FROM account_wallets
+    WHERE account_id=$1 AND asset=$2 AND network=$3 AND is_active=true
+  `, [id, asset, network]);
+  if (aw) return res.json({ asset, network, symbol, address: aw.address });
+
+  // 3) Existing (wallets with account_id) → return
+  const { rows: [w] } = await pool.query(`
+    SELECT address FROM wallets
+     WHERE user_id=$1 AND account_id=$2 AND network='tron' AND token='USDT' AND sweep_enabled = true
+     ORDER BY id DESC LIMIT 1
+  `, [req.user.id, id]);
+  if (w) return res.json({ asset, network, symbol, address: w.address });
+
+  // 4) Create new TRON address
+  let addr, privEnc;
+  try {
+    const o = await createTronAddressForAccount();
+    addr = o.address;
+    privEnc = o.privEnc;
+  } catch (e) {
+    console.error('createTronAddressForAccount failed:', e);
+    return res.status(500).json({ message: 'Could not create deposit address' });
+  }
+
+  // 5) Persist in BOTH tables (UI + poller/sweeper)
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    await client.query(`
+      INSERT INTO account_wallets (account_id, asset, network, symbol, address, priv_enc, is_active)
+      VALUES ($1,$2,$3,$4,$5,$6,true)
+      ON CONFLICT (address) DO NOTHING
+    `, [id, asset, network, symbol, addr, privEnc]);
+
+    await client.query(`
+      INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
+      VALUES ($1,$2,'tron','USDT',$3,$4,true)
+      ON CONFLICT (address) DO UPDATE
+        SET priv_enc = COALESCE(wallets.priv_enc, EXCLUDED.priv_enc),
+            account_id = COALESCE(wallets.account_id, EXCLUDED.account_id),
+            sweep_enabled = true
+    `, [req.user.id, id, addr, privEnc]);
+
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('assign wallet save failed:', e);
+    return res.status(500).json({ message: 'Failed to save deposit address' });
+  } finally {
+    client.release();
+  }
+
+  return res.json({ asset, network, symbol, address: addr });
+});
+
+
+
+
+// GET /accounts/:id
+app.get('/accounts/:id', authenticate, async (req, res) => {
+  const { id } = req.params;
+  const { rows: [row] } = await pool.query(`
+    SELECT a.id, a.account_code, a.status, a.balance_cents, a.profit_cents, a.created_at,
+           at.code AS tier, at.display_name, at.return_percent, at.min_deposit_cents
+    FROM accounts a
+    JOIN account_tiers at ON at.id = a.tier_id
+    WHERE a.id=$1 AND a.user_id=$2
+  `, [id, req.user.id]);
+  if (!row) return res.status(404).json({ message: 'Not found' });
+  res.json(row);
+});
+
+// GET /accounts/:id/deposits
+app.get('/accounts/:id/deposits', authenticate, async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await pool.query(`
+    SELECT created_at, amount_cents, currency, status, tx_hash
+    FROM deposits
+    WHERE user_id=$1 AND account_id=$2
+    ORDER BY created_at DESC
+  `, [req.user.id, id]);
+  res.json(rows);
+});
 
 
 
