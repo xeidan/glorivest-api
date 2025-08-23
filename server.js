@@ -363,49 +363,41 @@ app.get("/account/me", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const { rows: userRows } = await pool.query(`
-      SELECT email, id, balance, reward_balance, referral_code, total_referrals, referral_earnings
+    const { rows: [user] } = await pool.query(`
+      SELECT id, email, balance, reward_balance, referral_code, total_referrals, referral_earnings
       FROM users
       WHERE id = $1
     `, [userId]);
 
-    if (userRows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    const user = userRows[0];
-    const glorivestId = `GV${150000 + user.id}`;
-
-    const { rows: acctRows } = await pool.query(`
-      SELECT a.id, a.account_code, at.code AS tier
-      FROM accounts a
-      JOIN account_tiers at ON at.id = a.tier_id
-      WHERE a.user_id = $1
-      ORDER BY a.created_at ASC
+    // First (oldest) account as the default
+    const { rows: [acct] } = await pool.query(`
+      SELECT id AS account_id, account_code
+      FROM accounts
+      WHERE user_id = $1
+      ORDER BY created_at ASC
       LIMIT 1
     `, [userId]);
 
-    const defaultAccount = acctRows[0] || null;
-
     res.json({
+      user_id: user.id,
       email: user.email,
-      glorivest_id: glorivestId,
-      balance: parseFloat(user.balance || 0),
-      reward_balance: parseFloat(user.reward_balance || 0),
+      glorivest_id: `GV${150000 + user.id}`,
+      balance: Number(user.balance || 0),
+      reward_balance: Number(user.reward_balance || 0),
       referral_code: user.referral_code || "N/A",
       total_referrals: user.total_referrals || 0,
-      referral_earnings: parseFloat(user.referral_earnings || 0),
-
-      // new fields for UI
-      default_account_id: defaultAccount?.id ?? null,
-      default_account_code: defaultAccount?.account_code ?? null,
-      default_account_tier: defaultAccount?.tier ?? null
+      referral_earnings: Number(user.referral_earnings || 0),
+      default_account_id: acct?.account_id ?? null,
+      default_account_code: acct?.account_code ?? null
     });
   } catch (err) {
     console.error("Error in /account/me:", err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 
