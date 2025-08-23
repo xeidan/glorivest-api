@@ -360,25 +360,36 @@ function authenticate(req, res, next) {
 
 
 // ===== ACCOUNT ME =====
+// ===== ACCOUNT ME =====
 app.get("/account/me", authenticate, async (req, res) => {
-  console.log("🔐 /account/me hit", req.headers.authorization);
   try {
     const userId = req.user.id;
-    console.log("User ID:", userId);
 
-    const result = await pool.query(`
+    // basic user fields
+    const { rows: userRows } = await pool.query(`
       SELECT email, id, balance, reward_balance, referral_code, total_referrals, referral_earnings
       FROM users
       WHERE id = $1
     `, [userId]);
 
-    if (result.rows.length === 0) {
-      console.log("User not found");
+    if (userRows.length === 0) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const user = result.rows[0];
+    const user = userRows[0];
     const glorivestId = `GV${150000 + user.id}`;
+
+    // fetch the earliest (default) account if it exists
+    const { rows: acctRows } = await pool.query(`
+      SELECT a.id, a.account_code, at.code AS tier
+      FROM accounts a
+      JOIN account_tiers at ON at.id = a.tier_id
+      WHERE a.user_id = $1
+      ORDER BY a.created_at ASC
+      LIMIT 1
+    `, [userId]);
+
+    const defaultAccount = acctRows[0] || null;
 
     res.json({
       email: user.email,
@@ -387,13 +398,19 @@ app.get("/account/me", authenticate, async (req, res) => {
       reward_balance: parseFloat(user.reward_balance || 0),
       referral_code: user.referral_code || "N/A",
       total_referrals: user.total_referrals || 0,
-      referral_earnings: parseFloat(user.referral_earnings || 0)
+      referral_earnings: parseFloat(user.referral_earnings || 0),
+
+      // 🆕 default account (may be null if none exists yet)
+      default_account_id: defaultAccount?.id ?? null,
+      default_account_code: defaultAccount?.account_code ?? null,
+      default_account_tier: defaultAccount?.tier ?? null
     });
   } catch (err) {
     console.error("Error in /account/me:", err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 
