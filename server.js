@@ -578,9 +578,11 @@ app.post('/verify-otp', async (req, res) => {
   await deleteOldUnverifiedUsers();
 
   try {
-    const result = await pool.query('SELECT otp, otp_created_at FROM users WHERE email = $1', [email]);
+    const result = await pool.query(
+      'SELECT id, otp, otp_created_at FROM users WHERE email = $1',
+      [email]
+    );
     const user = result.rows[0];
-
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const now = new Date();
@@ -590,13 +592,28 @@ app.post('/verify-otp', async (req, res) => {
     if (diffInMin > 10) return res.status(400).json({ message: 'OTP expired. Please request a new one.' });
     if (user.otp !== otp) return res.status(400).json({ message: 'Invalid OTP' });
 
-    await pool.query('UPDATE users SET otp = NULL, otp_created_at = NULL, is_verified = true WHERE email = $1', [email]);
+    // ✅ Mark verified
+    await pool.query(
+      'UPDATE users SET otp = NULL, otp_created_at = NULL, is_verified = true WHERE email = $1',
+      [email]
+    );
+
+    // ✅ Create a default Standard account if the user has none
+    await pool.query(`
+      INSERT INTO accounts (user_id, tier_id, account_code)
+      SELECT $1, at.id, $2
+        FROM account_tiers at
+       WHERE at.code = 'standard'
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.user_id = $1)
+    `, [user.id, genAccountCode(user.id, 1)]);
+
     res.status(200).json({ message: 'OTP verified successfully' });
   } catch (err) {
     console.error('Error verifying OTP:', err);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 
 
 
@@ -1367,10 +1384,7 @@ app.post('/admin/sweep-once', adminAuth, async (_req, res) => {
   res.json({ ok: true });
 });
 
-// After successful verification:
-const { rows: [u] } = await pool.query(
-  'SELECT id FROM users WHERE email=$1', [email]
-);
+
 
 // Create Standard account if none exists
 await pool.query(`
