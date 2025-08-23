@@ -358,14 +358,11 @@ function authenticate(req, res, next) {
 
 
 
-
-// ===== ACCOUNT ME =====
 // ===== ACCOUNT ME =====
 app.get("/account/me", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // basic user fields
     const { rows: userRows } = await pool.query(`
       SELECT email, id, balance, reward_balance, referral_code, total_referrals, referral_earnings
       FROM users
@@ -379,7 +376,6 @@ app.get("/account/me", authenticate, async (req, res) => {
     const user = userRows[0];
     const glorivestId = `GV${150000 + user.id}`;
 
-    // fetch the earliest (default) account if it exists
     const { rows: acctRows } = await pool.query(`
       SELECT a.id, a.account_code, at.code AS tier
       FROM accounts a
@@ -400,7 +396,7 @@ app.get("/account/me", authenticate, async (req, res) => {
       total_referrals: user.total_referrals || 0,
       referral_earnings: parseFloat(user.referral_earnings || 0),
 
-      // 🆕 default account (may be null if none exists yet)
+      // new fields for UI
       default_account_id: defaultAccount?.id ?? null,
       default_account_code: defaultAccount?.account_code ?? null,
       default_account_tier: defaultAccount?.tier ?? null
@@ -410,6 +406,7 @@ app.get("/account/me", authenticate, async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 
