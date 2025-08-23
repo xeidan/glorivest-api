@@ -1103,13 +1103,26 @@ async function confirmAndCredit(tx_hash) {
     const { rows } = await c.query('SELECT * FROM deposits WHERE tx_hash=$1 FOR UPDATE', [tx_hash]);
     if (!rows.length) return false;
     const d = rows[0];
-    if (d.status === 'confirmed') return false;     // already done → no credit
+    if (d.status === 'confirmed') return false;
 
     await c.query('UPDATE deposits SET status=$1 WHERE tx_hash=$2', ['confirmed', tx_hash]);
-    await c.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2', [Number(d.amount), d.user_id]);
-    return true;                                     // credited now
+
+    // Credit user (USDT units)
+    await c.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2',
+                  [Number(d.amount), d.user_id]);
+
+    // Also credit the account, if linked (store in cents)
+    if (d.account_id) {
+      const cents = Math.round(Number(d.amount) * 100);
+      await c.query(
+        'UPDATE accounts SET balance_cents = COALESCE(balance_cents,0) + $1 WHERE id=$2',
+        [cents, d.account_id]
+      );
+    }
+    return true;
   });
 }
+
 
 
 // Poll TronGrid for USDT TRC20 transfers into user deposit addresses.
@@ -1354,6 +1367,41 @@ app.post('/admin/sweep-once', adminAuth, async (_req, res) => {
   res.json({ ok: true });
 });
 
+// After successful verification:
+const { rows: [u] } = await pool.query(
+  'SELECT id FROM users WHERE email=$1', [email]
+);
+
+// Create Standard account if none exists
+await pool.query(`
+  INSERT INTO accounts (user_id, tier_id, account_code)
+  SELECT $1, at.id, $2
+    FROM account_tiers at
+   WHERE at.code='standard'
+     AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.user_id=$1)
+`, [u.id, genAccountCode(u.id, 1)]);
+
+
+// Admin emails: comma-separated in env: ADMIN_EMAILS="you@domain.com,other@x.com"
+const ADMINS = (process.env.ADMIN_EMAILS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+function adminAuth(req, res, next) {
+  const h = req.headers.authorization;
+  if (!h || !h.startsWith('Bearer ')) return res.status(401).json({ message: 'Missing token' });
+  try {
+    const decoded = jwt.verify(h.split(' ')[1], process.env.JWT_SECRET);
+    if (!decoded?.email || !ADMINS.includes(String(decoded.email).toLowerCase())) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    req.user = decoded;
+    next();
+  } catch (e) {
+    return res.status(403).json({ message: 'Invalid token' });
+  }
+}
+
+
 //============================================================
 
 
@@ -1517,13 +1565,19 @@ app.get('/accounts/:id', authenticate, async (req, res) => {
 app.get('/accounts/:id/deposits', authenticate, async (req, res) => {
   const { id } = req.params;
   const { rows } = await pool.query(`
-    SELECT created_at, amount_cents, currency, status, tx_hash
-    FROM deposits
-    WHERE user_id=$1 AND account_id=$2
-    ORDER BY created_at DESC
+    SELECT created_at,
+           (amount * 100)::bigint AS amount_cents,
+           token AS currency,
+           status,
+           tx_hash
+      FROM deposits
+     WHERE user_id = $1
+       AND account_id = $2
+     ORDER BY created_at DESC
   `, [req.user.id, id]);
   res.json(rows);
 });
+
 
 
 
