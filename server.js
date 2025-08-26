@@ -353,14 +353,6 @@ function authenticate(req, res, next) {
     return res.status(401).json({ message: err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid or expired token' });
   }
 }
-const authRequired = authenticate;
-
-
-// Alias so routes using `authRequired` keep working
-const authRequired = authenticate;
-
-// (optional) export if you split files
-// module.exports = { authenticate, authRequired };
 
 
 
@@ -851,7 +843,7 @@ app.get('/wallet/:network', authenticate, async (req, res) => {
 
 
 // ======= WITHDRAWAL (TRON USDT via OMNIBUS) =======
-app.post('/withdraw', authRequired, async (req, res) => {
+app.post('/withdraw', authenticate, async (req, res) => {
   try {
     const userId = Number(req.user.id);
     const { amount, address } = req.body || {};
@@ -1508,7 +1500,7 @@ async function getOrCreateUserTronWallet(pool, userId, accountId) {
 }
 
 // ---- Route: assign (or return) user TRC20 wallet for a specific account
-app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
+app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
   try {
     const accountId = Number(req.params.id);
     const userId = Number(req.user.id);
