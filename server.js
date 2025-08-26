@@ -338,23 +338,40 @@ async function deleteOldUnverifiedUsers() {
 
 
 // ===== AUTH MIDDLEWARE =====
+// ===== AUTH MIDDLEWARE =====
 function authenticate(req, res, next) {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Missing or invalid token" });
-  }
-
-  const token = authHeader.split(" ")[1];
+  const h = req.headers.authorization || '';
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  if (!m) return res.status(401).json({ message: 'Missing or invalid token' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // 👈 IMPORTANT: attaches user data to the request
-    next();
+    const decoded = jwt.verify(m[1], process.env.JWT_SECRET);
+
+    // Normalize user id so downstream code can safely use req.user.id
+    const id = decoded.userId ?? decoded.id ?? decoded.sub;
+    if (!id) return res.status(401).json({ message: 'Token missing user id' });
+
+    // Attach a consistent shape (keep other claims too if you use them)
+    req.user = {
+      id: Number(id),
+      email: decoded.email ?? null,
+      role: decoded.role ?? 'user',
+      ...decoded
+    };
+
+    return next();
   } catch (err) {
-    return res.status(403).json({ message: "Invalid or expired token" });
+    const msg = err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid or expired token';
+    return res.status(401).json({ message: msg });
   }
 }
+
+// Alias so routes using `authRequired` keep working
+const authRequired = authenticate;
+
+// (optional) export if you split files
+// module.exports = { authenticate, authRequired };
+
 
 
 
@@ -1484,20 +1501,18 @@ app.get('/accounts', authenticate, async (req, res) => {
 });
 
 
-// POST /accounts/:id/wallet/assign  { asset:'USDT', network:'TRON' }
+// POST /accounts/:id/wallet/assign
 app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
   const accountId = Number(req.params.id);
   const userId = req.user.id;
 
-  if (!accountId) {
-    return res.status(400).json({ message: 'Invalid account id' });
-  }
+  if (!accountId) return res.status(400).json({ message: 'Invalid account id' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) If this account already has a TRON USDT wallet, just return it
+    // 1) If this account already has a TRON USDT wallet linked, return it
     const existingLink = await client.query(
       `SELECT address
          FROM account_wallets
@@ -1517,8 +1532,8 @@ app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
       });
     }
 
-    // 2) Reuse the user's TRON wallet if it exists; otherwise create+upsert it
-    let walletRow = await client.query(
+    // 2) Fetch or create the user's TRON wallet (one per user)
+    let w = await client.query(
       `SELECT id, address, priv_enc
          FROM wallets
         WHERE user_id = $1 AND network = 'TRON'
@@ -1526,36 +1541,48 @@ app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
       [userId]
     );
 
-    if (!walletRow.rowCount) {
-      // You likely already have a util that returns { address, priv_enc }
-      const { address, priv_enc } = await createTronWalletFor(userId); // <- your function
+    if (!w.rowCount) {
+      // Use your existing wallet creation util; must return { address, priv_enc }
+      const { address, priv_enc } = await createTronWalletFor(userId);
 
-      // Upsert against the existing unique constraint
-      walletRow = await client.query(
-        `INSERT INTO wallets (user_id, network, asset, symbol, address, priv_enc)
-         VALUES ($1, 'TRON', 'USDT', 'USDT-TRC20', $2, $3)
-         ON CONFLICT ON CONSTRAINT wallets_user_tron_unique
-         DO UPDATE SET address = EXCLUDED.address
-         RETURNING id, address, priv_enc`,
-        [userId, address, priv_enc]
-      );
+      // Try insert, but handle a race with a second request
+      try {
+        w = await client.query(
+          `INSERT INTO wallets (user_id, network, asset, symbol, address, priv_enc)
+           VALUES ($1, 'TRON', 'USDT', 'USDT-TRC20', $2, $3)
+           RETURNING id, address, priv_enc`,
+          [userId, address, priv_enc]
+        );
+      } catch (e) {
+        // someone else inserted concurrently: just reselect
+        if (e.code !== '23505') throw e;
+        w = await client.query(
+          `SELECT id, address, priv_enc
+             FROM wallets
+            WHERE user_id = $1 AND network = 'TRON'
+            LIMIT 1`,
+          [userId]
+        );
+      }
     }
 
-    const { address, priv_enc } = walletRow.rows[0];
+    const { id: walletId, address, priv_enc } = w.rows[0];
 
-    // 3) Link wallet to this account (idempotent)
-    const link = await client.query(
-      `INSERT INTO account_wallets (account_id, asset, network, symbol, address, priv_enc)
-       VALUES ($1, 'USDT', 'TRON', 'USDT-TRC20', $2, $3)
+    // 3) Link to this account (upsert by (account_id, asset, network))
+    // Make sure you have a unique constraint on (account_id, asset, network) in account_wallets
+    await client.query(
+      `INSERT INTO account_wallets (account_id, asset, network, symbol, address, priv_enc, wallet_id)
+       VALUES ($1, 'USDT', 'TRON', 'USDT-TRC20', $2, $3, $4)
        ON CONFLICT (account_id, asset, network)
-       DO UPDATE SET address = EXCLUDED.address, priv_enc = EXCLUDED.priv_enc
-       RETURNING address`,
-      [accountId, address, priv_enc]
+       DO UPDATE SET address = EXCLUDED.address,
+                     priv_enc = EXCLUDED.priv_enc,
+                     wallet_id = EXCLUDED.wallet_id`,
+      [accountId, address, priv_enc, walletId]
     );
 
     await client.query('COMMIT');
     return res.json({
-      address: link.rows[0].address,
+      address,
       asset: 'USDT',
       network: 'TRON',
       symbol: 'USDT-TRC20'
@@ -1568,7 +1595,6 @@ app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
     client.release();
   }
 });
-
 
 
 
