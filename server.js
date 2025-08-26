@@ -1548,7 +1548,7 @@ app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('assign wallet save failed:', e);
-    return res.status(500).json({ message: 'Failed to save deposit address' });
+    return res.status(500).json({ message: 'Failed to save deposit address', detail: e.code || e.message });
   } finally {
     client.release();
   }
