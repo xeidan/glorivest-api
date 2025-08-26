@@ -337,8 +337,7 @@ async function deleteOldUnverifiedUsers() {
 }
 
 
-// ===== AUTH MIDDLEWARE =====
-// ===== AUTH MIDDLEWARE =====
+// ===== AUTH MIDDLEWARE (drop-in) =====
 function authenticate(req, res, next) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer\s+(.+)$/i);
@@ -346,25 +345,16 @@ function authenticate(req, res, next) {
 
   try {
     const decoded = jwt.verify(m[1], process.env.JWT_SECRET);
-
-    // Normalize user id so downstream code can safely use req.user.id
     const id = decoded.userId ?? decoded.id ?? decoded.sub;
     if (!id) return res.status(401).json({ message: 'Token missing user id' });
-
-    // Attach a consistent shape (keep other claims too if you use them)
-    req.user = {
-      id: Number(id),
-      email: decoded.email ?? null,
-      role: decoded.role ?? 'user',
-      ...decoded
-    };
-
-    return next();
+    req.user = { id: Number(id), email: decoded.email ?? null, role: decoded.role ?? 'user', ...decoded };
+    next();
   } catch (err) {
-    const msg = err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid or expired token';
-    return res.status(401).json({ message: msg });
+    return res.status(401).json({ message: err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid or expired token' });
   }
 }
+const authRequired = authenticate;
+
 
 // Alias so routes using `authRequired` keep working
 const authRequired = authenticate;
@@ -861,106 +851,66 @@ app.get('/wallet/:network', authenticate, async (req, res) => {
 
 
 // ======= WITHDRAWAL (TRON USDT via OMNIBUS) =======
-// Body: { network: 'tron', token: 'USDT', amount: number, to: string }
-app.post('/withdraw', authenticate, async (req, res) => {
+app.post('/withdraw', authRequired, async (req, res) => {
   try {
-    const { network, token, amount, to } = req.body;
+    const userId = Number(req.user.id);
+    const { amount, address } = req.body || {};
+    const amt = Number(amount);
 
-    // Hard validation: TRON USDT only
-    if (network !== 'tron' || token !== 'USDT') {
-      return res.status(400).json({ message: 'Use USDT on Tron' });
+    if (!amt || amt < 20) return res.status(400).json({ message: 'Minimum withdrawal is $20' });
+    if (typeof address !== 'string' || !TRON_ADDR_RE.test(address)) {
+      return res.status(400).json({ message: 'Invalid TRON (TRC20) address' });
     }
 
-    // Fail fast if omnibus not configured
-    if (!OMNIBUS_TRON_PRIV || !OMNIBUS_TRON_ADDR) {
-      return res.status(500).json({ message: 'Omnibus TRON not configured' });
+    // Find a current account to attach; prefer the user’s default
+    const me = await pool.query(`SELECT default_account_id FROM users WHERE id = $1`, [userId]);
+    let accountId = me.rows[0]?.default_account_id ?? null;
+
+    if (!accountId) {
+      const firstAcc = await pool.query(`SELECT id FROM accounts WHERE user_id = $1 ORDER BY id ASC LIMIT 1`, [userId]);
+      accountId = firstAcc.rows[0]?.id ?? null;
     }
+    if (!accountId) return res.status(400).json({ message: 'No account found for user' });
 
-    // Validate destination address
-    if (!tronWeb.isAddress(to)) {
-      return res.status(400).json({ message: 'Invalid TRON address' });
-    }
+    // Basic balance check (optional — depends on your schema)
+    const bal = await pool.query(`SELECT balance_cents FROM accounts WHERE id = $1 AND user_id = $2`, [accountId, userId]);
+    const balanceCents = Number(bal.rows[0]?.balance_cents ?? 0);
+    const amtCents = Math.round(amt * 100);
+    if (balanceCents < amtCents) return res.status(400).json({ message: 'Insufficient balance' });
 
-    // Integer math (micro-USDT)
-    const grossU = Math.round(Number(amount) * 1e6);
-    if (!grossU || grossU <= 0) return res.status(400).json({ message: 'Invalid amount' });
-
-    const feeU = Math.max(Math.floor(grossU * 1 / 100), 1); // 1% fee, at least 1 micro
-    const netU = grossU - feeU;
-
-    if (netU <= 0) return res.status(400).json({ message: 'Amount too small after fee' });
-
-    const MIN_NET_U = Math.round((Number(process.env.MIN_WITHDRAW_USDT || 1)) * 1e6);
-    if (netU < MIN_NET_U) return res.status(400).json({ message: `Minimum net withdrawal is ${MIN_NET_U/1e6} USDT` });
-
-    const gross = grossU / 1e6;
-    const fee   = feeU   / 1e6;
-    const net   = netU   / 1e6;
-
-    // 1) Debit + create withdrawal row in a single transaction
-    let wid;
-    await withTx(async (c) => {
-      // lock & check balance
-      const { rows } = await c.query('SELECT balance FROM users WHERE id=$1 FOR UPDATE', [req.user.id]);
-      const cur = Number(rows?.[0]?.balance || 0);
-      if (cur < gross) throw new Error('Insufficient balance');
-
-      // debit gross
-      await c.query('UPDATE users SET balance=$1 WHERE id=$2', [Number((cur - gross).toFixed(6)), req.user.id]);
-
-      // create withdrawal row
-      const ins = await c.query(
-        `INSERT INTO withdrawals (user_id, network, token, to_addr, amount, fee_amount, status)
-         VALUES ($1,'tron','USDT',$2,$3,$4,'requested') RETURNING id`,
-        [req.user.id, to, gross, fee]
-      );
-      wid = ins.rows[0].id;
+    // Record a pending withdrawal + a transaction row (adapt table names if needed)
+    const wd = await pool.query(
+      `INSERT INTO withdrawals (user_id, account_id, asset, address, amount_cents, status)
+       VALUES ($1, $2, $3, $4, $5, 'pending')
+       RETURNING id, created_at`,
+      [userId, accountId, WALLET_ASSET, address, amtCents]
+    ).catch(async (err) => {
+      // If your project doesn't have a `withdrawals` table yet, fall back to a generic `transactions` table.
+      if (err.code === '42P01') {
+        const tx = await pool.query(
+          `INSERT INTO transactions (user_id, account_id, type, amount_cents, currency, status, meta)
+           VALUES ($1, $2, 'withdraw', $3, 'USDT', 'pending', jsonb_build_object('asset',$4,'address',$5))
+           RETURNING id, created_at`,
+          [userId, accountId, amtCents, WALLET_ASSET, address]
+        );
+        return { rows: tx.rows, table: 'transactions' };
+      }
+      throw err;
     });
 
-    // 2) Check omnibus liquidity BEFORE broadcasting
-    const avail = await tronUsdtBalanceOf(OMNIBUS_TRON_ADDR);
-    if (avail < net) {
-      // Re-credit and mark failed
-      await withTx(async (c) => {
-        await c.query(`UPDATE withdrawals SET status='failed' WHERE id=$1`, [wid]);
-        await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`, [gross, req.user.id]);
-      });
-      return res.status(400).json({ message: 'Insufficient omnibus liquidity' });
-    }
-
-    // 3) Broadcast from OMNIBUS (TRC-20)
-    const contract = await tronUsdtContract();
-    const amountSun = BigInt(netU).toString();
-
-    let txSig;
-    try {
-      txSig = await contract.transfer(to, amountSun).send({ privateKey: OMNIBUS_TRON_PRIV });
-    } catch (broadcastErr) {
-      // Re-credit and mark failed if broadcast errors
-      await withTx(async (c) => {
-        await c.query(`UPDATE withdrawals SET status='failed' WHERE id=$1`, [wid]);
-        await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`, [gross, req.user.id]);
-      });
-      throw broadcastErr;
-    }
-
-    // 4) Update withdrawal status → broadcasted, then confirm async
-    await pool.query(`UPDATE withdrawals SET tx_hash=$1, status='broadcasted' WHERE id=$2`, [txSig, wid]);
-
-    setTimeout(async () => {
-      try {
-        await pool.query(`UPDATE withdrawals SET status='confirmed' WHERE id=$1`, [wid]);
-      } catch (e) {
-        console.error('withdraw confirm error', e);
-      }
-    }, 5000);
-
-    res.json({ message: 'Withdrawal initiated', fee, net, tx_hash: txSig });
-  } catch (e) {
-    console.error('withdraw error', e);
-    res.status(400).json({ message: e.message || 'Withdraw failed' });
+    return res.status(201).json({
+      message: 'Withdrawal request submitted',
+      asset: WALLET_ASSET,
+      amount: amt,
+      address,
+      ref_id: (wd.table ? wd.rows[0].id : wd.rows[0].id)
+    });
+  } catch (err) {
+    console.error('withdraw error:', err);  // <— you’ll now see the real cause & stack in Heroku logs
+    return res.status(500).json({ message: 'Withdrawal failed' });
   }
 });
+
 
 
 
@@ -1502,99 +1452,85 @@ app.get('/accounts', authenticate, async (req, res) => {
 
 
 // POST /accounts/:id/wallet/assign
-app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
-  const accountId = Number(req.params.id);
-  const userId = req.user.id;
+// Constants for the only crypto we support
+const WALLET_ASSET = 'USDT-TRC20';          // store once, reuse everywhere
 
-  if (!accountId) return res.status(400).json({ message: 'Invalid account id' });
+// Optional: very simple TRON address shape check (not full validation, just format)
+const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
-  const client = await pool.connect();
+// If you have a wallet pool or a generator, plug it in here.
+// For now we stub an address generator you can swap later.
+async function createTronWalletAddress() {
+  // TODO: replace with real generator or provider
+  // Must return a TRON mainnet address that starts with 'T...'
+  const rnd = (len) => Array.from(crypto.getRandomValues(new Uint8Array(len)))
+      .map(b => '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'[b % 58]).join('');
+  return 'T' + rnd(33);
+}
+
+async function getOrCreateUserTronWallet(pool, userId, accountId) {
+  // 1) Return existing wallet for this user if present
+  const existing = await pool.query(
+    `SELECT id, user_id, account_id, asset, address
+       FROM wallets
+      WHERE user_id = $1
+      LIMIT 1`,
+    [userId]
+  );
+  if (existing.rows[0]) return existing.rows[0];
+
+  // 2) Create a new TRON (USDT-TRC20) wallet
+  const address = await createTronWalletAddress();
+
+  // 3) Insert with unique(user_id) constraint; if a race happens, read-back
   try {
-    await client.query('BEGIN');
-
-    // 1) If this account already has a TRON USDT wallet linked, return it
-    const existingLink = await client.query(
-      `SELECT address
-         FROM account_wallets
-        WHERE account_id = $1
-          AND asset = 'USDT'
-          AND network = 'TRON'
-        LIMIT 1`,
-      [accountId]
+    const ins = await pool.query(
+      `INSERT INTO wallets (user_id, account_id, asset, address)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, user_id, account_id, asset, address`,
+      [userId, accountId, WALLET_ASSET, address]
     );
-    if (existingLink.rowCount) {
-      await client.query('COMMIT');
-      return res.json({
-        address: existingLink.rows[0].address,
-        asset: 'USDT',
-        network: 'TRON',
-        symbol: 'USDT-TRC20'
-      });
+    return ins.rows[0];
+  } catch (err) {
+    if (err.code === '23505') {
+      // Someone else created it in the meantime; return the existing one
+      const again = await pool.query(
+        `SELECT id, user_id, account_id, asset, address
+           FROM wallets
+          WHERE user_id = $1
+          LIMIT 1`,
+        [userId]
+      );
+      if (again.rows[0]) return again.rows[0];
     }
+    throw err;
+  }
+}
 
-    // 2) Fetch or create the user's TRON wallet (one per user)
-    let w = await client.query(
-      `SELECT id, address, priv_enc
-         FROM wallets
-        WHERE user_id = $1 AND network = 'TRON'
-        LIMIT 1`,
-      [userId]
-    );
+// ---- Route: assign (or return) user TRC20 wallet for a specific account
+app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
+  try {
+    const accountId = Number(req.params.id);
+    const userId = Number(req.user.id);
+    if (!accountId) return res.status(400).json({ message: 'Invalid account id' });
 
-    if (!w.rowCount) {
-      // Use your existing wallet creation util; must return { address, priv_enc }
-      const { address, priv_enc } = await createTronWalletFor(userId);
+    // (optional) verify the account belongs to the user
+    const acc = await pool.query(`SELECT id FROM accounts WHERE id = $1 AND user_id = $2`, [accountId, userId]);
+    if (!acc.rows[0]) return res.status(404).json({ message: 'Account not found' });
 
-      // Try insert, but handle a race with a second request
-      try {
-        w = await client.query(
-          `INSERT INTO wallets (user_id, network, asset, symbol, address, priv_enc)
-           VALUES ($1, 'TRON', 'USDT', 'USDT-TRC20', $2, $3)
-           RETURNING id, address, priv_enc`,
-          [userId, address, priv_enc]
-        );
-      } catch (e) {
-        // someone else inserted concurrently: just reselect
-        if (e.code !== '23505') throw e;
-        w = await client.query(
-          `SELECT id, address, priv_enc
-             FROM wallets
-            WHERE user_id = $1 AND network = 'TRON'
-            LIMIT 1`,
-          [userId]
-        );
-      }
-    }
+    const wallet = await getOrCreateUserTronWallet(pool, userId, accountId);
 
-    const { id: walletId, address, priv_enc } = w.rows[0];
-
-    // 3) Link to this account (upsert by (account_id, asset, network))
-    // Make sure you have a unique constraint on (account_id, asset, network) in account_wallets
-    await client.query(
-      `INSERT INTO account_wallets (account_id, asset, network, symbol, address, priv_enc, wallet_id)
-       VALUES ($1, 'USDT', 'TRON', 'USDT-TRC20', $2, $3, $4)
-       ON CONFLICT (account_id, asset, network)
-       DO UPDATE SET address = EXCLUDED.address,
-                     priv_enc = EXCLUDED.priv_enc,
-                     wallet_id = EXCLUDED.wallet_id`,
-      [accountId, address, priv_enc, walletId]
-    );
-
-    await client.query('COMMIT');
-    return res.json({
-      address,
-      asset: 'USDT',
-      network: 'TRON',
-      symbol: 'USDT-TRC20'
+    return res.status(200).json({
+      account_id: accountId,
+      asset: WALLET_ASSET,
+      address: wallet.address
     });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('assign wallet failed:', err);
+    console.error('assign wallet error:', err);  // <-- keep so we see the real cause in Heroku logs
     return res.status(500).json({ message: 'Failed to assign wallet' });
-  } finally {
-    client.release();
   }
 });
+
 
 
 
