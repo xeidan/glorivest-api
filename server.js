@@ -1485,76 +1485,90 @@ app.get('/accounts', authenticate, async (req, res) => {
 
 
 // POST /accounts/:id/wallet/assign  { asset:'USDT', network:'TRON' }
-app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
-  const { id } = req.params;
-  const asset = 'USDT';
-  const network = 'TRON';
-  const symbol = 'USDT-TRC20';
+app.post('/accounts/:id/wallet/assign', authRequired, async (req, res) => {
+  const accountId = Number(req.params.id);
+  const userId = req.user.id;
 
-  // 1) Ownership
-  const { rows: [own] } = await pool.query(
-    `SELECT a.id, a.user_id FROM accounts a WHERE a.id=$1 AND a.user_id=$2`,
-    [id, req.user.id]
-  );
-  if (!own) return res.status(404).json({ message: 'Account not found' });
-
-  // 2) Existing (account_wallets) → return
-  const { rows: [aw] } = await pool.query(`
-    SELECT address FROM account_wallets
-    WHERE account_id=$1 AND asset=$2 AND network=$3 AND is_active=true
-  `, [id, asset, network]);
-  if (aw) return res.json({ asset, network, symbol, address: aw.address });
-
-  // 3) Existing (wallets with account_id) → return
-  const { rows: [w] } = await pool.query(`
-    SELECT address FROM wallets
-     WHERE user_id=$1 AND account_id=$2 AND network='tron' AND token='USDT' AND sweep_enabled = true
-     ORDER BY id DESC LIMIT 1
-  `, [req.user.id, id]);
-  if (w) return res.json({ asset, network, symbol, address: w.address });
-
-  // 4) Create new TRON address
-  let addr, privEnc;
-  try {
-    const o = await createTronAddressForAccount();
-    addr = o.address;
-    privEnc = o.privEnc;
-  } catch (e) {
-    console.error('createTronAddressForAccount failed:', e);
-    return res.status(500).json({ message: 'Could not create deposit address' });
+  if (!accountId) {
+    return res.status(400).json({ message: 'Invalid account id' });
   }
 
-  // 5) Persist in BOTH tables (UI + poller/sweeper)
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    await client.query(`
-      INSERT INTO account_wallets (account_id, asset, network, symbol, address, priv_enc, is_active)
-      VALUES ($1,$2,$3,$4,$5,$6,true)
-      ON CONFLICT (address) DO NOTHING
-    `, [id, asset, network, symbol, addr, privEnc]);
+    // 1) If this account already has a TRON USDT wallet, just return it
+    const existingLink = await client.query(
+      `SELECT address
+         FROM account_wallets
+        WHERE account_id = $1
+          AND asset = 'USDT'
+          AND network = 'TRON'
+        LIMIT 1`,
+      [accountId]
+    );
+    if (existingLink.rowCount) {
+      await client.query('COMMIT');
+      return res.json({
+        address: existingLink.rows[0].address,
+        asset: 'USDT',
+        network: 'TRON',
+        symbol: 'USDT-TRC20'
+      });
+    }
 
-    await client.query(`
-      INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
-      VALUES ($1,$2,'tron','USDT',$3,$4,true)
-      ON CONFLICT (address) DO UPDATE
-        SET priv_enc = COALESCE(wallets.priv_enc, EXCLUDED.priv_enc),
-            account_id = COALESCE(wallets.account_id, EXCLUDED.account_id),
-            sweep_enabled = true
-    `, [req.user.id, id, addr, privEnc]);
+    // 2) Reuse the user's TRON wallet if it exists; otherwise create+upsert it
+    let walletRow = await client.query(
+      `SELECT id, address, priv_enc
+         FROM wallets
+        WHERE user_id = $1 AND network = 'TRON'
+        LIMIT 1`,
+      [userId]
+    );
+
+    if (!walletRow.rowCount) {
+      // You likely already have a util that returns { address, priv_enc }
+      const { address, priv_enc } = await createTronWalletFor(userId); // <- your function
+
+      // Upsert against the existing unique constraint
+      walletRow = await client.query(
+        `INSERT INTO wallets (user_id, network, asset, symbol, address, priv_enc)
+         VALUES ($1, 'TRON', 'USDT', 'USDT-TRC20', $2, $3)
+         ON CONFLICT ON CONSTRAINT wallets_user_tron_unique
+         DO UPDATE SET address = EXCLUDED.address
+         RETURNING id, address, priv_enc`,
+        [userId, address, priv_enc]
+      );
+    }
+
+    const { address, priv_enc } = walletRow.rows[0];
+
+    // 3) Link wallet to this account (idempotent)
+    const link = await client.query(
+      `INSERT INTO account_wallets (account_id, asset, network, symbol, address, priv_enc)
+       VALUES ($1, 'USDT', 'TRON', 'USDT-TRC20', $2, $3)
+       ON CONFLICT (account_id, asset, network)
+       DO UPDATE SET address = EXCLUDED.address, priv_enc = EXCLUDED.priv_enc
+       RETURNING address`,
+      [accountId, address, priv_enc]
+    );
 
     await client.query('COMMIT');
-  } catch (e) {
+    return res.json({
+      address: link.rows[0].address,
+      asset: 'USDT',
+      network: 'TRON',
+      symbol: 'USDT-TRC20'
+    });
+  } catch (err) {
     await client.query('ROLLBACK');
-    console.error('assign wallet save failed:', e);
-    return res.status(500).json({ message: 'Failed to save deposit address', detail: e.code || e.message });
+    console.error('assign wallet failed:', err);
+    return res.status(500).json({ message: 'Failed to assign wallet' });
   } finally {
     client.release();
   }
-
-  return res.json({ asset, network, symbol, address: addr });
 });
+
 
 
 
