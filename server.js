@@ -205,6 +205,21 @@ async function setSetting(key, value) {
       );
     `);
 
+
+    await pool.query(`
+      ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS account_id bigint;
+      DO $$
+      BEGIN
+        ALTER TABLE withdrawals
+          ADD CONSTRAINT withdrawals_account_fk
+          FOREIGN KEY (account_id) REFERENCES accounts(id)
+          ON DELETE SET NULL;
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END$$;
+      CREATE INDEX IF NOT EXISTS withdrawals_account_id_idx ON withdrawals(account_id);
+    `);
+    
+
     // 3) Bring legacy tables up-to-date (safe with IF NOT EXISTS)
     await pool.query(`
       -- deposits: your existing extras
@@ -400,8 +415,6 @@ app.get("/account/me", authenticate, async (req, res) => {
 
 
 
-
-
 // ===== RESEND OTP =====
 app.post('/resend-otp', otpResendLimiter, async (req, res) => {
   const { email } = req.body;
@@ -455,10 +468,13 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
 });
 
 
+
+
 // ===== REFERRAL CODE HELPERS =====
 function generateReferralCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
+
 
 
 async function generateUniqueReferralCode() {
@@ -840,130 +856,77 @@ app.get('/wallet/:network', authenticate, async (req, res) => {
 // ======= WITHDRAWAL (TRON USDT) =======
 // POST /withdraw
 app.post('/withdraw', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const { amount, address, account_id } = req.body || {};
+  const amtCents = Math.round(Number(amount || 0) * 100);
+  const feeCents = Math.round(amtCents * 0.01); // 1% demo fee
+  const totalCents = amtCents + feeCents;
+
+  if (!amtCents || amtCents < 2000) {
+    return res.status(400).json({ message: 'Minimum withdrawal is $20' });
+  }
+  if (!address || !/^T[a-zA-Z0-9]{20,}$/.test(address)) {
+    return res.status(400).json({ message: 'Invalid TRON address' });
+  }
+
   const client = await pool.connect();
   try {
-    let { amount, address, account_id } = req.body || {};
-    amount = Number(amount);
-
-    if (!amount || amount < 1) {
-      return res.status(400).json({ message: 'Invalid amount' });
-    }
-    if (!address || !/^T[a-zA-Z0-9]{25,34}$/.test(address)) {
-      return res.status(400).json({ message: 'Invalid TRON (TRC20) address' });
-    }
-
-    // Figure out the account to use
-    let accountId = Number(account_id) || null;
-
-    // If not provided, try user default
-    if (!accountId) {
-      const { rows: meRows } = await client.query(
-        `SELECT id, default_account_id FROM users WHERE id=$1`,
-        [req.user.id]
-      );
-      const me = meRows[0];
-      accountId = me?.default_account_id || null;
-    }
-
-    if (!accountId) {
-      return res.status(400).json({ message: 'No account selected and no default set' });
-    }
-
     await client.query('BEGIN');
 
-    // Lock the account row for safe balance math
+    // Resolve account: prefer provided, else user’s most recent
+    let accId = Number(account_id) || null;
+    if (!accId) {
+      const { rows } = await client.query(
+        `SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1`,
+        [userId]
+      );
+      if (!rows.length) throw new Error('No account for user');
+      accId = rows[0].id;
+    }
+
+    // Ensure account belongs to user and has funds
     const { rows: accRows } = await client.query(
-      `SELECT id, user_id, balance_cents
-         FROM accounts
-        WHERE id = $1 AND user_id = $2
-        FOR UPDATE`,
-      [accountId, req.user.id]
+      `SELECT id, user_id, balance_cents FROM accounts WHERE id=$1 AND user_id=$2 FOR UPDATE`,
+      [accId, userId]
     );
-    const acc = accRows[0];
-    if (!acc) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Account not found' });
-    }
+    if (!accRows.length) throw new Error('Account not found for user');
 
-    const amountCents = Math.round(amount * 100);
-    const minCents = 2000; // $20 min
-    if (amountCents < minCents) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Minimum withdrawal is $20' });
-    }
-
-    if (acc.balance_cents < amountCents) {
+    const bal = Number(accRows[0].balance_cents || 0);
+    if (bal < totalCents) {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    // Flat 1% fee example; adjust as you like
-    const feeCents = Math.max(100, Math.floor(amountCents * 0.01)); // min $1 fee
-    const netCents = amountCents - feeCents;
-    if (netCents <= 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Net amount must be positive after fees' });
-    }
-
-    // Create withdrawals table if you don’t already have it
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS withdrawals (
-        id BIGSERIAL PRIMARY KEY,
-        user_id BIGINT NOT NULL REFERENCES users(id),
-        account_id BIGINT NOT NULL REFERENCES accounts(id),
-        amount_cents BIGINT NOT NULL,
-        fee_cents BIGINT NOT NULL,
-        net_cents BIGINT NOT NULL,
-        address TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        tx_hash TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-    `);
-
-    // Insert withdrawal record
+    // Insert withdrawal (now includes account_id)
     const { rows: wRows } = await client.query(
       `INSERT INTO withdrawals
-         (user_id, account_id, amount_cents, fee_cents, net_cents, address, status)
-       VALUES ($1,$2,$3,$4,$5,$6,'queued')
-       RETURNING id, status, created_at`,
-      [req.user.id, acc.id, amountCents, feeCents, netCents, address]
+         (user_id, account_id, amount_cents, fee_cents, address, network, token, status)
+       VALUES ($1,$2,$3,$4,$5,'tron','USDT','pending')
+       RETURNING id`,
+      [userId, accId, amtCents, feeCents, address]
     );
 
-    // Deduct from balance
+    // Deduct from that account
     await client.query(
-      `UPDATE accounts
-          SET balance_cents = balance_cents - $1
-        WHERE id = $2`,
-      [amountCents, acc.id]
+      `UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id=$2`,
+      [totalCents, accId]
     );
 
     await client.query('COMMIT');
-
-    const w = wRows[0];
     return res.json({
-      message: 'Withdrawal queued',
-      withdrawal_id: w.id,
-      status: w.status,
-      fee: (feeCents / 100).toFixed(2),
-      net: (netCents / 100).toFixed(2),
-      created_at: w.created_at
+      id: wRows[0].id,
+      fee: (feeCents / 100),
+      net: (amtCents / 100),
+      message: 'Withdrawal request submitted'
     });
   } catch (err) {
-    await pool.query('ROLLBACK');
-    console.error('withdraw error:', err?.stack || err);
+    console.error('withdraw error:', err);
+    try { await client.query('ROLLBACK'); } catch {}
     return res.status(500).json({ message: 'Withdrawal failed' });
   } finally {
     client.release();
   }
 });
-
-
-
-
-
-
-
 
 
 
