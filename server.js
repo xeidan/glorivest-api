@@ -1540,6 +1540,20 @@ app.get('/accounts/:id/deposits', authenticate, async (req, res) => {
 
 
 
+app.post('/dev/topup', authenticate, async (req, res) => {
+  if (process.env.NODE_ENV === 'production') return res.status(403).json({message:'forbidden'});
+  const userId = req.user.id;
+  const amt = Math.max(1, Number(req.body.amount || 0)); // dollars
+  const acc = await pool.query(
+    `SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1`, [userId]
+  );
+  if (!acc.rows[0]) return res.status(400).json({message:'no account'});
+  await pool.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+    [Math.round(amt*100), acc.rows[0].id]);
+  res.json({ok:true});
+});
+
+
 
 
 // ===== Server Init =====
