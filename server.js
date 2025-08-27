@@ -842,7 +842,7 @@ app.get('/wallet/:network', authenticate, async (req, res) => {
 
 
 
-// ======= WITHDRAWAL (TRON USDT via OMNIBUS) =======
+// ======= WITHDRAWAL (TRON USDT) =======
 app.post('/withdraw', authenticate, async (req, res) => {
   try {
     const userId = Number(req.user.id);
@@ -854,55 +854,48 @@ app.post('/withdraw', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'Invalid TRON (TRC20) address' });
     }
 
-    // Find a current account to attach; prefer the user’s default
-    const me = await pool.query(`SELECT default_account_id FROM users WHERE id = $1`, [userId]);
-    let accountId = me.rows[0]?.default_account_id ?? null;
-
-    if (!accountId) {
-      const firstAcc = await pool.query(`SELECT id FROM accounts WHERE user_id = $1 ORDER BY id ASC LIMIT 1`, [userId]);
-      accountId = firstAcc.rows[0]?.id ?? null;
-    }
+    // Use oldest account as the "default"
+    const firstAcc = await pool.query(
+      `SELECT id, balance_cents FROM accounts WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1`,
+      [userId]
+    );
+    const accountId = firstAcc.rows[0]?.id ?? null;
+    const balanceCents = Number(firstAcc.rows[0]?.balance_cents ?? 0);
     if (!accountId) return res.status(400).json({ message: 'No account found for user' });
 
-    // Basic balance check (optional — depends on your schema)
-    const bal = await pool.query(`SELECT balance_cents FROM accounts WHERE id = $1 AND user_id = $2`, [accountId, userId]);
-    const balanceCents = Number(bal.rows[0]?.balance_cents ?? 0);
     const amtCents = Math.round(amt * 100);
     if (balanceCents < amtCents) return res.status(400).json({ message: 'Insufficient balance' });
 
-    // Record a pending withdrawal + a transaction row (adapt table names if needed)
+    // Insert into *your actual table shape*:
+    // withdrawals(user_id, network, token, to_addr, amount, tx_hash, status, created_at, fee_amount)
     const wd = await pool.query(
       `INSERT INTO withdrawals (user_id, network, token, to_addr, amount, status)
        VALUES ($1, 'tron', 'USDT', $2, $3, 'pending')
        RETURNING id, created_at`,
-       [userId, address, amt]
-    ).catch(async (err) => {
-      // If your project doesn't have a `withdrawals` table yet, fall back to a generic `transactions` table.
-      if (err.code === '42P01') {
-        const tx = await pool.query(
-          `INSERT INTO transactions (user_id, account_id, type, amount_cents, currency, status, meta)
-           VALUES ($1, $2, 'withdraw', $3, 'USDT', 'pending', jsonb_build_object('asset',$4,'address',$5))
-           RETURNING id, created_at`,
-          [userId, accountId, amtCents, WALLET_ASSET, address]
-        );
-        return { rows: tx.rows, table: 'transactions' };
-      }
-      throw err;
-    });
+      [userId, address, amt]
+    );
+
+    // (Optional) hold the funds at the account level right away:
+    await pool.query(
+      `UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id = $2 AND user_id = $3`,
+      [amtCents, accountId, userId]
+    );
 
     return res.status(201).json({
       message: 'Withdrawal request submitted',
+      ref_id: wd.rows[0].id,
       network: 'tron',
       token: 'USDT',
       amount: amt,
-      address,
-      ref_id: wd.rows[0].id
+      address
     });
   } catch (err) {
-    console.error('withdraw error:', err);  // <— you’ll now see the real cause & stack in Heroku logs
+    console.error('withdraw error:', err);
     return res.status(500).json({ message: 'Withdrawal failed' });
   }
 });
+
+
 
 
 
@@ -1451,39 +1444,31 @@ const WALLET_ASSET = 'USDT-TRC20';          // store once, reuse everywhere
 // Optional: very simple TRON address shape check (not full validation, just format)
 const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
- async function getOrCreateUserTronWallet(pool, userId, accountId) {
-     // Prefer an existing TRON/USDT wallet tied to this account
-     const existing = await pool.query(
-       `SELECT id, user_id, account_id, network, token, address, priv_enc
-          FROM wallets
-         WHERE user_id=$1 AND network='tron' AND token='USDT' AND account_id=$2
-         ORDER BY id ASC
-         LIMIT 1`,
-       [userId, accountId]
-     );
-     if (existing.rows[0]) return existing.rows[0];
-  
-     // Create a real TRON keypair and store encrypted private key
-     const { address, privEnc } = await createTronAddressForAccount(); // uses TronWeb + AES-GCM
-     const ins = await pool.query(
-       `INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
-        VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
-        ON CONFLICT (address) DO NOTHING
-        RETURNING id, user_id, account_id, network, token, address, priv_enc`,
-       [userId, accountId, address, privEnc]
-     );
-     // If ON CONFLICT fired, read back
-     if (!ins.rows[0]) {
-       const again = await pool.query(
-         `SELECT id, user_id, account_id, network, token, address, priv_enc
-            FROM wallets
-           WHERE address=$1`,
-         [address]
-       );
-       return again.rows[0];
-     }
-     return ins.rows[0];
-   }
+async function getOrCreateUserTronWallet(pool, userId, accountId) {
+  // 1) Return existing TRON USDT wallet for this account (or any user TRON wallet if you prefer)
+  const existing = await pool.query(
+    `SELECT id, user_id, account_id, network, token, address, priv_enc
+       FROM wallets
+      WHERE user_id = $1 AND network='tron' AND token='USDT'
+      ORDER BY id ASC
+      LIMIT 1`,
+    [userId]
+  );
+  if (existing.rows[0]) return existing.rows[0];
+
+  // 2) Create a REAL TRON address + encrypted privkey
+  const { address, privEnc } = await createTronAddressForAccount();
+
+  // 3) Insert with the actual wallet columns used elsewhere in your app
+  const ins = await pool.query(
+    `INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
+     VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
+     RETURNING id, user_id, account_id, network, token, address, priv_enc`,
+    [userId, accountId, address, privEnc]
+  );
+  return ins.rows[0];
+}
+
 
 // ---- Route: assign (or return) user TRC20 wallet for a specific account
 app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
