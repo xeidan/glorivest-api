@@ -848,52 +848,37 @@ app.post('/withdraw', authenticate, async (req, res) => {
     const userId = Number(req.user.id);
     const { amount, address } = req.body || {};
     const amt = Number(amount);
-
     if (!amt || amt < 20) return res.status(400).json({ message: 'Minimum withdrawal is $20' });
-    if (typeof address !== 'string' || !TRON_ADDR_RE.test(address)) {
-      return res.status(400).json({ message: 'Invalid TRON (TRC20) address' });
-    }
+    if (!TRON_ADDR_RE.test(address)) return res.status(400).json({ message: 'Invalid TRON address' });
 
-    // Use oldest account as the "default"
-    const firstAcc = await pool.query(
-      `SELECT id, balance_cents FROM accounts WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1`,
+    const acc = await pool.query(
+      `SELECT id, balance_cents FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1`,
       [userId]
     );
-    const accountId = firstAcc.rows[0]?.id ?? null;
-    const balanceCents = Number(firstAcc.rows[0]?.balance_cents ?? 0);
-    if (!accountId) return res.status(400).json({ message: 'No account found for user' });
+    if (!acc.rows[0]) return res.status(400).json({ message: 'No account found' });
 
     const amtCents = Math.round(amt * 100);
-    if (balanceCents < amtCents) return res.status(400).json({ message: 'Insufficient balance' });
+    if (Number(acc.rows[0].balance_cents) < amtCents) {
+      return res.status(400).json({ message: 'Insufficient balance' });
+    }
 
-    // Insert into *your actual table shape*:
-    // withdrawals(user_id, network, token, to_addr, amount, tx_hash, status, created_at, fee_amount)
+    await pool.query(`UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id = $2 AND user_id=$3`,
+      [amtCents, acc.rows[0].id, userId]);
+
     const wd = await pool.query(
       `INSERT INTO withdrawals (user_id, network, token, to_addr, amount, status)
        VALUES ($1, 'tron', 'USDT', $2, $3, 'pending')
-       RETURNING id, created_at`,
+       RETURNING id`,
       [userId, address, amt]
     );
 
-    // (Optional) hold the funds at the account level right away:
-    await pool.query(
-      `UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id = $2 AND user_id = $3`,
-      [amtCents, accountId, userId]
-    );
-
-    return res.status(201).json({
-      message: 'Withdrawal request submitted',
-      ref_id: wd.rows[0].id,
-      network: 'tron',
-      token: 'USDT',
-      amount: amt,
-      address
-    });
+    res.status(201).json({ message: 'Withdrawal request submitted.', ref_id: wd.rows[0].id });
   } catch (err) {
     console.error('withdraw error:', err);
-    return res.status(500).json({ message: 'Withdrawal failed' });
+    res.status(500).json({ message: 'Withdrawal failed' });
   }
 });
+
 
 
 
@@ -1445,29 +1430,42 @@ const WALLET_ASSET = 'USDT-TRC20';          // store once, reuse everywhere
 const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
 async function getOrCreateUserTronWallet(pool, userId, accountId) {
-  // 1) Return existing TRON USDT wallet for this account (or any user TRON wallet if you prefer)
+  // Try get existing first
   const existing = await pool.query(
     `SELECT id, user_id, account_id, network, token, address, priv_enc
        FROM wallets
       WHERE user_id = $1 AND network='tron' AND token='USDT'
-      ORDER BY id ASC
       LIMIT 1`,
     [userId]
   );
   if (existing.rows[0]) return existing.rows[0];
 
-  // 2) Create a REAL TRON address + encrypted privkey
+  // Create new wallet material
   const { address, privEnc } = await createTronAddressForAccount();
 
-  // 3) Insert with the actual wallet columns used elsewhere in your app
+  // Race-proof upsert: if another request inserted between our SELECT and INSERT,
+  // we "do nothing" and then fetch the row.
   const ins = await pool.query(
     `INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
      VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
+     ON CONFLICT ON CONSTRAINT wallets_user_tron_unique DO NOTHING
      RETURNING id, user_id, account_id, network, token, address, priv_enc`,
     [userId, accountId, address, privEnc]
   );
-  return ins.rows[0];
+
+  if (ins.rows[0]) return ins.rows[0];
+
+  // If we conflicted, fetch the row that won
+  const again = await pool.query(
+    `SELECT id, user_id, account_id, network, token, address, priv_enc
+       FROM wallets
+      WHERE user_id = $1 AND network='tron' AND token='USDT'
+      LIMIT 1`,
+    [userId]
+  );
+  return again.rows[0];
 }
+
 
 
 // ---- Route: assign (or return) user TRC20 wallet for a specific account
