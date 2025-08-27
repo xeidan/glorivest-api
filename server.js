@@ -872,10 +872,10 @@ app.post('/withdraw', authenticate, async (req, res) => {
 
     // Record a pending withdrawal + a transaction row (adapt table names if needed)
     const wd = await pool.query(
-      `INSERT INTO withdrawals (user_id, account_id, asset, address, amount_cents, status)
-       VALUES ($1, $2, $3, $4, $5, 'pending')
+      `INSERT INTO withdrawals (user_id, network, token, to_addr, amount, status)
+       VALUES ($1, 'tron', 'USDT', $2, $3, 'pending')
        RETURNING id, created_at`,
-      [userId, accountId, WALLET_ASSET, address, amtCents]
+       [userId, address, amt]
     ).catch(async (err) => {
       // If your project doesn't have a `withdrawals` table yet, fall back to a generic `transactions` table.
       if (err.code === '42P01') {
@@ -892,10 +892,11 @@ app.post('/withdraw', authenticate, async (req, res) => {
 
     return res.status(201).json({
       message: 'Withdrawal request submitted',
-      asset: WALLET_ASSET,
+      network: 'tron',
+      token: 'USDT',
       amount: amt,
       address,
-      ref_id: (wd.table ? wd.rows[0].id : wd.rows[0].id)
+      ref_id: wd.rows[0].id
     });
   } catch (err) {
     console.error('withdraw error:', err);  // <— you’ll now see the real cause & stack in Heroku logs
@@ -1450,54 +1451,39 @@ const WALLET_ASSET = 'USDT-TRC20';          // store once, reuse everywhere
 // Optional: very simple TRON address shape check (not full validation, just format)
 const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
-// If you have a wallet pool or a generator, plug it in here.
-// For now we stub an address generator you can swap later.
-async function createTronWalletAddress() {
-  // TODO: replace with real generator or provider
-  // Must return a TRON mainnet address that starts with 'T...'
-  const rnd = (len) => Array.from(crypto.getRandomValues(new Uint8Array(len)))
-      .map(b => '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'[b % 58]).join('');
-  return 'T' + rnd(33);
-}
-
-async function getOrCreateUserTronWallet(pool, userId, accountId) {
-  // 1) Return existing wallet for this user if present
-  const existing = await pool.query(
-    `SELECT id, user_id, account_id, asset, address
-       FROM wallets
-      WHERE user_id = $1
-      LIMIT 1`,
-    [userId]
-  );
-  if (existing.rows[0]) return existing.rows[0];
-
-  // 2) Create a new TRON (USDT-TRC20) wallet
-  const address = await createTronWalletAddress();
-
-  // 3) Insert with unique(user_id) constraint; if a race happens, read-back
-  try {
-    const ins = await pool.query(
-      `INSERT INTO wallets (user_id, account_id, asset, address)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, user_id, account_id, asset, address`,
-      [userId, accountId, WALLET_ASSET, address]
-    );
-    return ins.rows[0];
-  } catch (err) {
-    if (err.code === '23505') {
-      // Someone else created it in the meantime; return the existing one
-      const again = await pool.query(
-        `SELECT id, user_id, account_id, asset, address
-           FROM wallets
-          WHERE user_id = $1
-          LIMIT 1`,
-        [userId]
-      );
-      if (again.rows[0]) return again.rows[0];
-    }
-    throw err;
-  }
-}
+ async function getOrCreateUserTronWallet(pool, userId, accountId) {
+     // Prefer an existing TRON/USDT wallet tied to this account
+     const existing = await pool.query(
+       `SELECT id, user_id, account_id, network, token, address, priv_enc
+          FROM wallets
+         WHERE user_id=$1 AND network='tron' AND token='USDT' AND account_id=$2
+         ORDER BY id ASC
+         LIMIT 1`,
+       [userId, accountId]
+     );
+     if (existing.rows[0]) return existing.rows[0];
+  
+     // Create a real TRON keypair and store encrypted private key
+     const { address, privEnc } = await createTronAddressForAccount(); // uses TronWeb + AES-GCM
+     const ins = await pool.query(
+       `INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
+        VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
+        ON CONFLICT (address) DO NOTHING
+        RETURNING id, user_id, account_id, network, token, address, priv_enc`,
+       [userId, accountId, address, privEnc]
+     );
+     // If ON CONFLICT fired, read back
+     if (!ins.rows[0]) {
+       const again = await pool.query(
+         `SELECT id, user_id, account_id, network, token, address, priv_enc
+            FROM wallets
+           WHERE address=$1`,
+         [address]
+       );
+       return again.rows[0];
+     }
+     return ins.rows[0];
+   }
 
 // ---- Route: assign (or return) user TRC20 wallet for a specific account
 app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
@@ -1515,6 +1501,8 @@ app.post('/accounts/:id/wallet/assign', authenticate, async (req, res) => {
     return res.status(200).json({
       account_id: accountId,
       asset: WALLET_ASSET,
+      network: 'tron',
+      token: 'USDT',
       address: wallet.address
     });
   } catch (err) {
