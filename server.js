@@ -847,37 +847,48 @@ app.post('/withdraw', authenticate, async (req, res) => {
   try {
     const userId = Number(req.user.id);
     const { amount, address } = req.body || {};
+
     const amt = Number(amount);
     if (!amt || amt < 20) return res.status(400).json({ message: 'Minimum withdrawal is $20' });
-    if (!TRON_ADDR_RE.test(address)) return res.status(400).json({ message: 'Invalid TRON address' });
 
-    const acc = await pool.query(
+    const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
+    if (!TRON_ADDR_RE.test(address || '')) {
+      return res.status(400).json({ message: 'Invalid TRON address' });
+    }
+
+    // pick an account deterministically (or require account_id from client)
+    const accQ = await pool.query(
       `SELECT id, balance_cents FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1`,
       [userId]
     );
-    if (!acc.rows[0]) return res.status(400).json({ message: 'No account found' });
+    const acc = accQ.rows[0];
+    if (!acc) return res.status(400).json({ message: 'No account found' });
 
     const amtCents = Math.round(amt * 100);
-    if (Number(acc.rows[0].balance_cents) < amtCents) {
+    if (Number(acc.balance_cents) < amtCents) {
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    await pool.query(`UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id = $2 AND user_id=$3`,
-      [amtCents, acc.rows[0].id, userId]);
-
-    const wd = await pool.query(
-      `INSERT INTO withdrawals (user_id, network, token, to_addr, amount, status)
-       VALUES ($1, 'tron', 'USDT', $2, $3, 'pending')
-       RETURNING id`,
-      [userId, address, amt]
+    // deduct and record
+    await pool.query(
+      `UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id=$2 AND user_id=$3`,
+      [amtCents, acc.id, userId]
     );
 
-    res.status(201).json({ message: 'Withdrawal request submitted.', ref_id: wd.rows[0].id });
+    const wd = await pool.query(
+      `INSERT INTO withdrawals (user_id, account_id, network, token, to_addr, amount_cents, status)
+       VALUES ($1, $2, 'tron', 'USDT', $3, $4, 'pending')
+       RETURNING id`,
+      [userId, acc.id, address, amtCents]
+    );
+
+    return res.status(201).json({ message: 'Withdrawal request submitted.', ref_id: wd.rows[0].id });
   } catch (err) {
     console.error('withdraw error:', err);
-    res.status(500).json({ message: 'Withdrawal failed' });
+    return res.status(500).json({ message: 'Withdrawal failed' });
   }
 });
+
 
 
 
@@ -1430,38 +1441,35 @@ const WALLET_ASSET = 'USDT-TRC20';          // store once, reuse everywhere
 const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
 async function getOrCreateUserTronWallet(pool, userId, accountId) {
-  // Try get existing first
-  const existing = await pool.query(
-    `SELECT id, user_id, account_id, network, token, address, priv_enc
+  // 1) Try existing
+  const got = await pool.query(
+    `SELECT id, user_id, account_id, network, token, address
        FROM wallets
       WHERE user_id = $1 AND network='tron' AND token='USDT'
-      LIMIT 1`,
-    [userId]
+      LIMIT 1`, [userId]
   );
-  if (existing.rows[0]) return existing.rows[0];
+  if (got.rows[0]) return got.rows[0];
 
-  // Create new wallet material
+  // 2) Create material
   const { address, privEnc } = await createTronAddressForAccount();
 
-  // Race-proof upsert: if another request inserted between our SELECT and INSERT,
-  // we "do nothing" and then fetch the row.
+  // 3) Race-proof insert
   const ins = await pool.query(
     `INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
      VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
      ON CONFLICT ON CONSTRAINT wallets_user_tron_unique DO NOTHING
-     RETURNING id, user_id, account_id, network, token, address, priv_enc`,
+     RETURNING id, user_id, account_id, network, token, address`,
     [userId, accountId, address, privEnc]
   );
 
   if (ins.rows[0]) return ins.rows[0];
 
-  // If we conflicted, fetch the row that won
+  // 4) Someone else inserted; fetch and return
   const again = await pool.query(
-    `SELECT id, user_id, account_id, network, token, address, priv_enc
+    `SELECT id, user_id, account_id, network, token, address
        FROM wallets
       WHERE user_id = $1 AND network='tron' AND token='USDT'
-      LIMIT 1`,
-    [userId]
+      LIMIT 1`, [userId]
   );
   return again.rows[0];
 }
