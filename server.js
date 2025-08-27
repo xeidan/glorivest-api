@@ -771,54 +771,49 @@ app.get('/bot/status', authenticate, async (req, res) => {
 // Create (or return existing) TRON wallet — enforce ONE per user
 // Create (or return existing) TRON wallet — enforce ONE per user
 // Create (or rotate) a TRON USDT deposit wallet for the user
+// === WALLETS (TRON only) ===
+// POST /wallet/new
 app.post('/wallet/new', authenticate, async (req, res) => {
   try {
-    // If user already has a usable TRON USDT wallet (with key), return it
-    const { rows: existingFull } = await pool.query(
-      `SELECT id, address, priv_enc
+    // If user already has a TRON/USDT wallet with a stored key, return it
+    const { rows: existing } = await pool.query(
+      `SELECT id, user_id, account_id, network, token, address, priv_enc, sweep_enabled
          FROM wallets
-        WHERE user_id=$1 AND network='tron' AND token='USDT'
-        ORDER BY id DESC LIMIT 1`,
+        WHERE user_id = $1 AND network='tron' AND token='USDT'`,
       [req.user.id]
     );
-
-    if (existingFull.length && existingFull[0].priv_enc) {
-      return res.json({ network: 'tron', token: 'USDT', address: existingFull[0].address });
+    const current = existing[0];
+    if (current && current.priv_enc && current.address) {
+      return res.json({
+        user_id: current.user_id,
+        address: current.address,
+        network: 'tron',
+        token: 'USDT',
+        sweep_enabled: current.sweep_enabled
+      });
     }
 
-    // Otherwise, generate a brand-new wallet and STORE ITS KEY
-    let acct;
-    try {
-      acct = await tronWeb.createAccount();
-    } catch (e) {
-      console.error('tronWeb.createAccount failed, fallback:', e?.message || e);
-    }
+    // Otherwise, generate a new wallet and store its key
+    // You should replace this with your real key generator / KMS
+    const { address, privEnc } = await generateTronWalletWithEncryptedKey(); // { address: 'T...', privEnc: '<encrypted>' }
 
-    if (!acct?.privateKey || !acct?.address?.base58) {
-      const gen = TronWeb?.utils?.accounts?.generateAccount?.();
-      if (!gen?.privateKey) throw new Error('Failed to generate TRON account');
-      const base58 = tronWeb.address.fromPrivateKey(gen.privateKey);
-      acct = { privateKey: gen.privateKey, address: { base58, hex: tronWeb.address.toHex(base58) } };
-    }
+    const { rows: [wallet] } = await pool.query(`
+      INSERT INTO wallets (user_id, network, token, address, priv_enc, sweep_enabled)
+      VALUES ($1, 'tron', 'USDT', $2, $3, true)
+      ON CONFLICT (user_id) DO UPDATE
+         SET address       = EXCLUDED.address,
+             priv_enc      = COALESCE(wallets.priv_enc, EXCLUDED.priv_enc),
+             sweep_enabled = EXCLUDED.sweep_enabled
+      RETURNING user_id, address, network, token, sweep_enabled
+    `, [req.user.id, address, privEnc]);
 
-    const address = acct.address.base58;
-    const privEnc = aesEncrypt(acct.privateKey); // AES‑GCM encrypt with your ENC_KEY
-
-    // Insert (or repair a previous keyless row for same user/address)
-    await pool.query(
-      `INSERT INTO wallets (user_id, network, token, address, priv_enc, sweep_enabled)
-       VALUES ($1,'tron','USDT',$2,$3,true)
-       ON CONFLICT (address) DO UPDATE
-         SET priv_enc = COALESCE(wallets.priv_enc, EXCLUDED.priv_enc)`,
-      [req.user.id, address, privEnc]
-    );
-
-    return res.json({ network: 'tron', token: 'USDT', address });
+    return res.json(wallet);
   } catch (e) {
     console.error('wallet/new error:', e?.stack || e);
-    res.status(500).json({ message: 'Internal server error', detail: String(e?.message || e) });
+    return res.status(500).json({ message: 'Failed to create wallet' });
   }
 });
+
 
 
 
@@ -843,51 +838,127 @@ app.get('/wallet/:network', authenticate, async (req, res) => {
 
 
 // ======= WITHDRAWAL (TRON USDT) =======
+// POST /withdraw
 app.post('/withdraw', authenticate, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const userId = Number(req.user.id);
-    const { amount, address } = req.body || {};
+    let { amount, address, account_id } = req.body || {};
+    amount = Number(amount);
 
-    const amt = Number(amount);
-    if (!amt || amt < 20) return res.status(400).json({ message: 'Minimum withdrawal is $20' });
-
-    const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
-    if (!TRON_ADDR_RE.test(address || '')) {
-      return res.status(400).json({ message: 'Invalid TRON address' });
+    if (!amount || amount < 1) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
+    if (!address || !/^T[a-zA-Z0-9]{25,34}$/.test(address)) {
+      return res.status(400).json({ message: 'Invalid TRON (TRC20) address' });
     }
 
-    // pick an account deterministically (or require account_id from client)
-    const accQ = await pool.query(
-      `SELECT id, balance_cents FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1`,
-      [userId]
-    );
-    const acc = accQ.rows[0];
-    if (!acc) return res.status(400).json({ message: 'No account found' });
+    // Figure out the account to use
+    let accountId = Number(account_id) || null;
 
-    const amtCents = Math.round(amt * 100);
-    if (Number(acc.balance_cents) < amtCents) {
+    // If not provided, try user default
+    if (!accountId) {
+      const { rows: meRows } = await client.query(
+        `SELECT id, default_account_id FROM users WHERE id=$1`,
+        [req.user.id]
+      );
+      const me = meRows[0];
+      accountId = me?.default_account_id || null;
+    }
+
+    if (!accountId) {
+      return res.status(400).json({ message: 'No account selected and no default set' });
+    }
+
+    await client.query('BEGIN');
+
+    // Lock the account row for safe balance math
+    const { rows: accRows } = await client.query(
+      `SELECT id, user_id, balance_cents
+         FROM accounts
+        WHERE id = $1 AND user_id = $2
+        FOR UPDATE`,
+      [accountId, req.user.id]
+    );
+    const acc = accRows[0];
+    if (!acc) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Account not found' });
+    }
+
+    const amountCents = Math.round(amount * 100);
+    const minCents = 2000; // $20 min
+    if (amountCents < minCents) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Minimum withdrawal is $20' });
+    }
+
+    if (acc.balance_cents < amountCents) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    // deduct and record
-    await pool.query(
-      `UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id=$2 AND user_id=$3`,
-      [amtCents, acc.id, userId]
+    // Flat 1% fee example; adjust as you like
+    const feeCents = Math.max(100, Math.floor(amountCents * 0.01)); // min $1 fee
+    const netCents = amountCents - feeCents;
+    if (netCents <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Net amount must be positive after fees' });
+    }
+
+    // Create withdrawals table if you don’t already have it
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS withdrawals (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        account_id BIGINT NOT NULL REFERENCES accounts(id),
+        amount_cents BIGINT NOT NULL,
+        fee_cents BIGINT NOT NULL,
+        net_cents BIGINT NOT NULL,
+        address TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        tx_hash TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    // Insert withdrawal record
+    const { rows: wRows } = await client.query(
+      `INSERT INTO withdrawals
+         (user_id, account_id, amount_cents, fee_cents, net_cents, address, status)
+       VALUES ($1,$2,$3,$4,$5,$6,'queued')
+       RETURNING id, status, created_at`,
+      [req.user.id, acc.id, amountCents, feeCents, netCents, address]
     );
 
-    const wd = await pool.query(
-      `INSERT INTO withdrawals (user_id, account_id, network, token, to_addr, amount_cents, status)
-       VALUES ($1, $2, 'tron', 'USDT', $3, $4, 'pending')
-       RETURNING id`,
-      [userId, acc.id, address, amtCents]
+    // Deduct from balance
+    await client.query(
+      `UPDATE accounts
+          SET balance_cents = balance_cents - $1
+        WHERE id = $2`,
+      [amountCents, acc.id]
     );
 
-    return res.status(201).json({ message: 'Withdrawal request submitted.', ref_id: wd.rows[0].id });
+    await client.query('COMMIT');
+
+    const w = wRows[0];
+    return res.json({
+      message: 'Withdrawal queued',
+      withdrawal_id: w.id,
+      status: w.status,
+      fee: (feeCents / 100).toFixed(2),
+      net: (netCents / 100).toFixed(2),
+      created_at: w.created_at
+    });
   } catch (err) {
-    console.error('withdraw error:', err);
+    await pool.query('ROLLBACK');
+    console.error('withdraw error:', err?.stack || err);
     return res.status(500).json({ message: 'Withdrawal failed' });
+  } finally {
+    client.release();
   }
 });
+
+
 
 
 
@@ -1441,37 +1512,68 @@ const WALLET_ASSET = 'USDT-TRC20';          // store once, reuse everywhere
 const TRON_ADDR_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
 async function getOrCreateUserTronWallet(pool, userId, accountId) {
-  // 1) Try existing
-  const got = await pool.query(
-    `SELECT id, user_id, account_id, network, token, address
+  // Try existing first
+  const { rows: existing } = await pool.query(
+    `SELECT id, user_id, account_id, network, token, address, priv_enc, sweep_enabled
        FROM wallets
-      WHERE user_id = $1 AND network='tron' AND token='USDT'
-      LIMIT 1`, [userId]
+      WHERE user_id=$1 AND network='tron' AND token='USDT'`,
+    [userId]
   );
-  if (got.rows[0]) return got.rows[0];
+  if (existing.length && existing[0].address) {
+    const w = existing[0];
+    // ensure account_id is filled if provided now
+    if (!w.account_id && accountId) {
+      await pool.query(`UPDATE wallets SET account_id=$1 WHERE id=$2`, [accountId, w.id]);
+      w.account_id = accountId;
+    }
+    return w;
+  }
 
-  // 2) Create material
-  const { address, privEnc } = await createTronAddressForAccount();
+  // Generate a new wallet (address + encrypted key)
+  const { address, privEnc } = await generateTronWalletWithEncryptedKey();
 
-  // 3) Race-proof insert
-  const ins = await pool.query(
-    `INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
-     VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
-     ON CONFLICT ON CONSTRAINT wallets_user_tron_unique DO NOTHING
-     RETURNING id, user_id, account_id, network, token, address`,
-    [userId, accountId, address, privEnc]
-  );
+  try {
+    const { rows: [wallet] } = await pool.query(`
+      INSERT INTO wallets (user_id, account_id, network, token, address, priv_enc, sweep_enabled)
+      VALUES ($1, $2, 'tron', 'USDT', $3, $4, true)
+      ON CONFLICT (user_id) DO UPDATE
+         SET account_id    = COALESCE(EXCLUDED.account_id, wallets.account_id),
+             address       = EXCLUDED.address,
+             priv_enc      = COALESCE(wallets.priv_enc, EXCLUDED.priv_enc),
+             sweep_enabled = EXCLUDED.sweep_enabled
+      RETURNING id, user_id, account_id, network, token, address, priv_enc, sweep_enabled
+    `, [userId, accountId || null, address, privEnc]);
 
-  if (ins.rows[0]) return ins.rows[0];
+    return wallet;
+  } catch (e) {
+    // If another request created it first, just load and return
+    if (e?.code === '23505') {
+      const { rows } = await pool.query(
+        `SELECT id, user_id, account_id, network, token, address, priv_enc, sweep_enabled
+           FROM wallets
+          WHERE user_id=$1 AND network='tron' AND token='USDT'`,
+        [userId]
+      );
+      const w = rows[0];
+      if (w && accountId && !w.account_id) {
+        await pool.query(`UPDATE wallets SET account_id=$1 WHERE id=$2`, [accountId, w.id]);
+        w.account_id = accountId;
+      }
+      return w;
+    }
+    throw e;
+  }
+}
 
-  // 4) Someone else inserted; fetch and return
-  const again = await pool.query(
-    `SELECT id, user_id, account_id, network, token, address
-       FROM wallets
-      WHERE user_id = $1 AND network='tron' AND token='USDT'
-      LIMIT 1`, [userId]
-  );
-  return again.rows[0];
+
+async function generateTronWalletWithEncryptedKey() {
+  // TODO: replace with actual key generation and encryption
+  // Must return a valid TRON mainnet address (starts with 'T')
+  const rnd = (len) => Array.from(crypto.getRandomValues(new Uint8Array(len)))
+    .map(b => '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'[b % 58]).join('');
+  const address = 'T' + rnd(33);
+  const privEnc = 'enc:' + rnd(64); // placeholder
+  return { address, privEnc };
 }
 
 
@@ -1539,18 +1641,31 @@ app.get('/accounts/:id/deposits', authenticate, async (req, res) => {
 
 
 
-
 app.post('/dev/topup', authenticate, async (req, res) => {
-  if (process.env.NODE_ENV === 'production') return res.status(403).json({message:'forbidden'});
+  console.log('TEMP_ALLOW_DEV=', process.env.TEMP_ALLOW_DEV, 'user=', req.user?.id);
+  if (!process.env.TEMP_ALLOW_DEV) return res.status(403).json({ message: 'forbidden' });
+  if (!process.env.TEMP_ALLOW_DEV) {
+    return res.status(403).json({ message: 'forbidden' });
+  }
   const userId = req.user.id;
-  const amt = Math.max(1, Number(req.body.amount || 0)); // dollars
-  const acc = await pool.query(
-    `SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1`, [userId]
+  const dollars = Math.max(1, Number(req.body.amount || 0));
+
+  const { rows } = await pool.query(
+    'SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1',
+    [userId]
   );
-  if (!acc.rows[0]) return res.status(400).json({message:'no account'});
-  await pool.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
-    [Math.round(amt*100), acc.rows[0].id]);
-  res.json({ok:true});
+  if (!rows[0]) return res.status(400).json({ message: 'no account' });
+
+  await pool.query(
+    'UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
+    [Math.round(dollars * 100), rows[0].id]
+  );
+  res.json({ ok: true, credited: dollars });
+  console.log('TEMP_ALLOW_DEV=', process.env.TEMP_ALLOW_DEV, 'user=', req.user?.id);
+if (!process.env.TEMP_ALLOW_DEV) {
+  return res.status(403).json({ message: 'forbidden' });
+}
+
 });
 
 
