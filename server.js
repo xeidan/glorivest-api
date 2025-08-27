@@ -204,8 +204,7 @@ async function setSetting(key, value) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
-
-
+// 
     await pool.query(`
       ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS account_id bigint;
       DO $$
@@ -219,6 +218,35 @@ async function setSetting(key, value) {
       CREATE INDEX IF NOT EXISTS withdrawals_account_id_idx ON withdrawals(account_id);
     `);
     
+// 
+// --- normalize withdrawals table to what /withdraw uses ---
+await pool.query(`
+  -- add missing columns safely
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS account_id     bigint;
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS amount_cents   bigint;
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS fee_cents      bigint DEFAULT 0;
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS net_cents      bigint;
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS currency       text   DEFAULT 'usd';
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS address        text;
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS status         text   DEFAULT 'pending';
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS tx_hash        text;
+  ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS created_at     timestamptz DEFAULT NOW();
+
+  -- FK and index (tolerant of reboots)
+  DO $$
+  BEGIN
+    ALTER TABLE withdrawals
+      ADD CONSTRAINT withdrawals_account_fk
+      FOREIGN KEY (account_id) REFERENCES accounts(id)
+      ON DELETE SET NULL;
+  EXCEPTION WHEN duplicate_object THEN
+    NULL;
+  END$$;
+
+  CREATE INDEX IF NOT EXISTS withdrawals_account_id_idx ON withdrawals(account_id);
+`);
+
+
 
     // 3) Bring legacy tables up-to-date (safe with IF NOT EXISTS)
     await pool.query(`
@@ -858,6 +886,8 @@ app.get('/wallet/:network', authenticate, async (req, res) => {
 app.post('/withdraw', authenticate, async (req, res) => {
   const userId = req.user.id;
   const { amount, address, account_id } = req.body || {};
+
+  // cents-first math to avoid float drift
   const amtCents = Math.round(Number(amount || 0) * 100);
   const feeCents = Math.round(amtCents * 0.01); // 1% demo fee
   const totalCents = amtCents + feeCents;
@@ -868,6 +898,10 @@ app.post('/withdraw', authenticate, async (req, res) => {
   if (!address || !/^T[a-zA-Z0-9]{20,}$/.test(address)) {
     return res.status(400).json({ message: 'Invalid TRON address' });
   }
+
+  // numeric columns the table still requires
+  const amountNumeric = amtCents / 100; // matches withdrawals.amount (numeric)
+  const feeNumeric    = feeCents / 100; // matches withdrawals.fee_amount (numeric)
 
   const client = await pool.connect();
   try {
@@ -884,9 +918,9 @@ app.post('/withdraw', authenticate, async (req, res) => {
       accId = rows[0].id;
     }
 
-    // Ensure account belongs to user and has funds
+    // Ensure account belongs to user and has funds (and lock the row)
     const { rows: accRows } = await client.query(
-      `SELECT id, user_id, balance_cents FROM accounts WHERE id=$1 AND user_id=$2 FOR UPDATE`,
+      `SELECT id, balance_cents FROM accounts WHERE id=$1 AND user_id=$2 FOR UPDATE`,
       [accId, userId]
     );
     if (!accRows.length) throw new Error('Account not found for user');
@@ -897,26 +931,29 @@ app.post('/withdraw', authenticate, async (req, res) => {
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    // Insert withdrawal (now includes account_id)
+    // Insert withdrawal using the actual column names in your DB:
+    // id | user_id | network | token | to_addr | amount | tx_hash | status | created_at | fee_amount | account_id | amount_cents
     const { rows: wRows } = await client.query(
       `INSERT INTO withdrawals
-         (user_id, account_id, amount_cents, fee_cents, address, network, token, status)
-       VALUES ($1,$2,$3,$4,$5,'tron','USDT','pending')
+         (user_id, account_id, network, token, to_addr, amount, amount_cents, fee_amount, status)
+       VALUES
+         ($1,      $2,         'tron', 'USDT', $3,      $4,     $5,           $6,         'pending')
        RETURNING id`,
-      [userId, accId, amtCents, feeCents, address]
+      [userId, accId, address, amountNumeric, amtCents, feeNumeric]
     );
 
-    // Deduct from that account
+    // Deduct the total (amount + fee) from the account (in cents)
     await client.query(
       `UPDATE accounts SET balance_cents = balance_cents - $1 WHERE id=$2`,
       [totalCents, accId]
     );
 
     await client.query('COMMIT');
+
     return res.json({
       id: wRows[0].id,
-      fee: (feeCents / 100),
-      net: (amtCents / 100),
+      fee: feeNumeric,
+      net: amountNumeric, // net to the user before network fee payout logic
       message: 'Withdrawal request submitted'
     });
   } catch (err) {
@@ -927,6 +964,7 @@ app.post('/withdraw', authenticate, async (req, res) => {
     client.release();
   }
 });
+
 
 
 
