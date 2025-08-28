@@ -587,6 +587,65 @@ app.post('/signup', async (req, res) => {
   }
 });
 
+// ========== EMAIL TEMPLATES & SENDER ==========
+const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@glorivest.com';
+
+async function sendMailSafe({ to, subject, html }) {
+  try {
+    if (!to) return;
+    await sgMail.send({ to, from: FROM_EMAIL, subject, html });
+  } catch (e) {
+    console.error('[email] send failed:', subject, to, e?.message || e);
+  }
+}
+
+const EmailTpl = {
+  welcome: ({ email }) => `
+    <div style="font-family:system-ui,Arial">
+      <h2>Welcome to Glorivest 🎉</h2>
+      <p>Hi ${email}, your account is verified and ready.</p>
+      <p>You can deposit USDT (TRON) or card/bank (when available) and start earning.</p>
+    </div>
+  `,
+  depositConfirmed: ({ amount, tx }) => `
+    <div style="font-family:system-ui,Arial">
+      <h2>Deposit Confirmed ✅</h2>
+      <p>We received <b>$${Number(amount).toFixed(2)}</b> (USDT on TRON).</p>
+      ${tx ? `<p>Tx: <code>${tx}</code></p>` : ''}
+    </div>
+  `,
+  withdrawalRequested: ({ amount, address }) => `
+    <div style="font-family:system-ui,Arial">
+      <h2>Withdrawal Requested ⏳</h2>
+      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
+      <p>To: <code>${address}</code></p>
+      <p>We'll notify you as soon as it’s broadcasted and confirmed.</p>
+    </div>
+  `,
+  withdrawalBroadcasted: ({ amount, tx }) => `
+    <div style="font-family:system-ui,Arial">
+      <h2>Withdrawal Broadcasted 🛰️</h2>
+      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
+      <p>Tx: <code>${tx}</code></p>
+    </div>
+  `,
+  withdrawalConfirmed: ({ amount, tx }) => `
+    <div style="font-family:system-ui,Arial">
+      <h2>Withdrawal Confirmed ✅</h2>
+      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
+      <p>Tx: <code>${tx}</code></p>
+    </div>
+  `,
+  withdrawalFailed: ({ amount, reason }) => `
+    <div style="font-family:system-ui,Arial">
+      <h2>Withdrawal Failed ❌</h2>
+      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
+      <p>Reason: ${reason || 'Unknown error'}</p>
+      <p>The funds were returned to your account balance.</p>
+    </div>
+  `,
+};
+
 
 
 // ===== LOGIN =====
@@ -619,49 +678,71 @@ app.post('/login', async (req, res) => {
 
 
 
-// ===== VERIFY OTP =====
+// =========================
+// Verify OTP
+// =========================
 app.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
-  if (!email || !otp) return res.status(400).json({ message: 'Email and OTP are required' });
+  if (!email || !otp) {
+    return res.status(400).json({ message: 'Email and OTP are required' });
+  }
 
+  // Clean up any old unverified users
   await deleteOldUnverifiedUsers();
 
   try {
-    const result = await pool.query(
-      'SELECT id, otp, otp_created_at FROM users WHERE email = $1',
+    // Fetch user + OTP info
+    const { rows } = await pool.query(
+      'SELECT id, otp, otp_created_at, is_verified FROM users WHERE email = $1',
       [email]
     );
-    const user = result.rows[0];
+    const user = rows[0];
     if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.is_verified) return res.status(400).json({ message: 'User already verified' });
 
-    const now = new Date();
+    // Check OTP validity
     const sentAt = new Date(user.otp_created_at);
-    const diffInMin = (now - sentAt) / 1000 / 60;
+    const ageMin = (Date.now() - sentAt.getTime()) / (1000 * 60);
+    if (ageMin > 10) {
+      return res.status(400).json({ message: 'OTP expired. Please request a new one.' });
+    }
+    if (user.otp !== otp) {
+      return res.status(400).json({ message: 'Invalid OTP' });
+    }
 
-    if (diffInMin > 10) return res.status(400).json({ message: 'OTP expired. Please request a new one.' });
-    if (user.otp !== otp) return res.status(400).json({ message: 'Invalid OTP' });
-
-    // ✅ Mark verified
+    // ✅ Mark verified + clear OTP
     await pool.query(
-      'UPDATE users SET otp = NULL, otp_created_at = NULL, is_verified = true WHERE email = $1',
+      'UPDATE users SET otp=NULL, otp_created_at=NULL, is_verified=true WHERE email=$1',
       [email]
     );
 
-    // ✅ Create a default Standard account if the user has none
+    // ✅ Ensure default Standard account exists
     await pool.query(`
       INSERT INTO accounts (user_id, tier_id, account_code)
-      SELECT $1, at.id, $2
-        FROM account_tiers at
-       WHERE at.code = 'standard'
-         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.user_id = $1)
+      SELECT $1, t.id, $2
+        FROM account_tiers t
+       WHERE t.code='standard'
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.user_id=$1)
     `, [user.id, genAccountCode(user.id, 1)]);
 
-    res.status(200).json({ message: 'OTP verified successfully' });
+    // ✅ Send welcome email
+    try {
+      await sendMailSafe({
+        to: email,
+        subject: 'Welcome to Glorivest 🎉',
+        html: EmailTpl.welcome({ email })
+      });
+    } catch (mailErr) {
+      console.error('Welcome email error:', mailErr?.message || mailErr);
+    }
+
+    return res.status(200).json({ message: 'OTP verified successfully' });
   } catch (err) {
     console.error('Error verifying OTP:', err);
-    res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 
 
 
@@ -950,6 +1031,18 @@ app.post('/withdraw', authenticate, async (req, res) => {
 
     await client.query('COMMIT');
 
+    try {
+      const { rows: [u] } = await pool.query('SELECT email FROM users WHERE id=$1', [userId]);
+      await sendMailSafe({
+        to: u.email,
+        subject: 'Withdrawal Requested',
+        html: EmailTpl.withdrawalRequested({ amount: amountNumeric, address }),
+      });
+    } catch (e) {
+      console.error('[email] withdrawalRequested:', e?.message || e);
+    }
+
+    
     return res.json({
       id: wRows[0].id,
       fee: feeNumeric,
@@ -1025,9 +1118,10 @@ app.get('/balance', authenticate, async (req, res) => {
          FROM withdrawals
         WHERE user_id=$1
           AND network='tron' AND token='USDT'
-          AND status IN ('requested','broadcasted')`,
+          AND status IN ('pending','broadcasted')`,
       [userId]
     );
+    
 
     // Available to withdraw now (no locks modeled here)
     const withdrawable = Math.max(Number((total - pending_withdrawals).toFixed(6)), 0);
@@ -1116,6 +1210,159 @@ async function tronUsdtBalanceOfViaTronGrid(base58Addr) {
 }
 
 
+// ======= Tron helpers for withdrawals =======
+async function tronBroadcastUSDT({ to, amountUSDT }) {
+  // amountUSDT -> sun (6 decimals)
+  const contract = await tronUsdtContract();
+  const sun = BigInt(Math.floor(Number(amountUSDT) * 1e6)).toString();
+
+  tronWeb.setAddress(OMNIBUS_TRON_ADDR); // sender
+  const txHash = await contract
+    .transfer(to, sun)
+    .send({ privateKey: OMNIBUS_TRON_PRIV }); // sign with omnibus
+  return txHash; // string
+}
+
+async function tronGetReceipt(txHash) {
+  try {
+    const info = await tronWeb.trx.getTransactionInfo(txHash);
+    // If not found yet, info may be empty object
+    if (!info || Object.keys(info).length === 0) return { found: false };
+    // result codes: 'SUCCESS' when confirmed
+    const ok = (info?.receipt?.result || '').toUpperCase() === 'SUCCESS';
+    return { found: true, ok, block: info.blockNumber || null };
+  } catch (e) {
+    return { found: false, error: e?.message || String(e) };
+  }
+}
+
+// ======= Withdrawal broadcaster + confirmer =======
+async function processWithdrawalsOnce() {
+  if (!OMNIBUS_TRON_PRIV || !OMNIBUS_TRON_ADDR) return;
+
+  // 1) Broadcast up to N pending withdrawals if we can
+  const N = 10;
+  try {
+    const { rows: pend } = await pool.query(
+      `SELECT w.id, w.user_id, w.account_id, w.to_addr, 
+              COALESCE(w.amount_cents, ROUND(w.amount*100))::bigint AS amount_cents,
+              COALESCE(w.fee_cents,    ROUND(w.fee_amount*100))::bigint AS fee_cents
+         FROM withdrawals w
+        WHERE w.network='tron' AND w.token='USDT'
+          AND w.status='pending'
+        ORDER BY w.created_at ASC
+        LIMIT $1`, [N]
+    );
+
+    for (const w of pend) {
+      const amtUSD = Number(w.amount_cents || 0) / 100;
+
+      try {
+        // check omnibus balance roughly (optional, you can call tronUsdtBalanceOf)
+        // const omniBal = await tronUsdtBalanceOf(OMNIBUS_TRON_ADDR);
+        // if (omniBal < amtUSD) { /* skip + log */ }
+
+        const tx = await tronBroadcastUSDT({ to: w.to_addr, amountUSDT: amtUSD });
+        await pool.query(
+          `UPDATE withdrawals SET status='broadcasted', tx_hash=$1 WHERE id=$2`,
+          [tx, w.id]
+        );
+
+        // email broadcasted
+        const { rows: [u] } = await pool.query('SELECT email FROM users WHERE id=$1', [w.user_id]);
+        await sendMailSafe({
+          to: u.email,
+          subject: 'Withdrawal Broadcasted',
+          html: EmailTpl.withdrawalBroadcasted({ amount: amtUSD, tx }),
+        });
+      } catch (e) {
+        console.error('[withdraw-broadcast] id', w.id, e?.message || e);
+        // Mark failed and refund total (amount + fee) to account balance
+        const totalCents = Number(w.amount_cents || 0) + Number(w.fee_cents || 0);
+        try {
+          await withTx(async (c) => {
+            await c.query(`UPDATE withdrawals SET status='failed' WHERE id=$1`, [w.id]);
+            await c.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+              [totalCents, w.account_id]);
+            const { rows: [u] } = await c.query('SELECT email FROM users WHERE id=$1', [w.user_id]);
+            await sendMailSafe({
+              to: u.email,
+              subject: 'Withdrawal Failed',
+              html: EmailTpl.withdrawalFailed({ amount: Number(w.amount_cents)/100, reason: e?.message }),
+            });
+          });
+        } catch (e2) {
+          console.error('[withdraw-refund-fail] id', w.id, e2?.message || e2);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[withdraw-pending-scan] error:', e?.message || e);
+  }
+
+  // 2) Confirm broadcasted
+  try {
+    const { rows: bc } = await pool.query(
+      `SELECT id, user_id, account_id, tx_hash,
+              COALESCE(amount_cents, ROUND(amount*100))::bigint AS amount_cents
+         FROM withdrawals
+        WHERE network='tron' AND token='USDT'
+          AND status='broadcasted'
+        ORDER BY created_at ASC
+        LIMIT 50`
+    );
+
+    for (const w of bc) {
+      if (!w.tx_hash) continue;
+      try {
+        const res = await tronGetReceipt(w.tx_hash);
+        if (!res.found) continue;                    // not yet in a block
+
+        if (res.ok) {
+          await pool.query(
+            `UPDATE withdrawals SET status='confirmed' WHERE id=$1`, [w.id]
+          );
+          const { rows: [u] } = await pool.query('SELECT email FROM users WHERE id=$1', [w.user_id]);
+          await sendMailSafe({
+            to: u.email,
+            subject: 'Withdrawal Confirmed',
+            html: EmailTpl.withdrawalConfirmed({ amount: Number(w.amount_cents)/100, tx: w.tx_hash }),
+          });
+        } else {
+          // on-chain failure → refund amount+fee
+          const { rows: f } = await pool.query(
+            `SELECT COALESCE(fee_cents, ROUND(fee_amount*100))::bigint AS fee_cents, account_id
+               FROM withdrawals WHERE id=$1`, [w.id]
+          );
+          const feeCents = Number(f?.[0]?.fee_cents || 0);
+          const totalCents = Number(w.amount_cents || 0) + feeCents;
+
+          await withTx(async (c) => {
+            await c.query(`UPDATE withdrawals SET status='failed' WHERE id=$1`, [w.id]);
+            await c.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+              [totalCents, w.account_id]);
+            const { rows: [u] } = await c.query('SELECT email FROM users WHERE id=$1', [w.user_id]);
+            await sendMailSafe({
+              to: u.email,
+              subject: 'Withdrawal Failed',
+              html: EmailTpl.withdrawalFailed({ amount: Number(w.amount_cents)/100, reason: 'On-chain failure' }),
+            });
+          });
+        }
+      } catch (e) {
+        console.error('[withdraw-confirm-scan] id', w.id, e?.message || e);
+      }
+    }
+  } catch (e) {
+    console.error('[withdraw-broadcasted-scan] error:', e?.message || e);
+  }
+}
+
+// Run workers
+setInterval(processWithdrawalsOnce, 30_000);
+
+
+
 // === DEPOSITS: detect TRON USDT credits (poller) ===
 
 // Deposit helpers
@@ -1151,21 +1398,31 @@ async function confirmAndCredit(tx_hash) {
 
     await c.query('UPDATE deposits SET status=$1 WHERE tx_hash=$2', ['confirmed', tx_hash]);
 
-    // Credit user (USDT units)
+    // credit user + account (existing code)
     await c.query('UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2',
                   [Number(d.amount), d.user_id]);
-
-    // Also credit the account, if linked (store in cents)
     if (d.account_id) {
       const cents = Math.round(Number(d.amount) * 100);
-      await c.query(
-        'UPDATE accounts SET balance_cents = COALESCE(balance_cents,0) + $1 WHERE id=$2',
-        [cents, d.account_id]
-      );
+      await c.query('UPDATE accounts SET balance_cents = COALESCE(balance_cents,0) + $1 WHERE id=$2',
+                    [cents, d.account_id]);
     }
+
+    // email notify
+    try {
+      const { rows: [u] } = await c.query('SELECT email FROM users WHERE id=$1', [d.user_id]);
+      await sendMailSafe({
+        to: u.email,
+        subject: 'Deposit Confirmed',
+        html: EmailTpl.depositConfirmed({ amount: d.amount, tx: d.tx_hash }),
+      });
+    } catch (e) {
+      console.error('[email] depositConfirmed:', e?.message || e);
+    }
+
     return true;
   });
 }
+
 
 
 
