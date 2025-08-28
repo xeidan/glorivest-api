@@ -1641,6 +1641,142 @@ app.get('/accounts/:id/deposits', authenticate, async (req, res) => {
 });
 
 
+// GET /accounts/:id/withdrawals
+app.get('/accounts/:id/withdrawals', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const accountId = Number(req.params.id);
+  try {
+    const { rows: ok } = await pool.query(
+      `SELECT 1 FROM accounts WHERE id=$1 AND user_id=$2`, [accountId, userId]
+    );
+    if (!ok.length) return res.status(404).json([]);
+
+    const { rows } = await pool.query(
+      `SELECT id, user_id, account_id, status, created_at,
+              COALESCE(amount_cents, ROUND(amount*100))::bigint AS amount_cents,
+              COALESCE(fee_cents, ROUND(fee_amount*100))::bigint AS fee_cents,
+              GREATEST( COALESCE(amount_cents, ROUND(amount*100))::bigint - 
+                        COALESCE(fee_cents, ROUND(fee_amount*100))::bigint, 0) AS net_cents
+         FROM withdrawals
+        WHERE account_id=$1
+        ORDER BY created_at DESC
+        LIMIT 200`,
+      [accountId]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('list withdrawals error:', e);
+    res.status(500).json([]);
+  }
+});
+
+
+// === Unified Transactions: deposits + withdrawals ===
+app.get('/accounts/:id/transactions', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const accId  = Number(req.params.id);
+  if (!accId) return res.status(400).json({ message: 'Invalid account id' });
+
+  try {
+    const { rows: accountRows } = await pool.query(
+      `SELECT id FROM accounts WHERE id=$1 AND user_id=$2`,
+      [accId, userId]
+    );
+    if (!accountRows.length) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+
+    // Fetch deposits
+    const { rows: deposits } = await pool.query(
+      `SELECT id, created_at, amount_cents, currency, status
+       FROM deposits
+       WHERE account_id=$1
+       ORDER BY created_at DESC`,
+      [accId]
+    );
+
+    // Fetch withdrawals
+    const { rows: withdrawals } = await pool.query(
+      `SELECT id, created_at, amount_cents, fee_cents, address, status
+       FROM withdrawals
+       WHERE account_id=$1
+       ORDER BY created_at DESC`,
+      [accId]
+    );
+
+    // Normalize to a common schema
+    const txs = [];
+
+    for (const d of deposits) {
+      txs.push({
+        type: 'deposit',
+        id: d.id,
+        created_at: d.created_at,
+        amount_cents: Number(d.amount_cents || 0),
+        fee_cents: 0,
+        net_cents: Number(d.amount_cents || 0),
+        currency: (d.currency || 'USDT').toUpperCase(),
+        status: d.status || 'confirmed'
+      });
+    }
+
+    for (const w of withdrawals) {
+      txs.push({
+        type: 'withdrawal',
+        id: w.id,
+        created_at: w.created_at,
+        amount_cents: Number(w.amount_cents || 0),
+        fee_cents: Number(w.fee_cents || 0),
+        net_cents: Number(w.amount_cents || 0) - Number(w.fee_cents || 0),
+        currency: 'USDT',
+        address: w.address,
+        status: w.status || 'pending'
+      });
+    }
+
+    // Sort newest first
+    txs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    return res.json(txs);
+  } catch (err) {
+    console.error('transactions error:', err);
+    return res.status(500).json({ message: 'Failed to load transactions' });
+  }
+});
+
+
+
+
+
+async function apiFetch(path, opts = {}) {
+  const API = window.API_BASE || '';
+  const token = (window.getToken && window.getToken()) || localStorage.getItem('jwt');
+  const res = await fetch(API + path, {
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    ...opts
+  });
+
+  // Try to parse body (even on error)
+  let data = null;
+  const text = await res.text();
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+
+
 
 app.post('/dev/topup', authenticate, async (req, res) => {
   console.log('TEMP_ALLOW_DEV=', process.env.TEMP_ALLOW_DEV, 'user=', req.user?.id);
