@@ -636,52 +636,7 @@ async function sendMailSafe({ to, subject, html }) {
   }
 }
 
-const EmailTpl = {
-  welcome: ({ email }) => `
-    <div style="font-family:system-ui,Arial">
-      <h2>Welcome to Glorivest 🎉</h2>
-      <p>Hi ${email}, your account is verified and ready.</p>
-      <p>You can deposit USDT (TRON) or card/bank (when available) and start earning.</p>
-    </div>
-  `,
-  depositConfirmed: ({ amount, tx }) => `
-    <div style="font-family:system-ui,Arial">
-      <h2>Deposit Confirmed ✅</h2>
-      <p>We received <b>$${Number(amount).toFixed(2)}</b> (USDT on TRON).</p>
-      ${tx ? `<p>Tx: <code>${tx}</code></p>` : ''}
-    </div>
-  `,
-  withdrawalRequested: ({ amount, address }) => `
-    <div style="font-family:system-ui,Arial">
-      <h2>Withdrawal Requested ⏳</h2>
-      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
-      <p>To: <code>${address}</code></p>
-      <p>We'll notify you as soon as it’s broadcasted and confirmed.</p>
-    </div>
-  `,
-  withdrawalBroadcasted: ({ amount, tx }) => `
-    <div style="font-family:system-ui,Arial">
-      <h2>Withdrawal Broadcasted 🛰️</h2>
-      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
-      <p>Tx: <code>${tx}</code></p>
-    </div>
-  `,
-  withdrawalConfirmed: ({ amount, tx }) => `
-    <div style="font-family:system-ui,Arial">
-      <h2>Withdrawal Confirmed ✅</h2>
-      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
-      <p>Tx: <code>${tx}</code></p>
-    </div>
-  `,
-  withdrawalFailed: ({ amount, reason }) => `
-    <div style="font-family:system-ui,Arial">
-      <h2>Withdrawal Failed ❌</h2>
-      <p>Amount: <b>$${Number(amount).toFixed(2)}</b> (USDT)</p>
-      <p>Reason: ${reason || 'Unknown error'}</p>
-      <p>The funds were returned to your account balance.</p>
-    </div>
-  `,
-};
+
 
 
 
