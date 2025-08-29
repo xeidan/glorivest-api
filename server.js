@@ -1125,7 +1125,7 @@ app.get('/balance', authenticate, async (req, res) => {
     res.json({
       currency: 'USDT',
       chain: 'tron',
-      total_usd: Number(total.toFixed(6)),
+      total_usdt: Number(total.toFixed(6)),
       pending_deposits_usd: Number(pending_deposits.toFixed(6)),
       confirmed_unswept_usd: Number(confirmed_unswept.toFixed(6)),
       confirmed_swept_usd: Number(confirmed_swept.toFixed(6)),
