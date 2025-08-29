@@ -469,7 +469,7 @@ app.post('/resend-otp', otpResendLimiter, async (req, res) => {
 
     const msg = {
       to: email,
-      from: process.env.FROM_EMAIL || 'noreply@earnrave.com',
+      from: process.env.FROM_EMAIL || 'no-reply@glorivest.com',
       subject: 'Your Glorivest OTP Code',
       html: `
         <div style="font-family: Arial, sans-serif; text-align: center;">
@@ -528,7 +528,7 @@ const EmailTpl = {
 };
 
 async function sendMailSafe(msg) {
-  try { await sgMail.send({ from: process.env.FROM_EMAIL || 'noreply@glorivest.com', ...msg }); }
+  try { await sgMail.send({ from: process.env.FROM_EMAIL || 'no-reply@glorivest.com', ...msg }); }
   catch (e) { console.error('sendMailSafe:', e?.message || e); }
 }
 
@@ -598,7 +598,7 @@ app.post('/signup', async (req, res) => {
 
     const msg = {
       to: email,
-      from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
+      from: process.env.FROM_EMAIL || 'no-reply@glorivest.com',
       subject: 'Your Glorivest OTP Code',
       html: `
         <div style="font-family: Arial, sans-serif; text-align: center;">
@@ -625,7 +625,7 @@ app.post('/signup', async (req, res) => {
 });
 
 // ========== EMAIL TEMPLATES & SENDER ==========
-const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@glorivest.com';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'no-reply@glorivest.com';
 
 async function sendMailSafe({ to, subject, html }) {
   try {
