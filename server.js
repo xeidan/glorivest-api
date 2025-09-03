@@ -2225,6 +2225,8 @@ const KORA_TX_PATH = (process.env.KORA_TX_PATH || '/v1/transactions').replace(/\
 app.get('/payments/:id/status', authenticate, async (req, res) => {
   const userId = req.user.id;
   const id = Number(req.params.id);
+  console.log('[payments:status] params.id=%s parsed=%d userId=%d', req.params.id, id, userId);
+
   if (!id) return res.status(400).json({ message: 'Invalid id' });
 
   try {
@@ -2234,6 +2236,8 @@ app.get('/payments/:id/status', authenticate, async (req, res) => {
         WHERE id = $1`,
       [id]
     );
+
+    console.log('[payments:status] row=', p);
 
     if (!p || p.user_id !== userId) {
       return res.status(404).json({ message: 'Not found' });
