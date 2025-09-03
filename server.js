@@ -2422,6 +2422,20 @@ function convertToLedger(amountMajor, fromCur, toCur) {
 }
 
 
+// after creating checkout, you already have pay.id
+async function pollPayment(id, { tries = 12, intervalMs = 5000 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    const r = await fetch(`/payments/${id}/status`, { headers: { Authorization: `Bearer ${token}` }});
+    const j = await r.json();
+    if (j.status === 'succeeded') return j;
+    if (['failed','canceled'].includes(j.status)) throw new Error(j.status);
+    await new Promise(res => setTimeout(res, intervalMs));
+  }
+  throw new Error('timeout');
+}
+
+
+
 
 async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPayload) {
   return await withTx(async (c) => {
