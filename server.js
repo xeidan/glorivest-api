@@ -2168,13 +2168,14 @@ app.post('/payments/kora/checkout', authenticate, async (req, res) => {
       method: 'POST',
       body: JSON.stringify({
         reference: providerRef,
-        amount,   // major units (not cents)
-        currency, // if 403, try NGN
+        amount,                 // major units
+        currency,               // e.g. "NGN"
         customer: { email: req.user.email || undefined },
-        redirect_url: `${APP_BASE}/deposit-complete.html`,
-        cancel_url:   `${APP_BASE}/deposit-cancelled.html`,
+        redirect_url: `${APP_BASE}/deposit-complete.html`
+        // (no cancel_url)
       })
     });
+    
 
     const checkoutUrl = k?.data?.checkout_url || k?.checkout_url || k?.data?.link || null;
 
