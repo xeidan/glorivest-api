@@ -15,6 +15,10 @@ app.set('trust proxy', 1);
 
 // === CRYPTO IMPORTS (add under your other requires) ===
 const crypto = require('crypto');
+const sk = process.env.KORA_SECRET_KEY;
+const evt = { data: { reference: "gv_123_456", status: "success" } };
+const sig = crypto.createHmac('sha256', sk).update(JSON.stringify(evt.data)).digest('hex');
+console.log(sig);
 
 
 let TronWeb = require('tronweb');
