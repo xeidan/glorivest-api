@@ -2149,13 +2149,12 @@ app.post('/payments/kora/checkout', authenticate, async (req, res) => {
     const k = await koraFetch(KORA_CHECKOUT_PATH, {
       method: 'POST',
       body: JSON.stringify({
-        reference: providerRef,
-        amount,                 // major units
-        currency,               // e.g. "NGN"
-        customer: { email: req.user.email || undefined },
-        redirect_url: `${APP_BASE}/deposit-complete.html`
-        // (no cancel_url)
-      })
+          reference: providerRef,
+          amount,
+          currency,
+          customer: { email: req.user.email || undefined },
+          redirect_url: `${APP_BASE}/deposit-complete.html`,
+        })        
     });
     
 
@@ -2281,6 +2280,30 @@ app.get('/payments/:id/status', authenticate, async (req, res) => {
 
 // ========================== Finalize (credit + email) ==========================
 async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPayload) {
+  const LEDGER_CCY = (process.env.LEDGER_CURRENCY || 'USD').toUpperCase();
+
+  // Inline converter: returns { ledgerCents, fx_rate, fx_base, fx_quote }
+  function convertToLedgerCents(origCents, origCcy) {
+    const src = String(origCcy || LEDGER_CCY).toUpperCase();
+
+    if (src === LEDGER_CCY) {
+      return { ledgerCents: Number(origCents || 0), fx_rate: 1, fx_base: src, fx_quote: LEDGER_CCY };
+    }
+
+    // NGN -> USD (configure FX_NGNUSD as "USD per 1 NGN")
+    if (src === 'NGN' && LEDGER_CCY === 'USD') {
+      const rate = Number(process.env.FX_NGNUSD || 0);
+      if (!Number.isFinite(rate) || rate <= 0) {
+        throw new Error('FX_NGNUSD not set or invalid');
+      }
+      // origCents is kobo; ledger cents = round(kobo * (USD/NGN))
+      const ledgerCents = Math.round(Number(origCents || 0) * rate);
+      return { ledgerCents, fx_rate: rate, fx_base: 'NGN', fx_quote: 'USD' };
+    }
+
+    throw new Error(`No FX path for ${src} -> ${LEDGER_CCY}`);
+  }
+
   return await withTx(async (c) => {
     const { rows: [p] } = await c.query(
       `SELECT * FROM payments WHERE provider_ref=$1 FOR UPDATE`,
@@ -2289,6 +2312,10 @@ async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPaylo
     if (!p) return false;
     if (['succeeded','failed','canceled'].includes(p.status)) return true;
 
+    const origCents = Number(p.amount_cents || 0);
+    const origCcy   = String(p.currency || LEDGER_CCY).toUpperCase();
+
+    // Persist new state + provider payload
     await c.query(
       `UPDATE payments
           SET status=$1, meta=$2::jsonb, updated_at=now()
@@ -2297,22 +2324,63 @@ async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPaylo
     );
 
     if (mappedStatus === 'succeeded') {
-      const dollars = Number((p.amount_cents || 0) / 100);
+      // Convert to ledger currency cents (e.g., USD cents)
+      const { ledgerCents, fx_rate, fx_base, fx_quote } = convertToLedgerCents(origCents, origCcy);
 
-      await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`,
-        [dollars, p.user_id]);
-
-      if (p.account_id) {
-        await c.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
-          [p.amount_cents, p.account_id]);
-      }
-
+      // Store how we credited (requires columns suggested earlier)
       await c.query(
-        `INSERT INTO deposits (user_id, account_id, network, token, tx_hash, amount, status)
-         VALUES ($1,$2,'fiat','USD',$3,$4,'confirmed')`,
-        [p.user_id, p.account_id, providerRef, dollars]
+        `UPDATE payments
+            SET credited_cents=$1,
+                ledger_currency=$2,
+                fx_rate=$3,
+                fx_base=$4,
+                fx_quote=$5,
+                fx_at=now()
+          WHERE id=$6`,
+        [ledgerCents, LEDGER_CCY, fx_rate, fx_base, fx_quote, p.id]
       );
 
+      // Credit user numeric balance in major units (e.g., USD dollars)
+      await c.query(
+        `UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`,
+        [ledgerCents / 100, p.user_id]
+      );
+
+      // Credit the account in cents (authoritative)
+      if (p.account_id) {
+        await c.query(
+          `UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+          [ledgerCents, p.account_id]
+        );
+      }
+
+      // Record a deposit with both original (src_) and ledger views
+      await c.query(
+        `INSERT INTO deposits (
+           user_id, account_id, network, token, tx_hash, status,
+           amount, amount_cents, currency,              -- ledger view
+           src_currency, src_amount_cents, fx_rate, fx_at
+         )
+         VALUES (
+           $1, $2, 'fiat', $3, $4, 'confirmed',
+           $5,  $6,            $7,
+           $8,  $9,             $10,    now()
+         )`,
+        [
+          p.user_id,
+          p.account_id,
+          LEDGER_CCY,
+          providerRef,
+          ledgerCents / 100,   // amount (float) in ledger currency for back-compat
+          ledgerCents,         // cents in ledger currency
+          LEDGER_CCY,
+          origCcy,
+          origCents,
+          fx_rate
+        ]
+      );
+
+      // Receipt email (shows original + credited)
       try {
         const { rows: [user] } = await c.query(`SELECT email FROM users WHERE id=$1`, [p.user_id]);
         if (user?.email) {
@@ -2320,7 +2388,10 @@ async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPaylo
             to: user.email,
             from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
             subject: 'Deposit received',
-            html: `<p>Hi,</p><p>We’ve received your deposit of <b>$${(p.amount_cents/100).toFixed(2)}</b> via Kora. Your balance has been updated.</p><p>Ref: ${providerRef}</p>`
+            html: `<p>Hi,</p>
+                   <p>We’ve received your deposit of <b>${origCcy} ${(origCents/100).toFixed(2)}</b>.</p>
+                   <p>Credited to your account in <b>${LEDGER_CCY} ${(ledgerCents/100).toFixed(2)}</b> (FX ${fx_base}/${fx_quote} = ${fx_rate}).</p>
+                   <p>Ref: ${providerRef}</p>`
           });
         }
       } catch (e) {
@@ -2331,6 +2402,7 @@ async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPaylo
     return true;
   });
 }
+
 
 // ========================== Webhook ==========================
 // Keep raw body for this route; also parse JSON.
@@ -2476,6 +2548,29 @@ async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPaylo
     return true;
   });
 }
+
+
+const LEDGER_CCY = (process.env.LEDGER_CURRENCY || 'USD').toUpperCase();
+
+function toLedgerCents({ amountCents, currency }) {
+  const cur = (currency || LEDGER_CCY).toUpperCase();
+
+  if (cur === LEDGER_CCY) {
+    return { ledgerCents: amountCents, fx_rate: 1, fx_base: cur, fx_quote: LEDGER_CCY };
+  }
+
+  // NGN -> USD path
+  if (cur === 'NGN' && LEDGER_CCY === 'USD') {
+    const rate = Number(process.env.FX_NGNUSD || 0);
+    if (!rate) throw new Error('FX_NGNUSD not set');
+    // amountCents is NGN*100. Convert to USD dollars, then to USD cents.
+    const usdCents = Math.round((amountCents / 100) * rate * 100);
+    return { ledgerCents: usdCents, fx_rate: rate, fx_base: 'NGN', fx_quote: 'USD' };
+  }
+
+  throw new Error(`No FX path for ${cur}->${LEDGER_CCY}`);
+}
+
 
 
 
