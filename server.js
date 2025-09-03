@@ -14,11 +14,6 @@ const app = express();
 app.set('trust proxy', 1);
 
 // === CRYPTO IMPORTS (add under your other requires) ===
-const crypto = require('crypto');
-const sk = process.env.KORA_SECRET_KEY;
-const evt = { data: { reference: "gv_123_456", status: "success" } };
-const sig = crypto.createHmac('sha256', sk).update(JSON.stringify(evt.data)).digest('hex');
-console.log(sig);
 
 
 let TronWeb = require('tronweb');
@@ -2051,33 +2046,20 @@ app.get('/accounts/:id/transactions', authenticate, async (req, res) => {
 
 
 
-app.post('/dev/topup', authenticate, async (req, res) => {
-  const allow = process.env.TEMP_ALLOW_DEV;
-  console.log('[dev/topup] TEMP_ALLOW_DEV=', allow, 'user=', req.user?.id);
-
-  if (!allow) return res.status(403).json({ message: 'forbidden' });
-
-  try {
-    const userId = req.user.id;
-    const dollars = Math.max(1, Number(req.body.amount || 0));
-
-    const { rows: [acc] } = await pool.query(
-      'SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1',
-      [userId]
-    );
-    if (!acc) return res.status(400).json({ message: 'no account' });
-
-    await pool.query(
-      'UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
-      [Math.round(dollars * 100), acc.id]
-    );
-
-    return res.json({ ok: true, credited: dollars });
-  } catch (e) {
-    console.error('[dev/topup] error:', e);
-    return res.status(500).json({ message: 'internal error' });
-  }
-});
+ app.post('/dev/topup', adminAuth, async (req, res) => {
+     if (!process.env.TEMP_ALLOW_DEV) return res.status(404).json({ message: 'not found' });
+     const userId  = req.user.id;
+     const dollars = Math.max(1, Number(req.body.amount || 0));
+     const { rows } = await pool.query(
+       'SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1',
+       [userId]
+     );
+     if (!rows[0]) return res.status(400).json({ message: 'no account' });
+     await pool.query('UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
+       [Math.round(dollars * 100), rows[0].id]);
+     return res.json({ ok: true, credited: dollars });
+   });
+  
 
 
 
