@@ -2223,81 +2223,78 @@ const KORA_TX_PATH = (process.env.KORA_TX_PATH || '/v1/transactions').replace(/\
 // ========================== CHECKOUT STATUS (poll) ==========================
 // GET /payments/:id/status
 app.get('/payments/:id/status', authenticate, async (req, res) => {
-  const userId = req.user.id;
-  const id = Number(req.params.id);
-  console.log('[payments:status] params.id=%s parsed=%d userId=%d', req.params.id, id, userId);
+  const userId = Number(req.user.id);
+  const id = Number.parseInt(req.params.id, 10);
 
-  if (!id) return res.status(400).json({ message: 'Invalid id' });
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ message: 'Invalid id' });
+  }
 
   try {
+    // Scope by user in SQL to avoid string-vs-number mismatches on BIGINT
     const { rows: [p] } = await pool.query(
-      `SELECT id, user_id, provider_ref, status, meta
+      `SELECT id, user_id, account_id, amount_cents, currency, provider, provider_ref, status, meta
          FROM payments
-        WHERE id = $1`,
-      [id]
+        WHERE id = $1::bigint AND user_id = $2::bigint`,
+      [id, userId]
     );
 
-    console.log('[payments:status] row=', p);
+    if (!p) return res.status(404).json({ message: 'Not found' });
 
-    if (!p || p.user_id !== userId) {
-      return res.status(404).json({ message: 'Not found' });
-    }
-
-    // If already finalized locally, just return it
+    // Already finalized? return as-is
     if (['succeeded', 'failed', 'canceled'].includes(p.status)) {
-      return res.json({ status: p.status, meta: p.meta });
+      return res.json({ id: p.id, status: p.status, provider_ref: p.provider_ref, meta: p.meta });
     }
 
-    // If we have no remote reference yet, return last-known state
+    // No remote ref yet? return last-known local status
     if (!p.provider_ref) {
-      return res.json({ status: p.status });
+      return res.json({ id: p.id, status: p.status });
     }
 
-    // Query Kora for the latest status (uses bearer = KORA_SECRET_KEY)
+    // Poll Kora for the latest status (bearer = KORA_SECRET_KEY)
     let k;
     try {
-      k = await koraFetch(`${KORA_TX_PATH}/${encodeURIComponent(p.provider_ref)}`, {
-        method: 'GET'
-      });
+      k = await koraFetch(`${KORA_TX_PATH}/${encodeURIComponent(p.provider_ref)}`, { method: 'GET' });
     } catch (e) {
-      // For client errors, bubble message/body so you can see why
       const status = e?.status || 500;
       if (status >= 400 && status < 500) {
-        console.error('Kora tx lookup error (client):', e?.message, e?.body || '');
-        // Do not fail the UI outright; return last-known status + provider details
+        console.error('[kora:lookup:client]', { id: p.id, ref: p.provider_ref, status, message: e?.message, body: e?.body });
+        // Don’t block the UI; return last-known state + provider error details
         return res.status(200).json({
+          id: p.id,
           status: p.status,
           provider_error: { status, message: e?.message, body: e?.body }
         });
       }
-      // For server/unknown errors, keep UI going with last-known status
-      console.error('Kora tx lookup error (server):', e);
-      return res.json({ status: p.status });
+      console.error('[kora:lookup:server]', { id: p.id, ref: p.provider_ref, err: e?.message || e });
+      return res.json({ id: p.id, status: p.status });
     }
 
-    // Normalize remote status
-    const remoteStatus = String(k?.data?.status || k?.status || '').toLowerCase();
-    let mapped = 'pending';
-    if (['success','succeeded','paid','completed'].includes(remoteStatus)) mapped = 'succeeded';
-    else if (['failed','error','declined'].includes(remoteStatus))         mapped = 'failed';
-    else if (['canceled','cancelled'].includes(remoteStatus))              mapped = 'canceled';
+    // Normalize remote status → local status
+    const remote = String(k?.data?.status || k?.status || '').toLowerCase();
+    const mapped =
+      ['success', 'succeeded', 'paid', 'completed'].includes(remote) ? 'succeeded' :
+      ['failed', 'error', 'declined'].includes(remote)               ? 'failed'    :
+      ['canceled', 'cancelled'].includes(remote)                     ? 'canceled'  :
+      'pending';
 
-    // If it changed, finalize locally (credits, emails, etc.)
+    // If remote differs, finalize locally (credit/deposits/emails/etc.)
     if (mapped !== p.status) {
       try {
         await finalizeFiatPaymentByRef(p.provider_ref, mapped, k);
       } catch (finalizeErr) {
-        console.error('finalizeFiatPaymentByRef error:', finalizeErr);
-        // Even if finalize fails, return what we learned from Kora so UI updates
+        console.error('[payments:finalize:error]', { id: p.id, ref: p.provider_ref, err: finalizeErr?.message || finalizeErr });
+        // Still return what we learned from Kora so the UI updates
       }
     }
 
-    return res.json({ status: mapped, meta: k });
+    return res.json({ id: p.id, status: mapped, provider_ref: p.provider_ref, meta: k });
   } catch (err) {
-    console.error('payments status error:', err);
+    console.error('[payments:status:error]', err);
     return res.status(500).json({ message: 'Status check failed' });
   }
 });
+
 
 
 // ========================== Finalize (credit + email) ==========================
