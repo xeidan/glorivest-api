@@ -149,6 +149,24 @@ async function setSetting(key, value) {
         created_at TIMESTAMP DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS payments (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        account_id BIGINT,
+        amount_cents BIGINT NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        provider TEXT,
+        provider_ref TEXT UNIQUE,
+        checkout_url TEXT,
+        status TEXT NOT NULL DEFAULT 'initiated',
+        meta JSONB DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS payments_user_id_idx ON payments(user_id);
+
+
       CREATE TABLE IF NOT EXISTS withdrawals (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL,
@@ -1125,7 +1143,7 @@ app.get('/balance', authenticate, async (req, res) => {
     res.json({
       currency: 'USDT',
       chain: 'tron',
-      total_usdt: Number(total.toFixed(6)),
+      total_usd: Number(total.toFixed(6)),
       pending_deposits_usd: Number(pending_deposits.toFixed(6)),
       confirmed_unswept_usd: Number(confirmed_unswept.toFixed(6)),
       confirmed_swept_usd: Number(confirmed_swept.toFixed(6)),
@@ -1817,14 +1835,18 @@ async function getOrCreateUserTronWallet(pool, userId, accountId) {
 
 
 async function generateTronWalletWithEncryptedKey() {
-  // TODO: replace with actual key generation and encryption
-  // Must return a valid TRON mainnet address (starts with 'T')
-  const rnd = (len) => Array.from(crypto.getRandomValues(new Uint8Array(len)))
-    .map(b => '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'[b % 58]).join('');
+  const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  const rnd = (len) => {
+    const buf = crypto.randomBytes(len);
+    let s = '';
+    for (let i = 0; i < buf.length; i++) s += alphabet[buf[i] % 58];
+    return s;
+  };
   const address = 'T' + rnd(33);
-  const privEnc = 'enc:' + rnd(64); // placeholder
+  const privEnc = 'enc:' + rnd(64);
   return { address, privEnc };
 }
+
 
 
 
@@ -1997,36 +2019,6 @@ app.get('/accounts/:id/transactions', authenticate, async (req, res) => {
 
 
 
-async function apiFetch(path, opts = {}) {
-  const API = window.API_BASE || '';
-  const token = (window.getToken && window.getToken()) || localStorage.getItem('jwt');
-  const res = await fetch(API + path, {
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
-    },
-    ...opts
-  });
-
-  // Try to parse body (even on error)
-  let data = null;
-  const text = await res.text();
-  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
-
-  if (!res.ok) {
-    const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    err.body = data;
-    throw err;
-  }
-  return data;
-}
-
-
-
-
 app.post('/dev/topup', authenticate, async (req, res) => {
   console.log('TEMP_ALLOW_DEV=', process.env.TEMP_ALLOW_DEV, 'user=', req.user?.id);
   if (!process.env.TEMP_ALLOW_DEV) return res.status(403).json({ message: 'forbidden' });
@@ -2056,16 +2048,19 @@ if (!process.env.TEMP_ALLOW_DEV) {
 
 
 
-// ==== Kora config ====
-const KORA_PK = process.env.KORA_PUBLIC_KEY || '';
-const KORA_SK = process.env.KORA_SECRET_KEY || '';
-const KORA_WEBHOOK_SECRET = process.env.KORA_WEBHOOK_SECRET || '';
-const KORA_BASE = (process.env.KORA_BASE_URL || 'https://api.korapay.com/merchant/api').replace(/\/+$/,'');
-const APP_BASE  = (process.env.APP_BASE_URL  || 'http://localhost:5500').replace(/\/+$/,'');
+// ==== Kora config (TEST or LIVE via keys) ====
+const KORA_PK   = (process.env.KORA_PUBLIC_KEY  || '').trim();
+const KORA_SK   = (process.env.KORA_SECRET_KEY  || '').trim(); // used for server-to-server + webhook verify
+const KORA_BASE = (process.env.KORA_BASE_URL    || 'https://api.korapay.com/merchant/api').replace(/\/+$/,'');
+const APP_BASE  = (process.env.APP_BASE_URL     || 'http://localhost:5500').replace(/\/+$/,'');
 
-// Raw fetch helper (server-to-server)
+// Pick endpoint via env so we can swap quickly without redeploy
+const KORA_CHECKOUT_PATH = (process.env.KORA_CHECKOUT_PATH || '/v1/charges/initialize').replace(/\/+$/, '');
+
+// ---- Raw fetch helper (server-to-server; bearer = secret key) ----
 async function koraFetch(path, opts = {}) {
-  const res = await fetch(`${KORA_BASE}${path}`, {
+  const url = `${KORA_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const res = await fetch(url, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
@@ -2073,231 +2068,298 @@ async function koraFetch(path, opts = {}) {
       ...(opts.headers || {}),
     }
   });
+
   const text = await res.text();
-  let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  let data;
+  try { data = text ? JSON.parse(text) : null; }
+  catch { data = { raw: text }; }
+
   if (!res.ok) {
     const msg = data?.message || `Kora HTTP ${res.status}`;
-    const err = new Error(msg); err.status = res.status; err.body = data;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = data;
     throw err;
   }
+  if (!KORA_SK)  throw new Error('Missing KORA_SECRET_KEY');
+if (!KORA_PK)  console.warn('KORA_PUBLIC_KEY is empty (OK for server-only)');
+if (!KORA_BASE) throw new Error('Missing KORA_BASE_URL');
+
   return data;
 }
 
-// Verify webhook (HMAC SHA256 of raw body with webhook secret)
+// ---- Webhook signature helper (HMAC SHA256 over req.body.data with SECRET key) ----
 function verifyKoraSignature(req) {
-  // Kora commonly uses 'X-Kora-Signature' (use your docs if header name differs)
-  const sig = req.headers['x-kora-signature'] || req.headers['kora-signature'] || '';
-  if (!sig || !KORA_WEBHOOK_SECRET) return false;
-  const h = crypto.createHmac('sha256', KORA_WEBHOOK_SECRET).update(req.rawBody || '').digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(sig));
+  const sig = req.headers['x-korapay-signature'];
+  if (!sig || !KORA_SK) return false;
+  const payload = JSON.stringify(req.body?.data || {});
+  const digest = crypto.createHmac('sha256', KORA_SK).update(payload).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(sig));
+  } catch {
+    return false;
+  }
 }
 
-
-// POST /payments/kora/checkout  { amount, currency? }
+// ========================== CHECKOUT (create) ==========================
+// POST /payments/kora/checkout  { amount, currency?='USD', account_id? }
 app.post('/payments/kora/checkout', authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
-    const amount = Number(req.body?.amount || 0);
-    const currency = (req.body?.currency || 'USD').toUpperCase();
-    if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum $20' });
+    const userId   = req.user.id;
+    const amount   = Number(req.body.amount || 0);
+    const currency = (req.body.currency || 'USD').toUpperCase();
+    const accountId = Number(req.body.account_id) || null;
 
-    // resolve account (like you do elsewhere)
-    const { rows: acctRows } = await pool.query(
-      `SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1`, [userId]
+    if (!amount || amount < 20) {
+      return res.status(400).json({ message: 'Minimum fiat deposit is $20' });
+    }
+
+    const amountCents = Math.round(amount * 100);
+
+    const { rows: [pmt] } = await pool.query(
+      `INSERT INTO payments (user_id, account_id, amount_cents, currency, status)
+       VALUES ($1,$2,$3,$4,'initiated')
+       RETURNING id`,
+      [userId, accountId, amountCents, currency]
     );
-    if (!acctRows.length) return res.status(400).json({ message: 'No account' });
-    const accountId = acctRows[0].id;
 
-    const amount_cents = Math.round(amount * 100);
-    const reference = `KORA_${userId}_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const providerRef = `gv_${pmt.id}_${Date.now()}`;
 
-    // store intent
-    await pool.query(`
-      INSERT INTO fiat_payments (user_id, account_id, reference, amount_cents, currency, status, provider)
-      VALUES ($1,$2,$3,$4,$5,'pending','kora')
-    `, [userId, accountId, reference, amount_cents, currency]);
-
-    // create hosted checkout init (payload may differ—adjust per Kora docs)
-    const init = await koraFetch('/charges', {
+    // ---- Call Kora via helper ----
+    const k = await koraFetch(KORA_CHECKOUT_PATH, {
       method: 'POST',
       body: JSON.stringify({
-        reference,
-        amount: amount,         // in major units
-        currency,               // 'USD' or 'NGN' etc
-        customer: { email: req.user.email || 'user@example.com' },
-        // optional redirect/callbacks
-        redirect_url: `${APP_BASE}/payment-complete.html?ref=${encodeURIComponent(reference)}`
+        reference: providerRef,
+        amount,   // major units (not cents)
+        currency, // if 403, try NGN
+        customer: { email: req.user.email || undefined },
+        redirect_url: `${APP_BASE}/deposit-complete.html`,
+        cancel_url:   `${APP_BASE}/deposit-cancelled.html`,
       })
     });
 
-    // Return something the frontend can open (hosted link or inline token)
-    // Many gateways return a `checkout_url` or `payment_url`
-    const checkout_url = init?.data?.checkout_url || init?.data?.payment_url || init?.data?.link;
-    return res.json({ reference, checkout_url });
-  } catch (e) {
-    console.error('kora checkout error:', e?.message || e);
-    return res.status(500).json({ message: 'Kora init failed' });
-  }
-});
+    const checkoutUrl = k?.data?.checkout_url || k?.checkout_url || k?.data?.link || null;
 
-
-
-// GET /payments/kora/verify?reference=REF
-app.get('/payments/kora/verify', authenticate, async (req, res) => {
-  const reference = String(req.query.reference || '').trim();
-  if (!reference) return res.status(400).json({ message: 'reference required' });
-
-  try {
-    const v = await koraFetch(`/charges/${encodeURIComponent(reference)}`, { method: 'GET' });
-
-    // Normalize success
-    const status = (v?.data?.status || '').toLowerCase(); // 'success' | 'failed' | 'pending'
-    await pool.query(`UPDATE fiat_payments SET status=$1, raw=$2 WHERE reference=$3`,
-      [status, v, reference]
+    const { rows: [updated] } = await pool.query(
+      `UPDATE payments
+         SET provider='kora',
+             provider_ref=$1,
+             checkout_url=$2,
+             status='pending',
+             meta=$3::jsonb,
+             updated_at=now()
+       WHERE id=$4
+       RETURNING id, checkout_url, provider_ref`,
+      [providerRef, checkoutUrl, JSON.stringify(k), pmt.id]
     );
 
-    if (status === 'success') {
-      // credit exactly once
-      const { rows } = await pool.query(`SELECT * FROM fiat_payments WHERE reference=$1`, [reference]);
-      const fp = rows[0];
-      if (fp) {
-        const credited = await withTx(async (c) => {
-          const { rows: rows2 } = await c.query(
-            'SELECT status FROM fiat_payments WHERE reference=$1 FOR UPDATE', [reference]
-          );
-          if (!rows2.length) return false;
-          if (rows2[0].status === 'credited') return false;
+    if (!updated?.checkout_url) {
+      return res.status(502).json({ message: 'Failed to get checkout URL from Kora' });
+    }
 
-          // mark as credited and credit account + user
-          await c.query('UPDATE fiat_payments SET status=$1 WHERE reference=$2', ['credited', reference]);
+    res.json({
+      id: updated.id,
+      checkout_url: updated.checkout_url,
+      provider_ref: updated.provider_ref
+    });
 
-          await c.query(
-            'UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2',
-            [Number(fp.amount_cents)/100, fp.user_id]
-          );
-          await c.query(
-            'UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
-            [Number(fp.amount_cents), fp.account_id]
-          );
-          // record a deposit row (so it also shows in /accounts/:id/transactions)
-          await c.query(`
-            INSERT INTO deposits (user_id, account_id, network, token, tx_hash, amount, confirmations, status)
-            VALUES ($1,$2,'fiat','USD',$3,$4,0,'confirmed')
-          `, [fp.user_id, fp.account_id, reference, Number(fp.amount_cents)/100]);
-          return true;
+  } catch (e) {
+    const status = e?.status || 500;
+    const detail = e?.body || e?.message || String(e);
+    console.error('Kora checkout error:', status, detail);
+    return res.status(status >= 400 && status < 600 ? status : 500).json({
+      message: e?.message || 'Could not start fiat deposit',
+      provider: 'kora',
+      detail
+    });
+  }
+  
+});
+
+
+// ========================== CHECKOUT (poll status) ==========================
+// GET /payments/:id/status
+// Optionally configure the transaction-lookup base path
+const KORA_TX_PATH = (process.env.KORA_TX_PATH || '/v1/transactions').replace(/\/+$/, '');
+
+// ========================== CHECKOUT STATUS (poll) ==========================
+// GET /payments/:id/status
+app.get('/payments/:id/status', authenticate, async (req, res) => {
+  const userId = req.user.id;
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ message: 'Invalid id' });
+
+  try {
+    const { rows: [p] } = await pool.query(
+      `SELECT id, user_id, provider_ref, status, meta
+         FROM payments
+        WHERE id = $1`,
+      [id]
+    );
+
+    if (!p || p.user_id !== userId) {
+      return res.status(404).json({ message: 'Not found' });
+    }
+
+    // If already finalized locally, just return it
+    if (['succeeded', 'failed', 'canceled'].includes(p.status)) {
+      return res.json({ status: p.status, meta: p.meta });
+    }
+
+    // If we have no remote reference yet, return last-known state
+    if (!p.provider_ref) {
+      return res.json({ status: p.status });
+    }
+
+    // Query Kora for the latest status (uses bearer = KORA_SECRET_KEY)
+    let k;
+    try {
+      k = await koraFetch(`${KORA_TX_PATH}/${encodeURIComponent(p.provider_ref)}`, {
+        method: 'GET'
+      });
+    } catch (e) {
+      // For client errors, bubble message/body so you can see why
+      const status = e?.status || 500;
+      if (status >= 400 && status < 500) {
+        console.error('Kora tx lookup error (client):', e?.message, e?.body || '');
+        // Do not fail the UI outright; return last-known status + provider details
+        return res.status(200).json({
+          status: p.status,
+          provider_error: { status, message: e?.message, body: e?.body }
         });
+      }
+      // For server/unknown errors, keep UI going with last-known status
+      console.error('Kora tx lookup error (server):', e);
+      return res.json({ status: p.status });
+    }
 
-        if (credited) {
-          // send email
-          try {
-            await sendMailSafe({
-              to: req.user.email,
-              subject: 'Deposit confirmed',
-              html: EmailTpl.depositSuccess({
-                amount: (Number(v?.data?.amount || 0)).toFixed(2),
-                currency: v?.data?.currency || 'USD',
-                reference
-              })
-            });
-          } catch (e) { console.error('deposit mail err:', e?.message || e); }
-        }
+    // Normalize remote status
+    const remoteStatus = String(k?.data?.status || k?.status || '').toLowerCase();
+    let mapped = 'pending';
+    if (['success','succeeded','paid','completed'].includes(remoteStatus)) mapped = 'succeeded';
+    else if (['failed','error','declined'].includes(remoteStatus))         mapped = 'failed';
+    else if (['canceled','cancelled'].includes(remoteStatus))              mapped = 'canceled';
+
+    // If it changed, finalize locally (credits, emails, etc.)
+    if (mapped !== p.status) {
+      try {
+        await finalizeFiatPaymentByRef(p.provider_ref, mapped, k);
+      } catch (finalizeErr) {
+        console.error('finalizeFiatPaymentByRef error:', finalizeErr);
+        // Even if finalize fails, return what we learned from Kora so UI updates
       }
     }
 
-    return res.json({ reference, status });
-  } catch (e) {
-    console.error('kora verify error:', e?.message || e);
-    return res.status(500).json({ message: 'Verification failed' });
+    return res.json({ status: mapped, meta: k });
+  } catch (err) {
+    console.error('payments status error:', err);
+    return res.status(500).json({ message: 'Status check failed' });
   }
 });
 
 
+// ========================== Finalize (credit + email) ==========================
+async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPayload) {
+  return await withTx(async (c) => {
+    const { rows: [p] } = await c.query(
+      `SELECT * FROM payments WHERE provider_ref=$1 FOR UPDATE`,
+      [providerRef]
+    );
+    if (!p) return false;
+    if (['succeeded','failed','canceled'].includes(p.status)) return true;
 
+    await c.query(
+      `UPDATE payments
+          SET status=$1, meta=$2::jsonb, updated_at=now()
+        WHERE id=$3`,
+      [mappedStatus, JSON.stringify(providerPayload || {}), p.id]
+    );
 
-// Kora webhook (events: charge.success, charge.failed, etc.)
-app.post('/webhooks/kora', async (req, res) => {
-  try {
-    if (!verifyKoraSignature(req)) return res.status(400).json({ message: 'Bad signature' });
+    if (mappedStatus === 'succeeded') {
+      const dollars = Number((p.amount_cents || 0) / 100);
 
-    const event = req.body;
-    const type = String(event?.event || '').toLowerCase();
-    const data = event?.data || {};
-    const reference = data?.reference || data?.transaction_reference || '';
+      await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`,
+        [dollars, p.user_id]);
 
-    if (!reference) return res.json({ ok: true });
+      if (p.account_id) {
+        await c.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+          [p.amount_cents, p.account_id]);
+      }
 
-    if (type === 'charge.success') {
-      const amount = Number(data?.amount || 0);     // major units
-      const currency = (data?.currency || 'USD').toUpperCase();
-
-      // upsert raw & status
-      await pool.query(
-        `UPDATE fiat_payments SET status=$1, raw=$2 WHERE reference=$3`,
-        ['success', event, reference]
+      await c.query(
+        `INSERT INTO deposits (user_id, account_id, network, token, tx_hash, amount, status)
+         VALUES ($1,$2,'fiat','USD',$3,$4,'confirmed')`,
+        [p.user_id, p.account_id, providerRef, dollars]
       );
 
-      // idempotent credit
-      const { rows } = await pool.query(`SELECT * FROM fiat_payments WHERE reference=$1`, [reference]);
-      const fp = rows[0];
-      if (fp) {
-        const credited = await withTx(async (c) => {
-          const { rows: s } = await c.query(
-            'SELECT status, user_id, account_id, amount_cents FROM fiat_payments WHERE reference=$1 FOR UPDATE',
-            [reference]
-          );
-          if (!s.length) return false;
-          if (s[0].status === 'credited') return false;
-
-          await c.query('UPDATE fiat_payments SET status=$1 WHERE reference=$2', ['credited', reference]);
-
-          await c.query(
-            'UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2',
-            [Number(s[0].amount_cents)/100, fp.user_id]
-          );
-          await c.query(
-            'UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
-            [Number(s[0].amount_cents), fp.account_id]
-          );
-          await c.query(`
-            INSERT INTO deposits (user_id, account_id, network, token, tx_hash, amount, confirmations, status)
-            VALUES ($1,$2,'fiat',$3,$4,$5,0,'confirmed')
-          `, [fp.user_id, fp.account_id, currency, reference, Number(s[0].amount_cents)/100]);
-
-          return true;
-        });
-
-        if (credited) {
-          // email user
-          try {
-            // Need user email
-            const { rows: u } = await pool.query('SELECT email FROM users WHERE id=$1', [fp.user_id]);
-            await sendMailSafe({
-              to: u?.[0]?.email,
-              subject: 'Deposit confirmed',
-              html: EmailTpl.depositSuccess({
-                amount: amount.toFixed(2),
-                currency,
-                reference
-              })
-            });
-          } catch (e) { console.error('deposit mail err:', e?.message || e); }
+      try {
+        const { rows: [user] } = await c.query(`SELECT email FROM users WHERE id=$1`, [p.user_id]);
+        if (user?.email) {
+          await sgMail.send({
+            to: user.email,
+            from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
+            subject: 'Deposit received',
+            html: `<p>Hi,</p><p>We’ve received your deposit of <b>$${(p.amount_cents/100).toFixed(2)}</b> via Kora. Your balance has been updated.</p><p>Ref: ${providerRef}</p>`
+          });
         }
+      } catch (e) {
+        console.error('send receipt email failed:', e?.message || e);
       }
     }
 
-    if (type === 'charge.failed') {
-      await pool.query(
-        `UPDATE fiat_payments SET status=$1, raw=$2 WHERE reference=$3`,
-        ['failed', event, reference]
-      );
+    return true;
+  });
+}
+
+// ========================== Webhook ==========================
+// Keep raw body for this route; also parse JSON.
+// If you already have a global express.json with a verify for /webhooks/kora, you can omit this.
+app.post('/webhooks/kora', async (req, res) => {
+  try {
+    // Validate signature — in TEST mode you can relax this if needed
+    if (!verifyKoraSignature(req)) {
+      console.error('Invalid Kora webhook signature');
+      return res.status(400).json({ message: 'Invalid signature' });
+    }
+
+    const evt = req.body;
+    const providerRef =
+      evt?.data?.reference ||
+      evt?.reference ||
+      evt?.transaction?.reference ||
+      null;
+
+    if (!providerRef) {
+      console.warn('Webhook missing reference, ignoring:', evt);
+      return res.status(200).json({ ok: true });
+    }
+
+    // Normalize remote status
+    const remoteStatus = String(
+      evt?.data?.status || evt?.status || ''
+    ).toLowerCase();
+
+    let mapped = 'pending';
+    if (['success','succeeded','paid','completed'].includes(remoteStatus)) mapped = 'succeeded';
+    else if (['failed','error','declined'].includes(remoteStatus))         mapped = 'failed';
+    else if (['canceled','cancelled'].includes(remoteStatus))              mapped = 'canceled';
+
+    // Finalize locally (credits, emails, deposits table, etc.)
+    try {
+      await finalizeFiatPaymentByRef(providerRef, mapped, evt);
+    } catch (finalizeErr) {
+      console.error('finalizeFiatPaymentByRef error from webhook:', finalizeErr);
+      // Don’t 500 — acknowledge so Kora doesn’t retry endlessly
     }
 
     return res.json({ ok: true });
-  } catch (e) {
-    console.error('kora webhook error:', e?.message || e);
+  } catch (err) {
+    console.error('Kora webhook handler error:', err);
     return res.status(500).json({ ok: false });
   }
 });
+
+
 
 
 
