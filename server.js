@@ -522,34 +522,52 @@ const EmailTpl = {
       <p>Your email <b>${email}</b> is verified. You can deposit and start earning.</p>
     </div>
   `,
-  depositSuccess: ({ amount, currency, reference }) => `
+
+  // Used by crypto deposit flow: EmailTpl.depositConfirmed({ amount, tx })
+  depositConfirmed: ({ amount, tx }) => `
     <div style="font-family:sans-serif">
       <h2>Deposit Confirmed</h2>
-      <p>We received <b>${currency} ${amount}</b>.</p>
-      <p>Ref: <code>${reference}</code></p>
+      <p>We received <b>${amount} USDT</b>.</p>
+      <p>Tx: <code>${tx}</code></p>
     </div>
   `,
-  withdrawalRequested: ({ amount, currency, dest }) => `
+
+  // Used by /withdraw route: pass dest (address) + optional currency
+  withdrawalRequested: ({ amount, currency = 'USDT', dest }) => `
     <div style="font-family:sans-serif">
       <h2>Withdrawal Request Received</h2>
       <p>Amount: <b>${currency} ${amount}</b></p>
       <p>Destination: <code>${dest}</code></p>
     </div>
   `,
-  withdrawalSuccess: ({ amount, currency, reference }) => `
+
+  // Used when TX is broadcast
+  withdrawalBroadcasted: ({ amount, tx }) => `
     <div style="font-family:sans-serif">
-      <h2>Withdrawal Completed</h2>
-      <p>Paid out <b>${currency} ${amount}</b>.</p>
-      <p>Ref: <code>${reference}</code></p>
+      <h2>Withdrawal Broadcasted</h2>
+      <p>Sent <b>${amount} USDT</b>.</p>
+      <p>Tx: <code>${tx}</code></p>
+    </div>
+  `,
+
+  // Used when TX is confirmed
+  withdrawalConfirmed: ({ amount, tx }) => `
+    <div style="font-family:sans-serif">
+      <h2>Withdrawal Confirmed</h2>
+      <p>Paid out <b>${amount} USDT</b>.</p>
+      <p>Tx: <code>${tx}</code></p>
+    </div>
+  `,
+
+  // Used on failure (broadcast or confirm stage)
+  withdrawalFailed: ({ amount, reason }) => `
+    <div style="font-family:sans-serif">
+      <h2>Withdrawal Failed</h2>
+      <p>Amount: <b>${amount} USDT</b></p>
+      <p>Reason: ${reason || 'Unknown'}</p>
     </div>
   `
 };
-
-async function sendMailSafe(msg) {
-  try { await sgMail.send({ from: process.env.FROM_EMAIL || 'no-reply@glorivest.com', ...msg }); }
-  catch (e) { console.error('sendMailSafe:', e?.message || e); }
-}
-
 
 
 
@@ -1959,21 +1977,31 @@ app.get('/accounts/:id/transactions', authenticate, async (req, res) => {
 
     // Fetch deposits
     const { rows: deposits } = await pool.query(
-      `SELECT id, created_at, amount_cents, currency, status
-       FROM deposits
-       WHERE account_id=$1
-       ORDER BY created_at DESC`,
+      `SELECT id,
+              created_at,
+              (amount * 100)::bigint AS amount_cents,
+              token AS currency,
+              status
+        FROM deposits
+        WHERE account_id = $1
+        ORDER BY created_at DESC`,
       [accId]
     );
 
     // Fetch withdrawals
     const { rows: withdrawals } = await pool.query(
-      `SELECT id, created_at, amount_cents, fee_cents, address, status
-       FROM withdrawals
-       WHERE account_id=$1
-       ORDER BY created_at DESC`,
+      `SELECT id,
+              created_at,
+              COALESCE(amount_cents, ROUND(amount * 100))::bigint AS amount_cents,
+              COALESCE(fee_cents,    ROUND(fee_amount * 100))::bigint AS fee_cents,
+              COALESCE(address, to_addr) AS address,
+              status
+        FROM withdrawals
+        WHERE account_id = $1
+        ORDER BY created_at DESC`,
       [accId]
     );
+
 
     // Normalize to a common schema
     const txs = [];
@@ -2020,31 +2048,34 @@ app.get('/accounts/:id/transactions', authenticate, async (req, res) => {
 
 
 app.post('/dev/topup', authenticate, async (req, res) => {
-  console.log('TEMP_ALLOW_DEV=', process.env.TEMP_ALLOW_DEV, 'user=', req.user?.id);
-  if (!process.env.TEMP_ALLOW_DEV) return res.status(403).json({ message: 'forbidden' });
-  if (!process.env.TEMP_ALLOW_DEV) {
-    return res.status(403).json({ message: 'forbidden' });
+  const allow = process.env.TEMP_ALLOW_DEV;
+  console.log('[dev/topup] TEMP_ALLOW_DEV=', allow, 'user=', req.user?.id);
+
+  if (!allow) return res.status(403).json({ message: 'forbidden' });
+
+  try {
+    const userId = req.user.id;
+    const dollars = Math.max(1, Number(req.body.amount || 0));
+
+    const { rows: [acc] } = await pool.query(
+      'SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1',
+      [userId]
+    );
+    if (!acc) return res.status(400).json({ message: 'no account' });
+
+    await pool.query(
+      'UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
+      [Math.round(dollars * 100), acc.id]
+    );
+
+    return res.json({ ok: true, credited: dollars });
+  } catch (e) {
+    console.error('[dev/topup] error:', e);
+    return res.status(500).json({ message: 'internal error' });
   }
-  const userId = req.user.id;
-  const dollars = Math.max(1, Number(req.body.amount || 0));
-
-  const { rows } = await pool.query(
-    'SELECT id FROM accounts WHERE user_id=$1 ORDER BY created_at ASC LIMIT 1',
-    [userId]
-  );
-  if (!rows[0]) return res.status(400).json({ message: 'no account' });
-
-  await pool.query(
-    'UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2',
-    [Math.round(dollars * 100), rows[0].id]
-  );
-  res.json({ ok: true, credited: dollars });
-  console.log('TEMP_ALLOW_DEV=', process.env.TEMP_ALLOW_DEV, 'user=', req.user?.id);
-if (!process.env.TEMP_ALLOW_DEV) {
-  return res.status(403).json({ message: 'forbidden' });
-}
-
 });
+
+
 
 
 
@@ -2059,7 +2090,13 @@ const KORA_CHECKOUT_PATH = (process.env.KORA_CHECKOUT_PATH || '/v1/charges/initi
 
 // ---- Raw fetch helper (server-to-server; bearer = secret key) ----
 async function koraFetch(path, opts = {}) {
-  const url = `${KORA_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const base = KORA_BASE.replace(/\/+$/,'');
+  const rel  = path.startsWith('/') ? path : `/${path}`;
+  // de-dupe a double /v1 if envs were set inconsistently
+  const url = base.endsWith('/v1') && rel.startsWith('/v1/')
+    ? `${base}${rel.replace(/^\/v1/, '')}`
+    : `${base}${rel}`;
+
   const res = await fetch(url, {
     ...opts,
     headers: {
@@ -2070,21 +2107,17 @@ async function koraFetch(path, opts = {}) {
   });
 
   const text = await res.text();
-  let data;
-  try { data = text ? JSON.parse(text) : null; }
-  catch { data = { raw: text }; }
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
 
   if (!res.ok) {
     const msg = data?.message || `Kora HTTP ${res.status}`;
     const err = new Error(msg);
     err.status = res.status;
     err.body = data;
+    err.url = url;
     throw err;
   }
-  if (!KORA_SK)  throw new Error('Missing KORA_SECRET_KEY');
-if (!KORA_PK)  console.warn('KORA_PUBLIC_KEY is empty (OK for server-only)');
-if (!KORA_BASE) throw new Error('Missing KORA_BASE_URL');
-
   return data;
 }
 
@@ -2107,7 +2140,8 @@ app.post('/payments/kora/checkout', authenticate, async (req, res) => {
   try {
     const userId   = req.user.id;
     const amount   = Number(req.body.amount || 0);
-    const currency = (req.body.currency || 'USD').toUpperCase();
+    const DEFAULT_CURR = (process.env.KORA_DEFAULT_CURRENCY || 'USD').toUpperCase();
+    const currency = (req.body.currency || DEFAULT_CURR).toUpperCase();
     const accountId = Number(req.body.account_id) || null;
 
     if (!amount || amount < 20) {
@@ -2165,12 +2199,11 @@ app.post('/payments/kora/checkout', authenticate, async (req, res) => {
 
   } catch (e) {
     const status = e?.status || 500;
-    const detail = e?.body || e?.message || String(e);
-    console.error('Kora checkout error:', status, detail);
+    console.error('Kora checkout error:', status, { url: e?.url, body: e?.body || e?.message });
     return res.status(status >= 400 && status < 600 ? status : 500).json({
       message: e?.message || 'Could not start fiat deposit',
       provider: 'kora',
-      detail
+      detail: e?.body,
     });
   }
   
