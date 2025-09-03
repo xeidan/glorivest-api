@@ -2400,6 +2400,87 @@ app.post('/webhooks/kora', async (req, res) => {
 
 
 
+// env:
+// LEDGER_CURRENCY=USD
+// FX_NGN_PER_USD=1500   // example; set the real rate via env/cron
+
+const LEDGER_CURRENCY = (process.env.LEDGER_CURRENCY || 'USD').toUpperCase();
+const FX_NGN_PER_USD = Number(process.env.FX_NGN_PER_USD || '1500');
+
+function convertToLedger(amountMajor, fromCur, toCur) {
+  fromCur = (fromCur || 'USD').toUpperCase();
+  toCur = (toCur || 'USD').toUpperCase();
+  if (fromCur === toCur) return amountMajor;
+
+  if (fromCur === 'NGN' && toCur === 'USD') {
+    if (!FX_NGN_PER_USD || FX_NGN_PER_USD <= 0) throw new Error('Missing FX_NGN_PER_USD');
+    return amountMajor / FX_NGN_PER_USD;
+  }
+
+  // Add more pairs as needed
+  throw new Error(`No FX path ${fromCur} -> ${toCur}`);
+}
+
+
+
+async function finalizeFiatPaymentByRef(providerRef, mappedStatus, providerPayload) {
+  return await withTx(async (c) => {
+    const { rows: [p] } = await c.query(
+      `SELECT * FROM payments WHERE provider_ref=$1 FOR UPDATE`,
+      [providerRef]
+    );
+    if (!p) return false;
+    if (['succeeded','failed','canceled'].includes(p.status)) return true;
+
+    await c.query(
+      `UPDATE payments
+          SET status=$1, meta=$2::jsonb, updated_at=now()
+        WHERE id=$3`,
+      [mappedStatus, JSON.stringify(providerPayload || {}), p.id]
+    );
+
+    if (mappedStatus !== 'succeeded') return true;
+
+    const srcCurrency = (p.currency || 'USD').toUpperCase();
+    const srcMajor = Number(p.amount_cents || 0) / 100; // amount in src currency (e.g., NGN)
+    const ledgerMajor = convertToLedger(srcMajor, srcCurrency, LEDGER_CURRENCY);
+    const ledgerCents = Math.round(ledgerMajor * 100);
+
+    // Credit user + account in ledger currency (USD)
+    await c.query(`UPDATE users SET balance = COALESCE(balance,0) + $1 WHERE id=$2`,
+      [ledgerMajor, p.user_id]);
+
+    if (p.account_id) {
+      await c.query(`UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+        [ledgerCents, p.account_id]);
+    }
+
+    // Record deposit with ledger currency, but keep original in the row’s meta via payments.meta
+    await c.query(
+      `INSERT INTO deposits (user_id, account_id, network, token, tx_hash, amount, status)
+       VALUES ($1,$2,'fiat',$3,$4,$5,'confirmed')`,
+      [p.user_id, p.account_id, LEDGER_CURRENCY, providerRef, ledgerMajor]
+    );
+
+    // (Optional) email receipt can mention both amounts:
+    try {
+      const { rows: [user] } = await c.query(`SELECT email FROM users WHERE id=$1`, [p.user_id]);
+      if (user?.email) {
+        await sgMail.send({
+          to: user.email,
+          from: process.env.FROM_EMAIL || 'noreply@glorivest.com',
+          subject: 'Deposit received',
+          html: `<p>We’ve received <b>${srcCurrency} ${srcMajor.toLocaleString()}</b> (credited as <b>${LEDGER_CURRENCY} ${ledgerMajor.toFixed(2)}</b>).</p><p>Ref: ${providerRef}</p>`
+        });
+      }
+    } catch (e) {
+      console.error('send receipt email failed:', e?.message || e);
+    }
+
+    return true;
+  });
+}
+
 
 
 // ===== Server Init =====
