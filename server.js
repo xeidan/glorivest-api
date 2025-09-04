@@ -2121,43 +2121,54 @@ function verifyKoraSignature(req) {
 }
 
 // ========================== CHECKOUT (create) ==========================
-// POST /payments/kora/checkout  { amount, currency?='USD' | 'NGN', account_id? }
-// POST /payments/kora/checkout
+// POST /payments/kora/checkout  { amount, currency?='USD'|'NGN', account_id? }
 app.post('/payments/kora/checkout', authenticate, async (req, res) => {
   try {
-    const userId    = req.user.id;
+    const userId    = Number(req.user.id);
     const amount    = Number(req.body.amount || 0);
-    const currency  = String(req.body.currency || (process.env.KORA_DEFAULT_CURRENCY || 'USD')).toUpperCase();
+    const rawCur    = (req.body.currency || process.env.KORA_DEFAULT_CURRENCY || 'USD').toString().toUpperCase();
     const accountId = Number(req.body.account_id) || null;
 
-    if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum fiat deposit is $20' });
+    // ---- basic validation
+    if (!Number.isFinite(amount) || amount < 20) {
+      return res.status(400).json({ message: 'Minimum fiat deposit is $20' });
+    }
+    const currency = (rawCur === 'NGN' || rawCur === 'USD') ? rawCur : 'USD';
 
+    // ---- insert payment shell
     const amountCents = Math.round(amount * 100);
-
     const { rows: [pmt] } = await pool.query(
       `INSERT INTO payments (user_id, account_id, amount_cents, currency, status)
-       VALUES ($1,$2,$3,$4,'initiated') RETURNING id`,
+       VALUES ($1,$2,$3,$4,'initiated')
+       RETURNING id`,
       [userId, accountId, amountCents, currency]
     );
 
+    // ---- build reference + redirect URL with pay_id
     const providerRef = `gv_${pmt.id}_${Date.now()}`;
+    const appBase = (process.env.APP_BASE_URL || 'http://localhost:5503').replace(/\/+$/, '');
+    const redirectUrl = `${appBase}/deposit-complete.html?pay_id=${pmt.id}`;
 
-    // Use Kora "initialize charge" (SECRET key on server)
-    const k = await koraFetch((process.env.KORA_CHECKOUT_PATH || '/v1/charges/initialize'), {
+    // ---- call Kora (server-to-server with SECRET key)
+    const path = (process.env.KORA_CHECKOUT_PATH || '/v1/charges/initialize').replace(/\/+$/, '');
+    const k = await koraFetch(path, {
       method: 'POST',
       body: JSON.stringify({
         reference: providerRef,
         amount,
         currency,
         customer: { email: req.user.email || undefined },
-        // IMPORTANT: include pay_id so the return page can poll your /payments/:id/status
-        redirect_url: `${(process.env.APP_BASE_URL || 'http://localhost:5500').replace(/\/+$/,'')}/deposit-complete.html?pay_id=${pmt.id}`,
+        redirect_url: redirectUrl
       })
     });
 
-    const checkoutUrl =
-      k?.data?.checkout_url || k?.checkout_url || k?.data?.link || null;
+    // ---- extract checkout URL from Kora response
+    const checkoutUrl = k?.data?.checkout_url || k?.checkout_url || k?.data?.link || null;
+    if (!checkoutUrl) {
+      return res.status(502).json({ message: 'Failed to get checkout URL from Kora' });
+    }
 
+    // ---- persist provider details
     const { rows: [updated] } = await pool.query(
       `UPDATE payments
          SET provider='kora',
@@ -2171,25 +2182,24 @@ app.post('/payments/kora/checkout', authenticate, async (req, res) => {
       [providerRef, checkoutUrl, JSON.stringify(k), pmt.id]
     );
 
-    if (!updated?.checkout_url) {
-      return res.status(502).json({ message: 'Failed to get checkout URL from Kora' });
-    }
-
-    res.json({
+    return res.json({
       id: updated.id,
       checkout_url: updated.checkout_url,
       provider_ref: updated.provider_ref
     });
+
   } catch (e) {
-    const status = e?.status || 500;
+    // surface Kora client errors as-is; fallback to 500
+    const status = (e && e.status && Number.isFinite(e.status)) ? e.status : 500;
     console.error('Kora checkout error:', status, { url: e?.url, body: e?.body || e?.message });
-    res.status(status >= 400 && status < 600 ? status : 500).json({
+    return res.status(status >= 400 && status < 600 ? status : 500).json({
       message: e?.message || 'Could not start fiat deposit',
       provider: 'kora',
-      detail: e?.body,
+      detail: e?.body
     });
   }
 });
+
 
 
 
