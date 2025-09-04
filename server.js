@@ -2121,44 +2121,42 @@ function verifyKoraSignature(req) {
 }
 
 // ========================== CHECKOUT (create) ==========================
-// POST /payments/kora/checkout  { amount, currency?='USD', account_id? }
+// POST /payments/kora/checkout  { amount, currency?='USD' | 'NGN', account_id? }
+// POST /payments/kora/checkout
 app.post('/payments/kora/checkout', authenticate, async (req, res) => {
   try {
-    const userId   = req.user.id;
-    const amount   = Number(req.body.amount || 0);
-    const DEFAULT_CURR = (process.env.KORA_DEFAULT_CURRENCY || 'USD').toUpperCase();
-    const currency = (req.body.currency || DEFAULT_CURR).toUpperCase();
+    const userId    = req.user.id;
+    const amount    = Number(req.body.amount || 0);
+    const currency  = String(req.body.currency || (process.env.KORA_DEFAULT_CURRENCY || 'USD')).toUpperCase();
     const accountId = Number(req.body.account_id) || null;
 
-    if (!amount || amount < 20) {
-      return res.status(400).json({ message: 'Minimum fiat deposit is $20' });
-    }
+    if (!amount || amount < 20) return res.status(400).json({ message: 'Minimum fiat deposit is $20' });
 
     const amountCents = Math.round(amount * 100);
 
     const { rows: [pmt] } = await pool.query(
       `INSERT INTO payments (user_id, account_id, amount_cents, currency, status)
-       VALUES ($1,$2,$3,$4,'initiated')
-       RETURNING id`,
+       VALUES ($1,$2,$3,$4,'initiated') RETURNING id`,
       [userId, accountId, amountCents, currency]
     );
 
     const providerRef = `gv_${pmt.id}_${Date.now()}`;
 
-    // ---- Call Kora via helper ----
-    const k = await koraFetch(KORA_CHECKOUT_PATH, {
+    // Use Kora "initialize charge" (SECRET key on server)
+    const k = await koraFetch((process.env.KORA_CHECKOUT_PATH || '/v1/charges/initialize'), {
       method: 'POST',
       body: JSON.stringify({
-          reference: providerRef,
-          amount,
-          currency,
-          customer: { email: req.user.email || undefined },
-          redirect_url: `${APP_BASE}/deposit-complete.html`,
-        })        
+        reference: providerRef,
+        amount,
+        currency,
+        customer: { email: req.user.email || undefined },
+        // IMPORTANT: include pay_id so the return page can poll your /payments/:id/status
+        redirect_url: `${(process.env.APP_BASE_URL || 'http://localhost:5500').replace(/\/+$/,'')}/deposit-complete.html?pay_id=${pmt.id}`,
+      })
     });
-    
 
-    const checkoutUrl = k?.data?.checkout_url || k?.checkout_url || k?.data?.link || null;
+    const checkoutUrl =
+      k?.data?.checkout_url || k?.checkout_url || k?.data?.link || null;
 
     const { rows: [updated] } = await pool.query(
       `UPDATE payments
@@ -2182,18 +2180,18 @@ app.post('/payments/kora/checkout', authenticate, async (req, res) => {
       checkout_url: updated.checkout_url,
       provider_ref: updated.provider_ref
     });
-
   } catch (e) {
     const status = e?.status || 500;
     console.error('Kora checkout error:', status, { url: e?.url, body: e?.body || e?.message });
-    return res.status(status >= 400 && status < 600 ? status : 500).json({
+    res.status(status >= 400 && status < 600 ? status : 500).json({
       message: e?.message || 'Could not start fiat deposit',
       provider: 'kora',
       detail: e?.body,
     });
   }
-  
 });
+
+
 
 
 // ========================== CHECKOUT (poll status) ==========================
@@ -2570,6 +2568,7 @@ function toLedgerCents({ amountCents, currency }) {
 
   throw new Error(`No FX path for ${cur}->${LEDGER_CCY}`);
 }
+
 
 
 
