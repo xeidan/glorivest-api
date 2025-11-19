@@ -934,32 +934,48 @@ app.post('/auth/set-new-password', async (req, res) => {
 
 
 
-// ===== RESET PASSWORD =====
-// app.post('/reset-password', async (req, res) => {
-//   const { email, newPassword } = req.body;
-//   if (!email || !newPassword) {
-//     return res.status(400).json({ message: 'Email and new password are required' });
-//   }
+// =========================
+// FINAL PASSWORD RESET STEP
+// =========================
+app.post('/reset-password', async (req, res) => {
+  const { email, newPassword } = req.body;
+  if (!email || !newPassword)
+    return res.status(400).json({ message: "Email and new password are required" });
 
-//   try {
-//     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-//     if (result.rows.length === 0) {
-//       return res.status(404).json({ message: 'User not found' });
-//     }
+  try {
+    const client = await pool.connect();
 
-//     const hashedPassword = await bcrypt.hash(newPassword, 10);
+    // user must exist & must have verified reset OTP
+    const user = await client.query(
+      `SELECT id, reset_token_verified FROM users WHERE email=$1`,
+      [email]
+    );
 
-//     await pool.query(
-//       'UPDATE users SET password = $1 WHERE email = $2',
-//       [hashedPassword, email]
-//     );
+    if (user.rows.length === 0)
+      return res.status(404).json({ message: "User not found" });
 
-//     res.status(200).json({ message: 'Password reset successful' });
-//   } catch (err) {
-//     console.error('Reset password error:', err);
-//     res.status(500).json({ message: 'Internal server error' });
-//   }
-// });
+    if (!user.rows[0].reset_token_verified)
+      return res.status(400).json({ message: "OTP verification required" });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+
+    await client.query(
+      `UPDATE users 
+       SET password=$1, reset_token_verified=false, otp=NULL, otp_created_at=NULL 
+       WHERE email=$2`,
+      [hashed, email]
+    );
+
+    client.release();
+
+    res.json({ message: "Password updated successfully" });
+
+  } catch (err) {
+    console.error("Reset password error", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 
 
 // ===== LEADERBOARD ROUTE =====
