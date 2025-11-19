@@ -13,6 +13,10 @@ const sgMail = require('@sendgrid/mail');
 const app = express();
 app.set('trust proxy', 1);
 
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+
 // === CRYPTO IMPORTS (add under your other requires) ===
 
 
@@ -329,11 +333,9 @@ const allowedOrigins = [
   'https://glorivest.com',
   'https://www.glorivest.com',
   'http://localhost:3000',
-  'http://127.0.0.1:5503',
-  'http://127.0.0.1:5500',
-  'http://localhost:5500',
-  'http://localhost:5503'
+  'http://127.0.0.1:5503'
 ];
+
 
 
 app.use(cors({
