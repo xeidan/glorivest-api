@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const TronWeb = require('tronweb');
 
 const privateKey = "YOUR_PRIVATE_KEY_HERE";  // do NOT send this to me
