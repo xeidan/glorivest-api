@@ -326,28 +326,24 @@ async function ensureTierSeed() {
 
 // ===== CORS Config =====
 const allowedOrigins = [
-  'http://localhost:3000',
   'https://glorivest.com',
   'https://www.glorivest.com',
+  'http://localhost:3000'
 ];
-
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.error('Blocked by CORS:', origin);
-      callback(new Error('Not allowed by CORS'));
+    if (!origin) return callback(null, true);         // allow Postman & server-side calls
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
     }
+    console.error('🚫 Blocked by CORS:', origin);
+    return callback(new Error('Not allowed by CORS'));
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  credentials: true,
+  methods: "GET,POST,PUT,DELETE,OPTIONS",
+  allowedHeaders: "Content-Type,Authorization"
 }));
-
-
-app.options('*', cors());
 
 
 
