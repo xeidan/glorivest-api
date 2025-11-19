@@ -706,6 +706,71 @@ app.post('/login', async (req, res) => {
   }
 });
 
+// =========================
+// Forgot Password
+// =========================
+app.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ message: 'Email is required' });
+
+  const { rows } = await pool.query(`SELECT id FROM users WHERE email=$1`, [email]);
+  if (!rows.length) {
+    return res.json({ message: 'If that email exists, OTP has been sent' });
+  }
+
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const expires = Date.now() + (15 * 60 * 1000); // 15 mins
+
+  await pool.query(`
+    INSERT INTO password_resets (email, otp, expires)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (email) DO UPDATE SET otp=$2, expires=$3
+  `, [email, otp, expires]);
+
+  await sgMail.send({
+    to: email,
+    from: process.env.FROM_EMAIL,
+    subject: "Glorivest Password Reset Code",
+    html: `<p>Your password reset OTP:</p><h2>${otp}</h2><p>Expires in 15 minutes</p>`
+  });
+
+  res.json({ message: 'OTP sent to email' });
+});
+
+
+
+
+// =========================
+// Verify Reset
+// =========================
+app.post('/verify-reset', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+  if (!email || !otp || !newPassword) {
+    return res.status(400).json({ message: 'All fields are required' });
+  }
+
+  const { rows } = await pool.query(
+    'SELECT otp, expires FROM password_resets WHERE email=$1',
+    [email]
+  );
+  if (!rows.length) return res.status(400).json({ message: 'Invalid reset request' });
+
+  const rec = rows[0];
+
+  if (rec.otp !== otp) return res.status(400).json({ message: 'Invalid OTP' });
+  if (Date.now() > Number(rec.expires)) {
+    return res.status(400).json({ message: 'OTP expired' });
+  }
+
+  const hashed = await bcrypt.hash(newPassword, 10);
+  await pool.query('UPDATE users SET password=$1 WHERE email=$2', [hashed, email]);
+  await pool.query('DELETE FROM password_resets WHERE email=$1', [email]);
+
+  return res.json({ message: 'Password reset successful' });
+});
+
+
+
 
 
 // =========================
@@ -774,35 +839,127 @@ app.post('/verify-otp', async (req, res) => {
 });
 
 
+// SEND OTP FOR RESET PASSWORD
+app.post('/auth/request-reset', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+
+  try {
+    const { rows } = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "No account found with that email" });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Save OTP
+    await pool.query(
+      "INSERT INTO password_resets (email, otp) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET otp=$2",
+      [email, otp]
+    );
+
+    // Send Email
+    await sgMail.send({
+      to: email,
+      from: process.env.FROM_EMAIL,
+      subject: "Your Glorivest Password Reset OTP",
+      text: `Your OTP is ${otp}`,
+      html: `<h1>Your OTP is ${otp}</h1>`
+    });
+
+    return res.json({ message: "OTP sent" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+//verify otp
+app.post('/auth/verify-reset-otp', async (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) {
+    return res.status(400).json({ message: "Email & OTP required" });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      "SELECT otp FROM password_resets WHERE email=$1",
+      [email]
+    );
+
+    if (rows.length === 0 || rows[0].otp !== otp) {
+      return res.status(400).json({ message: "Invalid OTP" });
+    }
+
+    return res.json({ message: "OTP verified" });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+//set new password
+app.post('/auth/set-new-password', async (req, res) => {
+  const { email, newPassword } = req.body;
+
+  if (!email || !newPassword) {
+    return res.status(400).json({ message: "Email & new password required" });
+  }
+
+  try {
+    const hash = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      "UPDATE users SET password=$1 WHERE email=$2",
+      [hash, email]
+    );
+
+    // Delete OTP after success
+    await pool.query("DELETE FROM password_resets WHERE email=$1", [email]);
+
+    return res.json({ message: "Password reset successful" });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
 
 
 
 // ===== RESET PASSWORD =====
-app.post('/reset-password', async (req, res) => {
-  const { email, newPassword } = req.body;
-  if (!email || !newPassword) {
-    return res.status(400).json({ message: 'Email and new password are required' });
-  }
+// app.post('/reset-password', async (req, res) => {
+//   const { email, newPassword } = req.body;
+//   if (!email || !newPassword) {
+//     return res.status(400).json({ message: 'Email and new password are required' });
+//   }
 
-  try {
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+//   try {
+//     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+//     if (result.rows.length === 0) {
+//       return res.status(404).json({ message: 'User not found' });
+//     }
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
+//     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    await pool.query(
-      'UPDATE users SET password = $1 WHERE email = $2',
-      [hashedPassword, email]
-    );
+//     await pool.query(
+//       'UPDATE users SET password = $1 WHERE email = $2',
+//       [hashedPassword, email]
+//     );
 
-    res.status(200).json({ message: 'Password reset successful' });
-  } catch (err) {
-    console.error('Reset password error:', err);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
+//     res.status(200).json({ message: 'Password reset successful' });
+//   } catch (err) {
+//     console.error('Reset password error:', err);
+//     res.status(500).json({ message: 'Internal server error' });
+//   }
+// });
 
 
 // ===== LEADERBOARD ROUTE =====
