@@ -338,17 +338,30 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin) return callback(null, true);         // allow Postman & server-side calls
+
+    if (!origin) return callback(null, true); // mobile apps, curl, etc.
+
+    // Allow production
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    console.error('🚫 Blocked by CORS:', origin);
+
+    // Allow ALL localhost and 127.*.*.* ports
+    if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
+      return callback(null, true);
+    }
+
+    console.error("❌ Blocked by CORS:", origin);
     return callback(new Error('Not allowed by CORS'));
   },
-  credentials: true,
-  methods: "GET,POST,PUT,DELETE,OPTIONS",
-  allowedHeaders: "Content-Type,Authorization"
+
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
+
+app.options('*', cors());
+
 
 
 
