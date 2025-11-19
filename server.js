@@ -328,8 +328,13 @@ async function ensureTierSeed() {
 const allowedOrigins = [
   'https://glorivest.com',
   'https://www.glorivest.com',
-  'http://localhost:3000'
+  'http://localhost:3000',
+  'http://127.0.0.1:5503',
+  'http://127.0.0.1:5500',
+  'http://localhost:5500',
+  'http://localhost:5503'
 ];
+
 
 app.use(cors({
   origin: function (origin, callback) {
