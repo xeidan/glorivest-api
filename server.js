@@ -955,6 +955,70 @@ app.get('/leaderboard', async (req, res) => {
 });
 
 
+
+
+// ===== EXCHANGE RATES ROUTE =====
+// These rates can later be stored in DB or admin panel.
+// For now, we use defaults and allow overriding via env.
+
+const defaultRates = {
+  USD: 1,
+  NGN: Number(process.env.RATE_NGN || 1500),   // default 1500
+  GBP: Number(process.env.RATE_GBP || 0),     // set later
+  EUR: Number(process.env.RATE_EUR || 0)      // set later
+};
+
+app.get('/rates', async (req, res) => {
+  try {
+    // If later you load admin rates from DB:
+    // const adminRates = await db.Rates.findOne();
+    // return res.json({ rates: adminRates });
+
+    return res.json({ rates: defaultRates });
+  } catch (err) {
+    console.error('Rates route error:', err);
+    res.status(500).json({ message: 'Could not fetch rates' });
+  }
+});
+
+
+
+
+app.get('/rates', async (req, res) => {
+  try {
+    return res.json({ rates: defaultRates });
+  } catch (err) {
+    console.error('Rates route error:', err);
+    res.status(500).json({ message: 'Could not fetch rates' });
+  }
+});
+
+
+
+// ===== CREATE DEPOSIT REFERENCE =====
+app.post('/deposits/reference', async (req, res) => {
+  try {
+    const account_id = req.body.account_id;
+    if (!account_id) {
+      return res.status(400).json({ message: 'account_id required' });
+    }
+
+    // generate backend reference
+    const ref = 'GV' + Math.floor(100000 + Math.random() * 900000);
+
+    // OPTIONAL: save to DB for later matching
+    // await db.DepositReference.create({ account_id, reference: ref });
+
+    return res.json({ reference: ref });
+  } catch (err) {
+    console.error('Reference generation error:', err);
+    res.status(500).json({ message: 'Cannot generate reference' });
+  }
+});
+
+
+
+
 // ===== BOT START =====
 app.post('/bot/start', authenticate, async (req, res) => {
   const userId = req.user.id;
