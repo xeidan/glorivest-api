@@ -1018,6 +1018,41 @@ app.post('/deposits/reference', async (req, res) => {
 
 
 
+// ===== CREATE DIRECT DEPOSIT =====
+app.post('/deposits/direct', async (req, res) => {
+  try {
+    const { account_id, amount, evidence_url, reference, currency } = req.body;
+
+    if (!account_id || !amount || !evidence_url || !reference) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // TODO: save deposit record
+    // Example DB insert:
+    // await Deposit.create({
+    //   account_id,
+    //   amount,
+    //   reference,
+    //   evidence_url,
+    //   currency: currency || 'NGN',
+    //   status: 'pending'
+    // });
+
+    console.log('Direct deposit received:', req.body);
+
+    return res.json({
+      message: 'Deposit submitted successfully',
+      status: 'pending'
+    });
+  } catch (err) {
+    console.error('Direct deposit error:', err);
+    res.status(500).json({ message: 'Deposit failed' });
+  }
+});
+
+
+
+
 
 // ===== BOT START =====
 app.post('/bot/start', authenticate, async (req, res) => {
