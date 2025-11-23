@@ -1052,6 +1052,111 @@ app.post('/deposits/direct', async (req, res) => {
 
 
 
+// ===== SEND EMAIL NOTIFICATION =====
+app.post('/notify/email', async (req, res) => {
+  try {
+    const { to, subject, message } = req.body;
+
+    if (!to || !subject || !message) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // TODO: Implement nodemailer or any sender
+    console.log("Sending email to:", to);
+    console.log("Subject:", subject);
+    console.log("Message:", message);
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Email notification error:", err);
+    res.status(500).json({ message: "Email sending failed" });
+  }
+});
+
+
+
+
+
+
+
+// ===== EMAIL NOTIFICATION ROUTE =====
+app.post('/notify/email', async (req, res) => {
+  try {
+    const { to, subject, body } = req.body;
+
+    if (!to || !subject || !body) {
+      return res.status(400).json({ message: 'Missing fields' });
+    }
+
+    console.log(`(Email stub) To: ${to} | Subject: ${subject}`);
+    console.log(body);
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Email notify failed:', err);
+    return res.status(500).json({ message: 'Email failed' });
+  }
+});
+
+
+// ===== CHECK DEPOSIT STATUS =====
+app.get('/deposits/check', async (req, res) => {
+  try {
+    const reference = req.query.reference;
+    if (!reference) {
+      return res.status(400).json({ message: "Missing reference" });
+    }
+
+    // Query your database for this deposit
+    const dep = await prisma.deposit.findUnique({
+      where: { reference }
+    });
+
+    if (!dep) {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    return res.json({
+      status: dep.status || "pending",
+      amount: dep.amount || 0,
+      reference: dep.reference,
+      created_at: dep.created_at
+    });
+
+  } catch (err) {
+    console.error("Deposit check error:", err);
+    res.status(500).json({ message: "Error checking deposit" });
+  }
+});
+
+
+
+
+// ===== FILE UPLOAD ROUTE =====
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post('/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    // TODO: upload to AWS S3 or Cloudinary
+    // For now, return placeholder url
+    const fakeUrl = `https://glorivest-placeholder.s3.amazonaws.com/${Date.now()}_${req.file.originalname}`;
+
+    return res.json({
+      url: fakeUrl
+    });
+
+  } catch (err) {
+    console.error("Upload error:", err);
+    res.status(500).json({ message: "Upload failed" });
+  }
+});
+
+
 
 
 // ===== BOT START =====
