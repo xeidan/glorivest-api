@@ -28,12 +28,13 @@ function genOtp() {
 async function saveOtp({ email, user_id = null, purpose = 'verify', code, ttlMinutes = 10 }) {
   const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
   const q = await pool.query(
-    `INSERT INTO otps(email, user_id, code, purpose, expires_at)
+    `INSERT INTO otps(email, user_id, otp, purpose, expires_at)
      VALUES ($1, $2, $3, $4, $5) RETURNING id, expires_at`,
     [email.toLowerCase(), user_id, code, purpose, expiresAt]
   );
   return q.rows[0];
 }
+
 
 // Mark OTP used
 async function markOtpUsed(id) {
@@ -44,12 +45,14 @@ async function markOtpUsed(id) {
 async function findValidOtp(email, code, purpose) {
   const q = await pool.query(
     `SELECT * FROM otps
-     WHERE email = $1 AND code = $2 AND purpose = $3 AND used = false AND expires_at > now()
-     ORDER BY created_at DESC LIMIT 1`,
+     WHERE email = $1 AND otp = $2 AND purpose = $3 AND expires_at > NOW()
+     ORDER BY created_at DESC
+     LIMIT 1`,
     [email.toLowerCase(), code, purpose]
   );
   return q.rows[0];
 }
+
 
 // --------------------
 // AUTH: register
