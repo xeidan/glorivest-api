@@ -10,6 +10,10 @@ const withdrawalWorker = require('./workers/withdrawal.worker');
 
 const PORT = process.env.PORT || 3000;
 
+const app = express();
+app.set('trust proxy', 1);
+
+
 // =======================
 // START EXPRESS SERVER
 // =======================
