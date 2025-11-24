@@ -19,3 +19,4 @@ router.get('/me', auth, authCtrl.me);
 
 module.exports = router;
 
+console.log('AUTH CTRL EXPORTS:', authCtrl);

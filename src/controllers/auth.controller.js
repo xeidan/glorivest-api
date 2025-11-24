@@ -7,9 +7,9 @@ const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
 const { sendMailSafe, EmailTpl } = require('../utils/email');
 
-// ----------------------------
-// JWT helper
-// ----------------------------
+// ======================================================
+// JWT
+// ======================================================
 function signToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email },
@@ -18,15 +18,16 @@ function signToken(user) {
   );
 }
 
-// ----------------------------
-// OTP Helpers
-// ----------------------------
+// ======================================================
+// OTP HELPERS
+// ======================================================
 function genOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-async function saveOtp({ email, user_id = null, purpose = 'verify', code, ttlMinutes = 10 }) {
-  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+// IMPORTANT: your DB column is "code", NOT "otp"
+async function saveOtp({ email, user_id = null, purpose, code, ttlMinutes = 10 }) {
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60000).toISOString();
 
   const q = await pool.query(
     `INSERT INTO otps(email, user_id, code, purpose, expires_at)
@@ -39,17 +40,18 @@ async function saveOtp({ email, user_id = null, purpose = 'verify', code, ttlMin
 }
 
 async function markOtpUsed(id) {
-  await pool.query(`UPDATE otps SET used = true WHERE id = $1`, [id]);
+  await pool.query(`UPDATE otps SET used = true WHERE id=$1`, [id]);
 }
 
 async function findValidOtp(email, code, purpose) {
   const q = await pool.query(
-    `SELECT * FROM otps
-     WHERE email = $1
-     AND code = $2
-     AND purpose = $3
-     AND used = false
-     AND expires_at > NOW()
+    `SELECT *
+     FROM otps
+     WHERE email=$1
+       AND code=$2
+       AND purpose=$3
+       AND used=false
+       AND expires_at > NOW()
      ORDER BY created_at DESC
      LIMIT 1`,
     [email.toLowerCase(), code, purpose]
@@ -57,9 +59,9 @@ async function findValidOtp(email, code, purpose) {
   return q.rows[0];
 }
 
-// ----------------------------
-// REGISTER
-// ----------------------------
+// ======================================================
+// REGISTER (NO welcome email here anymore)
+// ======================================================
 exports.register = async (req, res) => {
   try {
     const { email, password, referral_code } = req.body;
@@ -67,25 +69,25 @@ exports.register = async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ message: 'Email and password are required' });
 
-    const check = await pool.query(
+    const exists = await pool.query(
       'SELECT id FROM users WHERE email=$1 LIMIT 1',
       [email.toLowerCase()]
     );
-    if (check.rows.length)
+    if (exists.rows.length)
       return res.status(400).json({ message: 'Email already exists' });
 
     const hash = await bcrypt.hash(password, 10);
 
-    let userRow;
+    let q;
     if (referral_code) {
-      userRow = await pool.query(
+      q = await pool.query(
         `INSERT INTO users(email, password_hash, bot_active, balance, referral_code)
          VALUES($1, $2, false, 0, $3)
          RETURNING id, email`,
         [email.toLowerCase(), hash, referral_code]
       );
     } else {
-      userRow = await pool.query(
+      q = await pool.query(
         `INSERT INTO users(email, password_hash, bot_active, balance)
          VALUES($1, $2, false, 0)
          RETURNING id, email`,
@@ -93,7 +95,7 @@ exports.register = async (req, res) => {
       );
     }
 
-    // OPTIONAL referral credit
+    // Optional referral credit
     if (referral_code) {
       try {
         const ref = await pool.query(
@@ -102,28 +104,25 @@ exports.register = async (req, res) => {
         );
         if (ref.rows.length) {
           await pool.query(
-            'UPDATE users SET balance = balance + 100 WHERE id = $1',
+            'UPDATE users SET balance = balance + 100 WHERE id=$1',
             [ref.rows[0].id]
           );
         }
-      } catch (e) {
-        console.warn('Referral bonus failed:', e);
-      }
+      } catch (e) {}
     }
 
-    // IMPORTANT: DO NOT send welcome email here
-    // Welcome email will be sent ONLY after OTP verification
+    // Do NOT send welcome email here
+    return res.json({ message: 'Account created', user: q.rows[0] });
 
-    return res.json({ message: 'Account created', user: userRow.rows[0] });
   } catch (err) {
     console.error('register error', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
-// ----------------------------
+// ======================================================
 // LOGIN
-// ----------------------------
+// ======================================================
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -137,17 +136,14 @@ exports.login = async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
 
     const user = q.rows[0];
-
     const match = await bcrypt.compare(password, user.password_hash);
+
     if (!match)
       return res.status(400).json({ message: 'Invalid credentials' });
 
     const token = signToken(user);
 
-    return res.json({
-      token,
-      user: { id: user.id, email: user.email }
-    });
+    return res.json({ token, user: { id: user.id, email: user.email } });
 
   } catch (err) {
     console.error('login error', err);
@@ -155,9 +151,9 @@ exports.login = async (req, res) => {
   }
 };
 
-// ----------------------------
+// ======================================================
 // ME
-// ----------------------------
+// ======================================================
 exports.me = async (req, res) => {
   try {
     const q = await pool.query(
@@ -177,9 +173,9 @@ exports.me = async (req, res) => {
   }
 };
 
-// ----------------------------
-// SEND OTP (verify or reset)
-// ----------------------------
+// ======================================================
+// SEND OTP
+// ======================================================
 exports.sendOtp = async (req, res) => {
   try {
     const { email, purpose = 'verify' } = req.body;
@@ -187,7 +183,6 @@ exports.sendOtp = async (req, res) => {
 
     let user = null;
 
-    // For password reset, user must exist
     if (purpose === 'reset') {
       const q = await pool.query(
         'SELECT id FROM users WHERE email=$1 LIMIT 1',
@@ -197,7 +192,6 @@ exports.sendOtp = async (req, res) => {
         return res.status(400).json({ message: 'No account with that email' });
       user = q.rows[0];
     } else {
-      // For verification, user may or may not exist
       const q = await pool.query(
         'SELECT id FROM users WHERE email=$1 LIMIT 1',
         [email.toLowerCase()]
@@ -214,7 +208,6 @@ exports.sendOtp = async (req, res) => {
       code
     });
 
-    // Email OTP
     try {
       const subject =
         purpose === 'verify'
@@ -232,15 +225,16 @@ exports.sendOtp = async (req, res) => {
     }
 
     return res.json({ message: 'OTP sent', expires_at: otpRow.expires_at });
+
   } catch (err) {
     console.error('sendOtp error', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
-// ----------------------------
-// VERIFY OTP
-// ----------------------------
+// ======================================================
+// VERIFY OTP (Welcome email is sent HERE only)
+// ======================================================
 exports.verifyOtp = async (req, res) => {
   try {
     const { email, code, purpose = 'verify' } = req.body;
@@ -260,10 +254,9 @@ exports.verifyOtp = async (req, res) => {
         return res.status(400).json({ message: 'Account not found' });
 
       const user = q.rows[0];
-
       const token = signToken(user);
 
-      // SEND WELCOME EMAIL ONLY NOW
+      // SEND WELCOME EMAIL NOW
       try {
         await sendMailSafe({
           to: email,
@@ -272,9 +265,7 @@ exports.verifyOtp = async (req, res) => {
             ? EmailTpl.welcome({ email })
             : `<p>Welcome ${email}</p>`
         });
-      } catch (e) {
-        console.warn('Welcome email failed:', e);
-      }
+      } catch (e) {}
 
       return res.json({ message: 'OTP verified', token, user });
     }
@@ -287,20 +278,22 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-// ----------------------------
+// ======================================================
 // RESET PASSWORD
-// ----------------------------
+// ======================================================
 exports.resetPassword = async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
 
     const otp = await findValidOtp(email, code, 'reset');
-    if (!otp) return res.status(400).json({ message: 'Invalid or expired code' });
+    if (!otp)
+      return res.status(400).json({ message: 'Invalid or expired code' });
 
     const q = await pool.query(
       'SELECT id FROM users WHERE email=$1 LIMIT 1',
       [email.toLowerCase()]
     );
+
     if (!q.rows.length)
       return res.status(400).json({ message: 'Account not found' });
 
@@ -319,4 +312,17 @@ exports.resetPassword = async (req, res) => {
     console.error('reset error', err);
     return res.status(500).json({ message: 'Server error' });
   }
+};
+
+// ======================================================
+// FIX: Proper exports for Express
+// ======================================================
+module.exports = {
+  register: exports.register,
+  login: exports.login,
+  me: exports.me,
+  sendOtp: exports.sendOtp,
+  verifyOtp: exports.verifyOtp,
+  resendOtp: exports.sendOtp,  // same function
+  resetPassword: exports.resetPassword
 };
