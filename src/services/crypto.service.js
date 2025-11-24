@@ -3,14 +3,12 @@
 
 const tron = require('../crypto/tron');
 const { pool } = require('../config/database');
-const { decrypt } = require('../utils/crypto');
-const { withTx } = require('../config/database');
 
 // ===================
 // WALLET GENERATION
 // ===================
 exports.createTronWallet = async () => {
-  return await tron.createWallet(); // returns { address, privEnc }
+  return await tron.createWallet(); // returns { address, privEnc } (unchanged)
 };
 
 // ===================
@@ -45,25 +43,46 @@ exports.getReceipt = async (txHash) => {
 // SWEEP USER ADDRESS
 // ===================
 exports.sweepWallet = async (walletRow) => {
-  const bal = await tron.getUsdtBalance(walletRow.address);
-  if (bal <= 0) return false;
+  if (!walletRow || !walletRow.address) {
+    throw new Error('sweepWallet: invalid walletRow');
+  }
 
-  let priv;
-  try {
-    priv = decrypt(walletRow.priv_enc);
-  } catch (err) {
-    console.error('decrypt failed for walletId', walletRow.id);
+  const bal = await tron.getUsdtBalance(walletRow.address);
+  if (!bal || Number(bal) <= 0) return false;
+
+  // prefer explicit private_key column (from your schema). if not present, try private_key or privateKey
+  const privKey = walletRow.private_key || walletRow.priv_enc || walletRow.privateKey;
+  if (!privKey) {
+    console.error('sweepWallet: no private key for walletId', walletRow.id);
     return false;
   }
 
-  const tx = await tron.sendFromPrivateKey(priv, process.env.OMNIBUS_TRON_ADDRESS, bal);
+  // send everything to omnibus address
+  const omnibus = process.env.OMNIBUS_TRON_ADDRESS;
+  if (!omnibus) {
+    console.error('sweepWallet: OMNIBUS_TRON_ADDRESS not configured');
+    return false;
+  }
 
-  await pool.query(
-    `UPDATE deposits
-     SET swept=true, sweep_tx_hash=$1 
-     WHERE to_addr=$2 AND network='tron' AND token='USDT'`,
-    [tx, walletRow.address]
-  );
+  let tx;
+  try {
+    tx = await tron.sendFromPrivateKey(privKey, omnibus, bal);
+  } catch (err) {
+    console.error('sweepWallet: failed to send for walletId', walletRow.id, err.message || err);
+    return false;
+  }
+
+  try {
+    await pool.query(
+      `UPDATE deposits
+       SET swept = true, sweep_tx_hash = $1, updated_at = NOW()
+       WHERE to_addr = $2 AND network = 'tron' AND token = 'USDT'`,
+      [tx, walletRow.address]
+    );
+  } catch (err) {
+    console.error('sweepWallet: failed to update deposits for walletId', walletRow.id, err.message || err);
+    // still return tx so caller can decide
+  }
 
   return tx;
 };
@@ -72,17 +91,20 @@ exports.sweepWallet = async (walletRow) => {
 // BULK SWEEP WORKER
 // ===================
 exports.sweepAll = async () => {
+  // wallets table (per your schema) has columns: id, account_id, network, address, private_key, created_at, updated_at, user_id
   const { rows } = await pool.query(
-    `SELECT id, user_id, address, priv_enc
+    `SELECT id, user_id, address, private_key
      FROM wallets
-     WHERE network='tron' AND token='USDT' AND sweep_enabled=true`
+     WHERE network = 'tron' AND (private_key IS NOT NULL AND private_key <> '')
+     ORDER BY id ASC
+     LIMIT 200`
   );
 
   for (const row of rows) {
     try {
       await exports.sweepWallet(row);
     } catch (err) {
-      console.error('sweep error walletId', row.id, err.message);
+      console.error('sweep error walletId', row.id, (err && err.message) || err);
     }
   }
 };

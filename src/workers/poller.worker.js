@@ -1,16 +1,16 @@
-// src/workers/poller.worker.js
 'use strict';
 
 const depositService = require('../services/deposit.service');
 const { sleep } = require('../utils/helpers');
 
 const INTERVAL = Number(process.env.POLLER_INTERVAL_MS || 20000); // 20s
-
 async function runOnce() {
   try {
-    await depositService.pollTron();
+    const processed = await depositService.pollTron();
+    if (processed) console.log(`poller: processed ${processed} deposit(s)`);
   } catch (err) {
-    console.error('poller error:', err.message);
+    // print err.message to avoid leaking big objects into logs
+    console.error('poller error:', (err && err.message) || err);
   }
 }
 
