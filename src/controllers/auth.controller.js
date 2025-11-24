@@ -25,7 +25,6 @@ function genOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// IMPORTANT: your DB column is "code", NOT "otp"
 async function saveOtp({ email, user_id = null, purpose, code, ttlMinutes = 10 }) {
   const expiresAt = new Date(Date.now() + ttlMinutes * 60000).toISOString();
 
@@ -56,11 +55,12 @@ async function findValidOtp(email, code, purpose) {
      LIMIT 1`,
     [email.toLowerCase(), code, purpose]
   );
+
   return q.rows[0];
 }
 
 // ======================================================
-// REGISTER (NO welcome email here anymore)
+// REGISTER
 // ======================================================
 exports.register = async (req, res) => {
   try {
@@ -95,23 +95,6 @@ exports.register = async (req, res) => {
       );
     }
 
-    // Optional referral credit
-    if (referral_code) {
-      try {
-        const ref = await pool.query(
-          'SELECT id FROM users WHERE referral_code=$1 LIMIT 1',
-          [referral_code]
-        );
-        if (ref.rows.length) {
-          await pool.query(
-            'UPDATE users SET balance = balance + 100 WHERE id=$1',
-            [ref.rows[0].id]
-          );
-        }
-      } catch (e) {}
-    }
-
-    // Do NOT send welcome email here
     return res.json({ message: 'Account created', user: q.rows[0] });
 
   } catch (err) {
@@ -174,12 +157,19 @@ exports.me = async (req, res) => {
 };
 
 // ======================================================
-// SEND OTP
+// SEND OTP — FIXED
 // ======================================================
 exports.sendOtp = async (req, res) => {
   try {
-    const { email, purpose = 'verify' } = req.body;
+    let { email, purpose } = req.body;
+
     if (!email) return res.status(400).json({ message: 'Email required' });
+    if (!purpose) return res.status(400).json({ message: 'Purpose required' });
+
+    purpose = purpose.toLowerCase();
+
+    if (!['verify', 'reset'].includes(purpose))
+      return res.status(400).json({ message: 'Invalid purpose' });
 
     let user = null;
 
@@ -233,14 +223,17 @@ exports.sendOtp = async (req, res) => {
 };
 
 // ======================================================
-// VERIFY OTP (Welcome email is sent HERE only)
+// VERIFY OTP
 // ======================================================
 exports.verifyOtp = async (req, res) => {
   try {
-    const { email, code, purpose = 'verify' } = req.body;
+    const { email, code, purpose } = req.body;
+
+    if (!purpose) return res.status(400).json({ message: 'Purpose required' });
 
     const otp = await findValidOtp(email, code, purpose);
-    if (!otp) return res.status(400).json({ message: 'Invalid or expired code' });
+    if (!otp)
+      return res.status(400).json({ message: 'Invalid or expired code' });
 
     await markOtpUsed(otp.id);
 
@@ -256,7 +249,6 @@ exports.verifyOtp = async (req, res) => {
       const user = q.rows[0];
       const token = signToken(user);
 
-      // SEND WELCOME EMAIL NOW
       try {
         await sendMailSafe({
           to: email,
@@ -279,7 +271,7 @@ exports.verifyOtp = async (req, res) => {
 };
 
 // ======================================================
-// RESET PASSWORD
+// RESET PASSWORD — FIXED
 // ======================================================
 exports.resetPassword = async (req, res) => {
   try {
@@ -315,7 +307,7 @@ exports.resetPassword = async (req, res) => {
 };
 
 // ======================================================
-// FIX: Proper exports for Express
+// Proper Exports
 // ======================================================
 module.exports = {
   register: exports.register,
@@ -323,6 +315,6 @@ module.exports = {
   me: exports.me,
   sendOtp: exports.sendOtp,
   verifyOtp: exports.verifyOtp,
-  resendOtp: exports.sendOtp,  // same function
+  resendOtp: exports.sendOtp,
   resetPassword: exports.resetPassword
 };
