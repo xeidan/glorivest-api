@@ -55,7 +55,6 @@ async function findValidOtp(email, code, purpose) {
      LIMIT 1`,
     [email.toLowerCase(), code, purpose]
   );
-
   return q.rows[0];
 }
 
@@ -157,19 +156,12 @@ exports.me = async (req, res) => {
 };
 
 // ======================================================
-// SEND OTP — FIXED
+// SEND OTP
 // ======================================================
 exports.sendOtp = async (req, res) => {
   try {
-    let { email, purpose } = req.body;
-
+    const { email, purpose = 'verify' } = req.body;
     if (!email) return res.status(400).json({ message: 'Email required' });
-    if (!purpose) return res.status(400).json({ message: 'Purpose required' });
-
-    purpose = purpose.toLowerCase();
-
-    if (!['verify', 'reset'].includes(purpose))
-      return res.status(400).json({ message: 'Invalid purpose' });
 
     let user = null;
 
@@ -227,16 +219,17 @@ exports.sendOtp = async (req, res) => {
 // ======================================================
 exports.verifyOtp = async (req, res) => {
   try {
-    const { email, code, purpose } = req.body;
-
-    if (!purpose) return res.status(400).json({ message: 'Purpose required' });
+    const { email, code, purpose = 'verify' } = req.body;
 
     const otp = await findValidOtp(email, code, purpose);
-    if (!otp)
-      return res.status(400).json({ message: 'Invalid or expired code' });
+    if (!otp) return res.status(400).json({ message: 'Invalid or expired code' });
 
-    await markOtpUsed(otp.id);
+    // ⛔ Only consume OTP for account verification.
+    if (purpose === 'verify') {
+      await markOtpUsed(otp.id);
+    }
 
+    // Account verification flow
     if (purpose === 'verify') {
       const q = await pool.query(
         'SELECT id, email FROM users WHERE email=$1 LIMIT 1',
@@ -262,6 +255,7 @@ exports.verifyOtp = async (req, res) => {
       return res.json({ message: 'OTP verified', token, user });
     }
 
+    // Password reset flow (OTP stays active)
     return res.json({ message: 'OTP verified' });
 
   } catch (err) {
@@ -271,7 +265,7 @@ exports.verifyOtp = async (req, res) => {
 };
 
 // ======================================================
-// RESET PASSWORD — FIXED
+// RESET PASSWORD
 // ======================================================
 exports.resetPassword = async (req, res) => {
   try {
@@ -296,6 +290,7 @@ exports.resetPassword = async (req, res) => {
       [hash, q.rows[0].id]
     );
 
+    // Now consume OTP
     await markOtpUsed(otp.id);
 
     return res.json({ message: 'Password reset successful' });
@@ -307,7 +302,7 @@ exports.resetPassword = async (req, res) => {
 };
 
 // ======================================================
-// Proper Exports
+// EXPORTS
 // ======================================================
 module.exports = {
   register: exports.register,
