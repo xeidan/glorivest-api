@@ -9,6 +9,7 @@ const { JWT_SECRET } = require('../config/env');
 const { sendMailSafe, EmailTpl } = require('../utils/email');
 const { logDevice, getDevices } = require('../utils/device');
 
+const { genAccountCode, tierSlugToCode } = require('../utils/accounts');
 const STRONG_PASSWORD_REGEX = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const OTP_DEFAULT_TTL_MIN = 10;
 
@@ -263,72 +264,124 @@ exports.verifyOtp = async (req, res) => {
     const otp = await findValidOtp(email, code, purpose);
     if (!otp) return error(res, 400, 'Invalid or expired code');
 
-    // Only consume for account verification; reset flow consumes after password change
+    // consume otp for verify
     if (purpose === 'verify') await markOtpUsed(otp.id);
 
     if (purpose === 'verify') {
-  const q = await pool.query(
-    'SELECT id, email FROM users WHERE email=$1 LIMIT 1',
-    [email.toLowerCase()]
-  );
-  if (!q.rows.length) return error(res, 400, 'Account not found');
-  const user = q.rows[0];
-
-  // create token
-  const token = signToken(user);
-
-  // AUTO-CREATE FIRST STANDARD ACCOUNT IF NONE EXISTS
-  try {
-    const existing = await pool.query(
-      'SELECT id FROM accounts WHERE user_id=$1 LIMIT 1',
-      [user.id]
-    );
-
-    if (!existing.rows.length) {
-      // get tier_id for slug 'standard'
-      const t = await pool.query(
-        'SELECT id FROM account_tiers WHERE slug=$1 LIMIT 1',
-        ['standard']
+      // get user
+      const q = await pool.query(
+        'SELECT id, email FROM users WHERE email=$1 LIMIT 1',
+        [email.toLowerCase()]
       );
+      if (!q.rows.length) return error(res, 400, 'Account not found');
+      const user = q.rows[0];
 
-      if (t.rows.length) {
-        const tier = t.rows[0];
+      const token = signToken(user);
 
-        // how many accounts so far? (0, since none exist)
-        const seq = 1;
-        const accountCode = `GV${150000 + user.id}-${String(seq).padStart(2,'0')}-STD`;
-
-        await pool.query(
-          `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
-           VALUES ($1, $2, $3, 'active', 0, 0, NOW())`,
-          [user.id, tier.id, accountCode]
+      // AUTO-CREATE FIRST STANDARD ACCOUNT IF NONE EXISTS
+      try {
+        const check = await pool.query(
+          'SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1',
+          [user.id]
         );
+
+        if (Number(check.rows[0].c) === 0) {
+          const acctCode = genAccountCode(user.id, 1, 'standard');
+
+          await pool.query(
+            `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
+             VALUES (
+               $1,
+               (SELECT id FROM account_tiers WHERE slug='standard' LIMIT 1),
+               $2, 'active', 0, 0, NOW())`,
+            [user.id, acctCode]
+          );
+        }
+      } catch (e) {
+        console.error('Auto-create default account failed', e);
       }
+
+      // welcome email (best effort)
+      try {
+        await sendMailSafe({
+          to: email,
+          subject: 'Welcome to Glorivest',
+          html: EmailTpl?.welcome ? EmailTpl.welcome({ email }) : `<p>Welcome ${email}</p>`
+        });
+      } catch (e) {}
+
+      return res.json({ message: 'OTP verified', token, user });
     }
-  } catch (e) {
-    console.error('Auto-create account failed', e);
-  }
 
-  // send welcome email
-  try {
-    await sendMailSafe({
-      to: email,
-      subject: 'Welcome to Glorivest',
-      html: EmailTpl?.welcome ? EmailTpl.welcome({ email }) : `<p>Welcome ${email}</p>`
-    });
-  } catch (e) {}
-
-  return res.json({ message: 'OTP verified', token, user });
-}
-
-
-    // For other purposes (like reset), keep OTP active until consumed by reset endpoint
+    // reset password or update email flow
     return res.json({ message: 'OTP verified' });
+
   } catch (err) {
     console.error('verifyOtp error', err);
     return error(res, 500, 'Server error');
   }
 };
+
+
+
+
+// -----------------------------
+// CREATE ACCOUNT
+// -----------------------------
+
+exports.createAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const tier_slug = (req.body.tier_slug || req.body.tier_code || req.body.tier || '').toString().toLowerCase();
+    if (!['standard','pro','elite'].includes(tier_slug)) {
+      return res.status(400).json({ message: 'Invalid tier' });
+    }
+
+    // ensure tier exists and get its id
+    const { rows: tierRows } = await pool.query(
+      `SELECT id FROM account_tiers WHERE slug=$1 LIMIT 1`,
+      [tier_slug]
+    );
+    if (!tierRows.length) return res.status(400).json({ message: 'Invalid tier' });
+    const tierId = tierRows[0].id;
+
+    // compute next sequence (count existing accounts)
+    const { rows: [{ c }] } = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1`,
+      [userId]
+    );
+    const nextSeq = Number(c) + 1; // if user already had 1 (default) => nextSeq = 2
+
+    const account_code = genAccountCode(userId, nextSeq, tier_slug);
+
+    const { rows: [acc] } = await pool.query(
+      `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
+       VALUES ($1, $2, $3, 'active', 0, 0, NOW())
+       RETURNING id, user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at`,
+      [userId, tierId, account_code]
+    );
+
+    // return a small enriched payload for frontend convenience
+    return res.status(201).json({
+      id: acc.id,
+      account_code: acc.account_code,
+      status: acc.status,
+      balance_cents: acc.balance_cents,
+      profit_cents: acc.profit_cents,
+      created_at: acc.created_at,
+      tier: tier_slug,
+      tier_code: tierSlugToCode(tier_slug)
+    });
+  } catch (err) {
+    console.error('createAccount error', err);
+    if (String(err.code) === '23505') {
+      return res.status(409).json({ message: 'Account code conflict, retry' });
+    }
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
 
 // -----------------------------
 // RESET PASSWORD (OTP-based)
