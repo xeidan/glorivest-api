@@ -16,11 +16,11 @@ router.post('/resend-otp', authCtrl.resendOtp);
 router.post('/reset-password', authCtrl.resetPassword);
 
 // NEW secure routes (corrected)
-router.post('/auth/change-password', auth, authCtrl.changePassword);
-router.post('/auth/update-email/request', auth, authCtrl.requestEmailUpdate);
-router.post('/auth/update-email/confirm', auth, authCtrl.confirmEmailUpdate);
-router.get('/auth/devices', auth, authCtrl.getDeviceHistory);
-router.post('/auth/delete-account', auth, authCtrl.deleteAccount);
+router.post('/change-password', auth, authCtrl.changePassword);
+router.post('/update-email/request', auth, authCtrl.requestEmailUpdate);
+router.post('/update-email/confirm', auth, authCtrl.confirmEmailUpdate);
+router.get('/devices', auth, authCtrl.getDeviceHistory);
+router.post('/delete-account', auth, authCtrl.deleteAccount);
 
 
 // Authenticated user profile
