@@ -1,16 +1,6 @@
 // src/controllers/auth.controller.js
 'use strict';
 
-/**
- * Clean, consolidated auth controller
- * - Register / Login / Me
- * - OTP helpers (send/verify/reset)
- * - Password reset & change (strong rule)
- * - Email update (request + confirm)
- * - Device history, delete account
- *
- * Asset (local): file:///mnt/data/Screenshot 2025-11-25 at 01.05.50.png
- */
 
 const pool = require('../config/database').pool;
 const bcrypt = require('bcrypt');
@@ -175,18 +165,56 @@ exports.login = async (req, res) => {
 // -----------------------------
 exports.me = async (req, res) => {
   try {
-    const q = await pool.query(
-      `SELECT id, email, balance, default_account_id, referral_code
-       FROM users WHERE id=$1 LIMIT 1`,
-      [req.user.id]
+    const userId = req.user.id;
+
+    // Load user fields
+    const { rows: users } = await pool.query(
+      `SELECT id, email, balance, reward_balance, referral_code, total_referrals, referral_earnings
+       FROM users
+       WHERE id=$1
+       LIMIT 1`,
+      [userId]
     );
-    if (!q.rows.length) return error(res, 404, 'User not found');
-    return res.json(q.rows[0]);
+    if (!users.length) return error(res, 404, 'User not found');
+    const user = users[0];
+
+    // Load default (first) account with tier info
+    const { rows: accts } = await pool.query(
+      `SELECT a.id, a.account_code, a.balance_cents, t.slug AS tier_slug, t.name AS tier_name
+       FROM accounts a
+       LEFT JOIN account_tiers t ON t.id = a.tier_id
+       WHERE a.user_id=$1
+       ORDER BY a.created_at ASC
+       LIMIT 1`,
+      [userId]
+    );
+
+    const first = accts[0] || null;
+
+    return res.json({
+      id: user.id,
+      email: user.email,
+      balance: Number(user.balance || 0),
+      reward_balance: Number(user.reward_balance || 0),
+      referral_code: user.referral_code,
+      total_referrals: user.total_referrals || 0,
+      referral_earnings: Number(user.referral_earnings || 0),
+
+      // computed glorivest ID → GV150000 + userID
+      glorivest_id: `GV${150000 + user.id}`,
+
+      // account fields
+      default_account_id: first ? first.id : null,
+      default_account_code: first ? first.account_code : null,
+      default_account_tier: first ? { slug: first.tier_slug, name: first.tier_name } : null
+    });
   } catch (err) {
     console.error('me error', err);
     return error(res, 500, 'Server error');
   }
 };
+
+
 
 // -----------------------------
 // SEND OTP
@@ -239,19 +267,60 @@ exports.verifyOtp = async (req, res) => {
     if (purpose === 'verify') await markOtpUsed(otp.id);
 
     if (purpose === 'verify') {
-      const q = await pool.query('SELECT id, email FROM users WHERE email=$1 LIMIT 1', [email.toLowerCase()]);
-      if (!q.rows.length) return error(res, 400, 'Account not found');
-      const user = q.rows[0];
-      const token = signToken(user);
-      try {
-        await sendMailSafe({
-          to: email,
-          subject: 'Welcome to Glorivest',
-          html: EmailTpl?.welcome ? EmailTpl.welcome({ email }) : `<p>Welcome ${email}</p>`
-        });
-      } catch (e) {}
-      return res.json({ message: 'OTP verified', token, user });
+  const q = await pool.query(
+    'SELECT id, email FROM users WHERE email=$1 LIMIT 1',
+    [email.toLowerCase()]
+  );
+  if (!q.rows.length) return error(res, 400, 'Account not found');
+  const user = q.rows[0];
+
+  // create token
+  const token = signToken(user);
+
+  // AUTO-CREATE FIRST STANDARD ACCOUNT IF NONE EXISTS
+  try {
+    const existing = await pool.query(
+      'SELECT id FROM accounts WHERE user_id=$1 LIMIT 1',
+      [user.id]
+    );
+
+    if (!existing.rows.length) {
+      // get tier_id for slug 'standard'
+      const t = await pool.query(
+        'SELECT id FROM account_tiers WHERE slug=$1 LIMIT 1',
+        ['standard']
+      );
+
+      if (t.rows.length) {
+        const tier = t.rows[0];
+
+        // how many accounts so far? (0, since none exist)
+        const seq = 1;
+        const accountCode = `GV${150000 + user.id}-${String(seq).padStart(2,'0')}-STD`;
+
+        await pool.query(
+          `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
+           VALUES ($1, $2, $3, 'active', 0, 0, NOW())`,
+          [user.id, tier.id, accountCode]
+        );
+      }
     }
+  } catch (e) {
+    console.error('Auto-create account failed', e);
+  }
+
+  // send welcome email
+  try {
+    await sendMailSafe({
+      to: email,
+      subject: 'Welcome to Glorivest',
+      html: EmailTpl?.welcome ? EmailTpl.welcome({ email }) : `<p>Welcome ${email}</p>`
+    });
+  } catch (e) {}
+
+  return res.json({ message: 'OTP verified', token, user });
+}
+
 
     // For other purposes (like reset), keep OTP active until consumed by reset endpoint
     return res.json({ message: 'OTP verified' });
