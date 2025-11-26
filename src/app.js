@@ -1,4 +1,3 @@
-// src/app.js
 'use strict';
 
 require('dotenv').config();
@@ -18,35 +17,29 @@ const accountRoutes = require('./routes/account.routes');
 
 const app = express();
 
-
-// ==================
-// BASIC MIDDLEWARE
-// ==================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ===========================
+// CORS — must be FIRST
+// ===========================
 app.use(cors({
-  origin: [
-    'http://127.0.0.1:5503',
-    'http://localhost:5503',
-    'http://127.0.0.1:5500',
-    'http://localhost:5500',
-    'https://glorivest.com',
-    'https://www.glorivest.com'
-  ],
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  origin: '*',
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
 }));
 
+// Must explicitly handle preflight
 app.options('*', cors());
 
+// ===========================
+// LOGGING
+// ===========================
 app.use(morgan('dev'));
 
-
-// ==================
-// API ROUTES
-// ==================
+// ===========================
+// ROUTES
+// ===========================
 app.use('/auth', authRoutes);
 app.use('/wallet', walletRoutes);
 app.use('/deposit', depositRoutes);
@@ -56,9 +49,9 @@ app.use('/notify', notifyRoutes);
 app.use('/bot', botRoutes);
 app.use('/accounts', accountRoutes);
 
-// ==================
-// 404 HANDLER
-// ==================
+// ===========================
+// 404
+// ===========================
 app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
