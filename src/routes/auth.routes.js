@@ -8,6 +8,12 @@ const auth = require('../middleware/auth');
 
 // Public routes
 router.post('/register', authCtrl.register);
+
+router.post('/login', (req, res, next) => {
+  console.log('Login hit');
+  next();
+});
+
 router.post('/login', authLimiter, authCtrl.login);
 
 router.post('/send-otp', authCtrl.sendOtp);

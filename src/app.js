@@ -17,29 +17,31 @@ const accountRoutes = require('./routes/account.routes');
 
 const app = express();
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// ===========================
-// CORS — must be FIRST
-// ===========================
+// ------------------------------------------------------
+// 1. CORS MUST BE FIRST
+// ------------------------------------------------------
 app.use(cors({
   origin: '*',
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
 
-// Must explicitly handle preflight
 app.options('*', cors());
 
-// ===========================
-// LOGGING
-// ===========================
+// ------------------------------------------------------
+// 2. BODY PARSERS
+// ------------------------------------------------------
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ------------------------------------------------------
+// 3. LOGGING
+// ------------------------------------------------------
 app.use(morgan('dev'));
 
-// ===========================
-// ROUTES
-// ===========================
+// ------------------------------------------------------
+// 4. ROUTES
+// ------------------------------------------------------
 app.use('/auth', authRoutes);
 app.use('/wallet', walletRoutes);
 app.use('/deposit', depositRoutes);
@@ -49,9 +51,9 @@ app.use('/notify', notifyRoutes);
 app.use('/bot', botRoutes);
 app.use('/accounts', accountRoutes);
 
-// ===========================
-// 404
-// ===========================
+// ------------------------------------------------------
+// 5. 404 handler
+// ------------------------------------------------------
 app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
