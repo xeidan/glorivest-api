@@ -1,7 +1,7 @@
 'use strict';
 
 const jwt = require('jsonwebtoken');
-const { pool } = require('../config/database');
+const pool = require('../config/database').pool;
 const { JWT_SECRET } = require('../config/env');
 
 module.exports = async function auth(req, res, next) {
@@ -11,14 +11,8 @@ module.exports = async function auth(req, res, next) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    const token = header.slice(7);
-    let payload;
-
-    try {
-      payload = jwt.verify(token, JWT_SECRET);
-    } catch {
-      return res.status(401).json({ message: 'Invalid token' });
-    }
+    const token = header.split(' ')[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
 
     const { rows } = await pool.query(
       `
@@ -29,22 +23,17 @@ module.exports = async function auth(req, res, next) {
       WHERE id = $1
       LIMIT 1
       `,
-      [payload.id]
+      [decoded.id]
     );
 
     if (!rows.length) {
-      return res.status(401).json({ message: 'User not found' });
+      return res.status(401).json({ message: 'Invalid token' });
     }
 
-    // 🔑 minimal user object only
-    req.user = {
-      id: rows[0].id,
-      email: rows[0].email
-    };
-
+    req.user = rows[0]; // 👈 NO balance, NO verified
     next();
   } catch (err) {
     console.error('auth middleware error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(401).json({ message: 'Unauthorized' });
   }
 };
