@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
 const { sendMailSafe, EmailTpl } = require('../utils/email');
 const { logDevice, getDevices } = require('../utils/device');
+const { postTransaction } = require('../services/ledger.service');
 
 const { genAccountCode, tierSlugToCode } = require('../utils/accounts');
 const STRONG_PASSWORD_REGEX = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
@@ -218,40 +219,85 @@ exports.me = async (req, res) => {
 
 
 // -----------------------------
-// SEND OTP
+// SEND OTP (HARDENED)
 // -----------------------------
 exports.sendOtp = async (req, res) => {
   try {
     const { email, purpose = 'verify' } = req.body;
     if (!email) return error(res, 400, 'Email required');
 
+    const normalizedEmail = email.toLowerCase();
+
     let user = null;
+
+    // RESET requires existing account
     if (purpose === 'reset') {
-      const q = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [email.toLowerCase()]);
-      if (!q.rows.length) return error(res, 400, 'No account with that email');
-      user = q.rows[0];
-    } else {
-      const q = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [email.toLowerCase()]);
-      if (q.rows.length) user = q.rows[0];
+      const { rows } = await pool.query(
+        'SELECT id FROM users WHERE email=$1 LIMIT 1',
+        [normalizedEmail]
+      );
+      if (!rows.length) {
+        return error(res, 400, 'No account with that email');
+      }
+      user = rows[0];
     }
 
+    // VERIFY may or may not already exist
+    if (purpose === 'verify') {
+      const { rows } = await pool.query(
+        'SELECT id FROM users WHERE email=$1 LIMIT 1',
+        [normalizedEmail]
+      );
+      if (rows.length) user = rows[0];
+    }
+
+    // Generate OTP
     const code = genOtp();
-    const otpRow = await saveOtp({ email, user_id: user ? user.id : null, purpose, code });
 
-    try {
-      const subject = purpose === 'verify' ? 'Your Glorivest verification code' : 'Your Glorivest password reset code';
-      const html = EmailTpl?.otp ? EmailTpl.otp({ code, purpose, email }) : `<p>Your OTP is <b>${code}</b></p>`;
-      await sendMailSafe({ to: email, subject, html });
-    } catch (e) {
-      console.warn('OTP email failed:', e);
-    }
+    // Persist OTP
+    const otpRow = await saveOtp({
+      email: normalizedEmail,
+      user_id: user ? user.id : null,
+      purpose,
+      code
+    });
 
-    return res.json({ message: 'OTP sent', expires_at: otpRow.expires_at });
+    // 🔍 LOG — critical for debugging delivery
+    console.log('[OTP GENERATED]', {
+      email: normalizedEmail,
+      purpose,
+      code,
+      expires_at: otpRow.expires_at
+    });
+
+    // Build email
+    const subject =
+      purpose === 'verify'
+        ? 'Your Glorivest verification code'
+        : 'Your Glorivest password reset code';
+
+    const html = EmailTpl?.otp
+      ? EmailTpl.otp({ code, purpose, email: normalizedEmail })
+      : `<p>Your Glorivest OTP is <b>${code}</b></p>`;
+
+    // 🚨 SEND EMAIL — DO NOT SWALLOW ERRORS
+    await sendMailSafe({
+      to: normalizedEmail,
+      subject,
+      html
+    });
+
+    return res.json({
+      message: 'OTP sent',
+      expires_at: otpRow.expires_at
+    });
+
   } catch (err) {
-    console.error('sendOtp error', err);
-    return error(res, 500, 'Server error');
+    console.error('sendOtp error:', err);
+    return error(res, 500, 'Failed to send OTP');
   }
 };
+
 
 // -----------------------------
 // VERIFY OTP
@@ -278,28 +324,56 @@ exports.verifyOtp = async (req, res) => {
 
       const token = signToken(user);
 
-      // AUTO-CREATE FIRST STANDARD ACCOUNT IF NONE EXISTS
+      // AUTO-CREATE DEMO + STANDARD ACCOUNTS (ONCE)
       try {
-        const check = await pool.query(
+        const { rows: [{ c }] } = await pool.query(
           'SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1',
           [user.id]
         );
 
-        if (Number(check.rows[0].c) === 0) {
-          const acctCode = genAccountCode(user.id, 1, 'standard');
-
+        if (Number(c) === 0) {
+          // --- DEMO ACCOUNT ---
+          const demoCode = genAccountCode(user.id, 1, 'demo');
           await pool.query(
-            `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
-             VALUES (
-               $1,
-               (SELECT id FROM account_tiers WHERE slug='standard' LIMIT 1),
-               $2, 'active', 0, 0, NOW())`,
-            [user.id, acctCode]
+            `INSERT INTO accounts (
+              user_id, tier_id, account_code, status,
+              balance_cents, profit_cents, created_at
+            )
+            VALUES (
+              $1,
+              (SELECT id FROM account_tiers WHERE slug='demo' LIMIT 1),
+              $2,
+              'active',
+              0,
+              0,
+              NOW()
+            )`,
+            [user.id, demoCode]
+          );
+
+          // --- STANDARD (LIVE) ACCOUNT ---
+          const liveCode = genAccountCode(user.id, 2, 'standard');
+          await pool.query(
+            `INSERT INTO accounts (
+              user_id, tier_id, account_code, status,
+              balance_cents, profit_cents, created_at
+            )
+            VALUES (
+              $1,
+              (SELECT id FROM account_tiers WHERE slug='standard' LIMIT 1),
+              $2,
+              'active',
+              0,
+              0,
+              NOW()
+            )`,
+            [user.id, liveCode]
           );
         }
       } catch (e) {
-        console.error('Auto-create default account failed', e);
+        console.error('Auto-create demo + standard accounts failed', e);
       }
+
 
       // welcome email (best effort)
       try {

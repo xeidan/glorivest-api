@@ -28,3 +28,13 @@ exports.checkDeposits = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+requireLiveAccount(account);
+
+await postTransaction({
+  userId: req.user.id,
+  accountId: account.id,
+  type: 'deposit',
+  amountCents: amount
+}, req.db);
+

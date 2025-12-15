@@ -1,19 +1,38 @@
-// src/routes/account.routes.js
-'use strict';
+const express = require('express');
+const router = express.Router();
 
-const router = require('express').Router();
-const accountCtrl = require('../controllers/account.controller');
-const auth = require('../middleware/auth');
+const auth = require('../middlewares/auth');
+const loadAccount = require('../middlewares/loadAccount');
+const guardRoute = require('../middlewares/guardRoute');
 
-router.get('/', auth, accountCtrl.getMyAccounts);
-router.get('/:id', auth, accountCtrl.getAccountById);
+const {
+  requireDemoAccount,
+  requireLiveAccount
+} = require('../middlewares/accountGuards');
 
-// validate tier_code before controller
-router.post('/', auth, (req, res, next) => {
-  if (!req.body.tier_code) {
-    return res.status(400).json({ message: "tier_code is required: 'standard' | 'pro' | 'elite'" });
-  }
-  next();
-}, accountCtrl.createAccount);
+const accountController = require('../controllers/account.controller');
+const withdrawController = require('../controllers/withdraw.controller'); // 🔑 FIX
+
+// --------------------------------------------------
+// DEMO-ONLY: Reset demo balance
+// --------------------------------------------------
+router.post(
+  '/accounts/:accountId/demo-reset',
+  auth,
+  loadAccount,
+  guardRoute(requireDemoAccount),
+  accountController.resetDemo
+);
+
+// --------------------------------------------------
+// LIVE-ONLY: Withdraw funds
+// --------------------------------------------------
+router.post(
+  '/accounts/:accountId/withdraw',
+  auth,
+  loadAccount,
+  guardRoute(requireLiveAccount),
+  withdrawController
+);
 
 module.exports = router;

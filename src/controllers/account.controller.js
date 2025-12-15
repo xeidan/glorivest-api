@@ -2,6 +2,8 @@
 'use strict';
 
 const pool = require('../config/database').pool;
+const { postTransaction } = require('../services/ledger.service');
+
 
 /** Map slug -> 3-letter code */
 function tierCodeFromSlug(slug) {
@@ -82,19 +84,29 @@ exports.createAccount = async (req, res) => {
     const account_code = genAccountCode(userId, seq, tier.slug);
 
     const insert = await client.query(
-      `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
-       VALUES ($1, $2, $3, 'active', 0, 0, NOW())
-       RETURNING id, account_code, status, balance_cents, profit_cents, created_at`,
-      [userId, tier.id, account_code]
-    );
+  `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
+   VALUES ($1, $2, $3, 'active', 0, 0, NOW())
+   RETURNING id, account_code, status, balance_cents, profit_cents, created_at`,
+  [userId, tier.id, account_code]
+);
 
-    await client.query('COMMIT');
+const acc = insert.rows[0];
 
-    const acc = insert.rows[0];
-    return res.status(201).json({
-      ...acc,
-      tier: { id: tier.id, slug: tier.slug, name: tier.name }
-    });
+// 🔑 OPENING LEDGER ENTRY — SAME TRANSACTION
+await postTransaction({
+  userId,
+  accountId: acc.id,
+  type: 'opening_balance',
+  amountCents: 0
+}, client);
+
+await client.query('COMMIT');
+
+return res.status(201).json({
+  ...acc,
+  tier: { id: tier.id, slug: tier.slug, name: tier.name }
+});
+
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (e) {}
     console.error('createAccount error', err);
@@ -106,4 +118,24 @@ exports.createAccount = async (req, res) => {
   } finally {
     client.release();
   }
+};
+
+const { requireDemoAccount } = require('../middlewares/accountGuards');
+
+exports.resetDemo = async (req, res) => {
+  const account = req.account;
+
+  requireDemoAccount(account);
+
+  const DEFAULT = 1_000_000;
+  const diff = DEFAULT - account.balance_cents;
+
+  await postTransaction({
+    userId: req.user.id,
+    accountId: account.id,
+    type: 'demo_reset',
+    amountCents: diff
+  }, req.db);
+
+  res.json({ success: true });
 };
