@@ -7,38 +7,48 @@ const { TRON_FULLHOST, USDT_TRON_CONTRACT } = require('../config/env');
 
 // ===== Helpers =====
 async function getCursor() {
-  const r = await pool.query(`SELECT value FROM settings WHERE key='tron_since_ts'`);
+  const r = await pool.query(
+    `SELECT value FROM settings WHERE key='tron_since_ts'`
+  );
   return r.rows[0] ? Number(r.rows[0].value) : 0;
 }
 
 async function setCursor(ts) {
   await pool.query(
-    `INSERT INTO settings (key,value)
+    `INSERT INTO settings (key, value)
      VALUES ('tron_since_ts', $1)
-     ON CONFLICT (key) DO UPDATE SET value=$1`,
+     ON CONFLICT (key) DO UPDATE SET value = $1`,
     [ts]
   );
 }
 
 // ===== Credit Deposit =====
-async function credit(userId, accountId, amount, tx) {
+async function credit(userId, accountId, amount, txHash) {
   await withTx(async (c) => {
+    // 1. Record deposit (idempotent)
     await c.query(
-      `INSERT INTO deposits (user_id, account_id, network, token, tx_hash, amount, status)
-       VALUES ($1,$2,'tron','USDT',$3,$4,'confirmed')
+      `INSERT INTO deposits (
+         user_id,
+         account_id,
+         network,
+         token,
+         tx_hash,
+         amount,
+         status
+       )
+       VALUES ($1, $2, 'tron', 'USDT', $3, $4, 'confirmed')
        ON CONFLICT (tx_hash) DO NOTHING`,
-      [userId, accountId, tx, amount]
+      [userId, accountId, txHash, amount]
     );
 
-    await c.query(
-      `UPDATE users SET balance = balance + $1 WHERE id=$2`,
-      [amount, userId]
-    );
-
+    // 2. Credit ACCOUNT balance (NOT users)
     if (accountId) {
       const cents = Math.round(amount * 100);
+
       await c.query(
-        `UPDATE accounts SET balance_cents = balance_cents + $1 WHERE id=$2`,
+        `UPDATE accounts
+         SET balance_cents = balance_cents + $1
+         WHERE id = $2`,
         [cents, accountId]
       );
     }
@@ -53,11 +63,15 @@ exports.pollTron = async () => {
   const { rows: wallets } = await pool.query(`
     SELECT user_id, account_id, address
     FROM wallets
-    WHERE network='tron' AND token='USDT'
+    WHERE network = 'tron'
+      AND token = 'USDT'
   `);
 
   for (const w of wallets) {
-    const u = new URL(`${TRON_FULLHOST}/v1/accounts/${w.address}/transactions/trc20`);
+    const u = new URL(
+      `${TRON_FULLHOST}/v1/accounts/${w.address}/transactions/trc20`
+    );
+
     u.searchParams.set('only_to', 'true');
     u.searchParams.set('limit', '200');
     u.searchParams.set('contract_address', USDT_TRON_CONTRACT);
@@ -75,10 +89,15 @@ exports.pollTron = async () => {
       const ts = Number(t.block_timestamp);
       if (ts > maxTs) maxTs = ts;
 
-      const decimals = Number(t.token_info.decimals || 6);
+      const decimals = Number(t.token_info?.decimals || 6);
       const amount = Number(t.value) / Math.pow(10, decimals);
 
-      await credit(w.user_id, w.account_id, amount, t.transaction_id);
+      await credit(
+        w.user_id,
+        w.account_id,
+        amount,
+        t.transaction_id
+      );
     }
   }
 
