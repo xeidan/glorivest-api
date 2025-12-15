@@ -10,8 +10,9 @@ const { pool } = require('../src/config/database');
         a.balance_cents,
         COALESCE(SUM(l.amount_cents), 0) AS ledger_sum
       FROM accounts a
-      LEFT JOIN ledger l ON l.account_id = a.id
-      GROUP BY a.id
+      LEFT JOIN ledger l
+        ON l.account_id::text = a.id::text
+      GROUP BY a.id, a.balance_cents
       HAVING a.balance_cents != COALESCE(SUM(l.amount_cents), 0)
     `);
 
