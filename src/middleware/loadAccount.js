@@ -1,4 +1,4 @@
-// src/middlewares/loadAccount.js
+// src/middleware/loadAccount.js
 'use strict';
 
 const pool = require('../config/database').pool;

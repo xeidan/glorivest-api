@@ -120,7 +120,7 @@ return res.status(201).json({
   }
 };
 
-const { requireDemoAccount } = require('../middlewares/accountGuards');
+const { requireDemoAccount } = require('../middleware/accountGuards');
 
 exports.resetDemo = async (req, res) => {
   const account = req.account;

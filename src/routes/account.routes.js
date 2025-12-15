@@ -1,14 +1,14 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../middlewares/auth');
-const loadAccount = require('../middlewares/loadAccount');
-const guardRoute = require('../middlewares/guardRoute');
+const auth = require('../middleware/auth');
+const loadAccount = require('../middleware/loadAccount');
+const guardRoute = require('../middleware/guardRoute');
 
 const {
   requireDemoAccount,
   requireLiveAccount
-} = require('../middlewares/accountGuards');
+} = require('../middleware/accountGuards');
 
 const accountController = require('../controllers/account.controller');
 const withdrawController = require('../controllers/withdraw.controller'); // 🔑 FIX
