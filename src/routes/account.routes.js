@@ -11,7 +11,7 @@ const {
 } = require('../middleware/accountGuards');
 
 const accountController = require('../controllers/account.controller');
-const withdrawController = require('../controllers/withdraw.controller'); // 🔑 FIX
+const withdrawalController = require('../controllers/withdrawal.controller'); // 🔑 FIX
 
 // --------------------------------------------------
 // DEMO-ONLY: Reset demo balance
@@ -31,8 +31,8 @@ router.post(
   '/accounts/:accountId/withdraw',
   auth,
   loadAccount,
-  guardRoute(requireLiveAccount),
-  withdrawController
+  requireLiveAccount,
+  withdrawalController.requestWithdrawal
 );
 
 module.exports = router;
