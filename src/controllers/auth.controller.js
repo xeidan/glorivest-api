@@ -69,7 +69,8 @@ function error(res, status = 400, message = 'Bad request') {
 // -----------------------------
 exports.register = async (req, res) => {
   try {
-    const { email, password, referral_code } = req.body;
+    const { email, password } = req.body;
+
     if (!email || !password) {
       return error(res, 400, 'Email and password are required');
     }
@@ -82,25 +83,26 @@ exports.register = async (req, res) => {
       );
     }
 
-    const normalizedEmail = email.toLowerCase();
+    const normalizedEmail = email.toLowerCase().trim();
 
     const exists = await pool.query(
       'SELECT id FROM users WHERE email=$1 LIMIT 1',
       [normalizedEmail]
     );
+
     if (exists.rows.length) {
       return error(res, 400, 'Email already exists');
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const hash = await bcrypt.hash(password, 10);
 
-    // Store unverified user WITH password hash
     await pool.query(
-      `INSERT INTO users (email, password_hash, verified)
-       VALUES ($1, $2, false)`,
-      [normalizedEmail, passwordHash]
+      `INSERT INTO users (email, password_hash)
+       VALUES ($1, $2)`,
+      [normalizedEmail, hash]
     );
 
+    // OTP is sent via /auth/send-otp
     return res.json({ message: 'OTP sent. Verify to complete signup.' });
 
   } catch (err) {
@@ -108,6 +110,7 @@ exports.register = async (req, res) => {
     return error(res, 500, 'Server error');
   }
 };
+
 
 
 
