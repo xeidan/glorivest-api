@@ -4,7 +4,7 @@
 const sgMail = require('@sendgrid/mail');
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-const FROM_EMAIL = process.env.FROM_EMAIL || 'no-reply@glorivest.com';
+const FROM_EMAIL = 'no-reply@glorivest.com';
 
 // ✦ Email Templates
 const EmailTpl = {
