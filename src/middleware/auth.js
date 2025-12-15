@@ -1,35 +1,47 @@
-// src/middleware/auth.js
 'use strict';
 
 const jwt = require('jsonwebtoken');
-const { JWT_SECRET } = require('../config/env');
 const { pool } = require('../config/database');
+const { JWT_SECRET } = require('../config/env');
 
 module.exports = async function auth(req, res, next) {
   try {
     const header = req.headers.authorization;
-
-    if (!header || !header.startsWith('Bearer '))
-      return res.status(401).json({ message: 'Missing token' });
-
-    const token = header.split(' ')[1];
-
-    let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (e) {
-      return res.status(401).json({ message: 'Invalid or expired token' });
+    if (!header || !header.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    const q = await pool.query(
-      'SELECT id, email, balance, bot_active FROM users WHERE id=$1 LIMIT 1',
-      [decoded.id]
+    const token = header.slice(7);
+    let payload;
+
+    try {
+      payload = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id,
+        email
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [payload.id]
     );
 
-    if (!q.rows.length)
-      return res.status(401).json({ message: 'Invalid token' });
+    if (!rows.length) {
+      return res.status(401).json({ message: 'User not found' });
+    }
 
-    req.user = q.rows[0];
+    // 🔑 minimal user object only
+    req.user = {
+      id: rows[0].id,
+      email: rows[0].email
+    };
+
     next();
   } catch (err) {
     console.error('auth middleware error:', err);
