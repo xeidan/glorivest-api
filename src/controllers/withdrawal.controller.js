@@ -31,13 +31,3 @@ exports.myWithdrawals = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
-
-
-requireLiveAccount(account);
-
-await postTransaction({
-  userId: req.user.id,
-  accountId: account.id,
-  type: 'withdrawal',
-  amountCents: -amount
-}, req.db);
