@@ -18,12 +18,12 @@ const accountRoutes = require('./routes/account.routes');
 const app = express();
 
 // ------------------------------------------------------
-// 1. CORS MUST BE FIRST
+// 1. CORS (MUST BE FIRST)
 // ------------------------------------------------------
 app.use(cors({
   origin: '*',
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.options('*', cors());
@@ -49,10 +49,13 @@ app.use('/withdraw', withdrawalRoutes);
 app.use('/leaderboard', leaderboardRoutes);
 app.use('/notify', notifyRoutes);
 app.use('/bot', botRoutes);
+
+// 🔑 IMPORTANT: mount BOTH paths (frontend uses both)
 app.use('/accounts', accountRoutes);
+app.use('/account', accountRoutes);
 
 // ------------------------------------------------------
-// 5. 404 handler
+// 5. 404 HANDLER
 // ------------------------------------------------------
 app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
