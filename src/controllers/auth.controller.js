@@ -70,35 +70,56 @@ function error(res, status = 400, message = 'Bad request') {
 exports.register = async (req, res) => {
   try {
     const { email, password, referral_code } = req.body;
-    if (!email || !password) return error(res, 400, 'Email and password are required');
-
-    if (!validatePassword(password)) {
-      return error(res, 400, 'Password must be at least 8 characters long and include a letter, a number, and a symbol.');
+    if (!email || !password) {
+      return error(res, 400, 'Email and password are required');
     }
 
-    const exists = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [email.toLowerCase()]);
-    if (exists.rows.length) return error(res, 400, 'Email already exists');
+    if (!validatePassword(password)) {
+      return error(
+        res,
+        400,
+        'Password must be at least 8 characters long and include a letter, a number, and a symbol.'
+      );
+    }
 
-    const hash = await bcrypt.hash(password, 10);
+    const exists = await pool.query(
+      'SELECT id FROM users WHERE email=$1 LIMIT 1',
+      [email.toLowerCase()]
+    );
+    if (exists.rows.length) {
+      return error(res, 400, 'Email already exists');
+    }
 
-    const q = referral_code
-      ? await pool.query(
-          `INSERT INTO users(email, password_hash, bot_active, balance, referral_code)
-           VALUES($1, $2, false, 0, $3) RETURNING id, email`,
-          [email.toLowerCase(), hash, referral_code]
-        )
-      : await pool.query(
-          `INSERT INTO users(email, password_hash, bot_active, balance)
-           VALUES($1, $2, false, 0) RETURNING id, email`,
-          [email.toLowerCase(), hash]
-        );
+    const password_hash = await bcrypt.hash(password, 10);
+    const code = genOtp();
+    const expiresAt = new Date(Date.now() + OTP_DEFAULT_TTL_MIN * 60000).toISOString();
 
-    return res.json({ message: 'Account created', user: q.rows[0] });
+    await pool.query(
+      `INSERT INTO otps (email, code, purpose, expires_at, meta)
+       VALUES ($1, $2, 'verify', $3, $4)`,
+      [
+        email.toLowerCase(),
+        code,
+        expiresAt,
+        JSON.stringify({ password_hash, referral_code })
+      ]
+    );
+
+    await sendMailSafe({
+      to: email.toLowerCase(),
+      subject: 'Your Glorivest verification code',
+      html: EmailTpl?.otp
+        ? EmailTpl.otp({ code, purpose: 'verify', email })
+        : `<p>Your OTP is <b>${code}</b></p>`
+    });
+
+    return res.json({ message: 'OTP sent. Verify to complete signup.' });
   } catch (err) {
     console.error('register error', err);
     return error(res, 500, 'Server error');
   }
 };
+
 
 // -----------------------------
 // LOGIN
@@ -171,7 +192,7 @@ exports.me = async (req, res) => {
 
     // Load user fields
     const { rows: users } = await pool.query(
-      `SELECT id, email, balance, reward_balance, referral_code, total_referrals, referral_earnings
+      `SELECT id, email, reward_balance, referral_code, total_referrals, referral_earnings
        FROM users
        WHERE id=$1
        LIMIT 1`,
@@ -196,7 +217,6 @@ exports.me = async (req, res) => {
     return res.json({
       id: user.id,
       email: user.email,
-      balance: Number(user.balance || 0),
       reward_balance: Number(user.reward_balance || 0),
       referral_code: user.referral_code,
       total_referrals: user.total_referrals || 0,
@@ -305,96 +325,110 @@ exports.sendOtp = async (req, res) => {
 exports.verifyOtp = async (req, res) => {
   try {
     const { email, code, purpose = 'verify' } = req.body;
-    if (!email || !code) return error(res, 400, 'Email and code required');
-
-    const otp = await findValidOtp(email, code, purpose);
-    if (!otp) return error(res, 400, 'Invalid or expired code');
-
-    // consume otp for verify
-    if (purpose === 'verify') await markOtpUsed(otp.id);
-
-    if (purpose === 'verify') {
-      // get user
-      const q = await pool.query(
-        'SELECT id, email FROM users WHERE email=$1 LIMIT 1',
-        [email.toLowerCase()]
-      );
-      if (!q.rows.length) return error(res, 400, 'Account not found');
-      const user = q.rows[0];
-
-      const token = signToken(user);
-
-      // AUTO-CREATE DEMO + STANDARD ACCOUNTS (ONCE)
-      try {
-        const { rows: [{ c }] } = await pool.query(
-          'SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1',
-          [user.id]
-        );
-
-        if (Number(c) === 0) {
-          // --- DEMO ACCOUNT ---
-          const demoCode = genAccountCode(user.id, 1, 'demo');
-          await pool.query(
-            `INSERT INTO accounts (
-              user_id, tier_id, account_code, status,
-              balance_cents, profit_cents, created_at
-            )
-            VALUES (
-              $1,
-              (SELECT id FROM account_tiers WHERE slug='demo' LIMIT 1),
-              $2,
-              'active',
-              0,
-              0,
-              NOW()
-            )`,
-            [user.id, demoCode]
-          );
-
-          // --- STANDARD (LIVE) ACCOUNT ---
-          const liveCode = genAccountCode(user.id, 2, 'standard');
-          await pool.query(
-            `INSERT INTO accounts (
-              user_id, tier_id, account_code, status,
-              balance_cents, profit_cents, created_at
-            )
-            VALUES (
-              $1,
-              (SELECT id FROM account_tiers WHERE slug='standard' LIMIT 1),
-              $2,
-              'active',
-              0,
-              0,
-              NOW()
-            )`,
-            [user.id, liveCode]
-          );
-        }
-      } catch (e) {
-        console.error('Auto-create demo + standard accounts failed', e);
-      }
-
-
-      // welcome email (best effort)
-      try {
-        await sendMailSafe({
-          to: email,
-          subject: 'Welcome to Glorivest',
-          html: EmailTpl?.welcome ? EmailTpl.welcome({ email }) : `<p>Welcome ${email}</p>`
-        });
-      } catch (e) {}
-
-      return res.json({ message: 'OTP verified', token, user });
+    if (!email || !code) {
+      return error(res, 400, 'Email and code required');
     }
 
-    // reset password or update email flow
-    return res.json({ message: 'OTP verified' });
+    const otp = await findValidOtp(email, code, purpose);
+    if (!otp) {
+      return error(res, 400, 'Invalid or expired code');
+    }
 
+    if (purpose !== 'verify') {
+      return error(res, 400, 'Invalid OTP purpose');
+    }
+
+    const meta = otp.meta || {};
+    if (!meta.password_hash) {
+      return error(res, 400, 'Signup session expired. Please register again.');
+    }
+
+    await markOtpUsed(otp.id);
+
+    const { rows: users } = await pool.query(
+      `INSERT INTO users (email, password_hash, verified, referral_code)
+       VALUES ($1, $2, true, $3)
+       ON CONFLICT (email)
+       DO UPDATE SET verified=true
+       RETURNING id, email`,
+      [email.toLowerCase(), meta.password_hash, meta.referral_code || null]
+    );
+
+    const user = users[0];
+    const token = signToken(user);
+
+    // ---- AUTO-CREATE DEFAULT ACCOUNTS (ONCE) ----
+    const { rows: [{ c }] } = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1`,
+      [user.id]
+    );
+
+    if (c === 0) {
+      // DEMO
+      const demoCode = genAccountCode(user.id, 1, 'demo');
+      const { rows: [demo] } = await pool.query(
+        `INSERT INTO accounts (
+          user_id, tier_id, account_code, status,
+          balance_cents, profit_cents, created_at
+        )
+        VALUES (
+          $1,
+          (SELECT id FROM account_tiers WHERE slug='demo' LIMIT 1),
+          $2,
+          'active',
+          0,
+          0,
+          NOW()
+        )
+        RETURNING id`,
+        [user.id, demoCode]
+      );
+
+      // FUND DEMO ($10,000)
+      await postTransaction({
+        userId: user.id,
+        accountId: demo.id,
+        type: 'demo_opening_balance',
+        amountCents: 1_000_000
+      });
+
+      // STANDARD
+      const liveCode = genAccountCode(user.id, 2, 'standard');
+      await pool.query(
+        `INSERT INTO accounts (
+          user_id, tier_id, account_code, status,
+          balance_cents, profit_cents, created_at
+        )
+        VALUES (
+          $1,
+          (SELECT id FROM account_tiers WHERE slug='standard' LIMIT 1),
+          $2,
+          'active',
+          0,
+          0,
+          NOW()
+        )`,
+        [user.id, liveCode]
+      );
+    }
+
+    try {
+      await sendMailSafe({
+        to: email.toLowerCase(),
+        subject: 'Welcome to Glorivest',
+        html: EmailTpl?.welcome
+          ? EmailTpl.welcome({ email })
+          : `<p>Welcome ${email}</p>`
+      });
+    } catch (_) {}
+
+    return res.json({ message: 'OTP verified', token, user });
   } catch (err) {
     console.error('verifyOtp error', err);
     return error(res, 500, 'Server error');
   }
 };
+
 
 
 
@@ -410,7 +444,9 @@ exports.createAccount = async (req, res) => {
     if (!['standard','pro','elite'].includes(tier_slug)) {
       return res.status(400).json({ message: 'Invalid tier' });
     }
-
+    if (['demo', 'standard'].includes(tier_slug)) {
+  return res.status(403).json({ message: 'Default accounts cannot be created manually' });
+}
     // ensure tier exists and get its id
     const { rows: tierRows } = await pool.query(
       `SELECT id FROM account_tiers WHERE slug=$1 LIMIT 1`,
