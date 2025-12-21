@@ -3,9 +3,6 @@
 const express = require('express');
 const router = express.Router();
 
-// ==========================
-// Middleware
-// ==========================
 const auth = require('../middleware/auth');
 const loadAccount = require('../middleware/loadAccount');
 const guardRoute = require('../middleware/guardRoute');
@@ -15,42 +12,32 @@ const {
   requireLiveAccount
 } = require('../middleware/accountGuards');
 
-// ==========================
-// Controllers
-// ==========================
 const accountController = require('../controllers/account.controller');
 const withdrawalController = require('../controllers/withdrawal.controller');
 
-console.log('accountController:', accountController);
-console.log('withdrawalController:', withdrawalController);
-
-
-// ==========================
+// ==================================================
 // DASHBOARD CORE
-// ==========================
+// ==================================================
 
-// GET /accounts
-// Used by dashboard.js to list user accounts
+// GET /accounts → list user accounts
 router.get(
   '/',
   auth,
-  accountController.getAccounts
+  accountController.getMyAccounts
 );
 
-// GET /accounts/me
-// Returns current account summary (header/dashboard)
+// GET /accounts/me → current active account
 router.get(
   '/me',
   auth,
-  accountController.me
+  accountController.getAccountById
 );
 
-// ==========================
-// DEMO ACCOUNT
-// ==========================
+// ==================================================
+// DEMO ONLY
+// ==================================================
 
 // POST /accounts/:accountId/demo-reset
-// Reset demo balance to default
 router.post(
   '/:accountId/demo-reset',
   auth,
@@ -59,12 +46,11 @@ router.post(
   accountController.resetDemo
 );
 
-// ==========================
-// LIVE ACCOUNT
-// ==========================
+// ==================================================
+// LIVE ONLY
+// ==================================================
 
 // POST /accounts/:accountId/withdraw
-// Request withdrawal from live account
 router.post(
   '/:accountId/withdraw',
   auth,
