@@ -183,51 +183,104 @@ exports.me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Load user fields
-    const { rows: users } = await pool.query(
-      `SELECT id, email, reward_balance, referral_code, total_referrals, referral_earnings
-       FROM users
-       WHERE id=$1
-       LIMIT 1`,
-      [userId]
-    );
-    if (!users.length) return error(res, 404, 'User not found');
-    const user = users[0];
-
-    // Load default (first) account with tier info
-    const { rows: accts } = await pool.query(
-      `SELECT a.id, a.account_code, a.balance_cents, t.slug AS tier_slug, t.name AS tier_name
-       FROM accounts a
-       LEFT JOIN account_tiers t ON t.id = a.tier_id
-       WHERE a.user_id=$1
-       ORDER BY a.created_at ASC
-       LIMIT 1`,
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id,
+        email,
+        reward_balance,
+        referral_code,
+        total_referrals,
+        referral_earnings
+      FROM users
+      WHERE id=$1
+      LIMIT 1
+      `,
       [userId]
     );
 
-    const first = accts[0] || null;
+    if (!rows.length) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const user = rows[0];
+
+    const { rows: accounts } = await pool.query(
+      `
+      SELECT
+        a.id,
+        a.account_code,
+        a.balance_cents,
+        t.slug AS tier_slug,
+        t.name AS tier_name
+      FROM accounts a
+      JOIN account_tiers t ON t.id = a.tier_id
+      WHERE a.user_id=$1
+      ORDER BY a.created_at ASC
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    const acc = accounts[0] || null;
 
     return res.json({
       id: user.id,
       email: user.email,
+      glorivest_id: `GV${150000 + user.id}`,
+
       reward_balance: Number(user.reward_balance || 0),
       referral_code: user.referral_code,
       total_referrals: user.total_referrals || 0,
       referral_earnings: Number(user.referral_earnings || 0),
 
-      // computed glorivest ID → GV150000 + userID
-      glorivest_id: `GV${150000 + user.id}`,
-
-      // account fields
-      default_account_id: first ? first.id : null,
-      default_account_code: first ? first.account_code : null,
-      default_account_tier: first ? { slug: first.tier_slug, name: first.tier_name } : null
+      default_account_id: acc?.id || null,
+      default_account_code: acc?.account_code || null,
+      default_account_balance: acc ? acc.balance_cents / 100 : 0,
+      default_account_tier: acc
+        ? { slug: acc.tier_slug, name: acc.tier_name }
+        : null
     });
   } catch (err) {
     console.error('me error', err);
-    return error(res, 500, 'Server error');
+    return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+
+// -----------------------------
+// ACCOUNTS
+// -----------------------------
+exports.getAccounts = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        a.id,
+        a.account_code,
+        a.balance_cents,
+        a.profit_cents,
+        a.status,
+        t.slug AS tier_slug,
+        t.name AS tier_name
+      FROM accounts a
+      JOIN account_tiers t ON t.id = a.tier_id
+      WHERE a.user_id=$1
+      ORDER BY a.created_at ASC
+      `,
+      [userId]
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('getAccounts error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 
 
 

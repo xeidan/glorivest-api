@@ -1,3 +1,5 @@
+'use strict';
+
 const express = require('express');
 const router = express.Router();
 
@@ -11,24 +13,42 @@ const {
 } = require('../middleware/accountGuards');
 
 const accountController = require('../controllers/account.controller');
-const withdrawalController = require('../controllers/withdrawal.controller'); // 🔑 FIX
+const withdrawalController = require('../controllers/withdrawal.controller');
 
-// --------------------------------------------------
+// ==================================================
+// DASHBOARD CORE (WHAT WAS MISSING)
+// ==================================================
+
+// ✅ Used by dashboard.js → GET /accounts
+router.get(
+  '/',
+  auth,
+  accountController.getAccounts
+);
+
+// ✅ Used by dashboard.js → GET /account/me
+router.get(
+  '/me',
+  auth,
+  accountController.me
+);
+
+// ==================================================
 // DEMO-ONLY: Reset demo balance
-// --------------------------------------------------
+// ==================================================
 router.post(
-  '/accounts/:accountId/demo-reset',
+  '/:accountId/demo-reset',
   auth,
   loadAccount,
   guardRoute(requireDemoAccount),
   accountController.resetDemo
 );
 
-// --------------------------------------------------
+// ==================================================
 // LIVE-ONLY: Withdraw funds
-// --------------------------------------------------
+// ==================================================
 router.post(
-  '/accounts/:accountId/withdraw',
+  '/:accountId/withdraw',
   auth,
   loadAccount,
   requireLiveAccount,
