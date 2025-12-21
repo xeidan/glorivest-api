@@ -42,7 +42,7 @@ function validatePassword(password) {
 // -----------------------------
 // REGISTER (OTP ONLY, NO USER)
 // -----------------------------
-exports.register = async (req, res) => {
+const register = async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -89,7 +89,7 @@ exports.register = async (req, res) => {
 // -----------------------------
 // VERIFY OTP (CREATE USER + WALLETS)
 // -----------------------------
-exports.verifyOtp = async (req, res) => {
+const verifyOtp = async (req, res) => {
   const client = await pool.connect();
   try {
     const { email, code, purpose = 'verify' } = req.body;
@@ -217,7 +217,7 @@ exports.verifyOtp = async (req, res) => {
 // -----------------------------
 // LOGIN
 // -----------------------------
-exports.login = async (req, res) => {
+const login = async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -269,7 +269,7 @@ exports.login = async (req, res) => {
 // -----------------------------
 // ME (WALLET-BASED)
 // -----------------------------
-exports.me = async (req, res) => {
+const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
@@ -314,7 +314,7 @@ exports.me = async (req, res) => {
 // -----------------------------
 // DEVICE HISTORY
 // -----------------------------
-exports.getDeviceHistory = async (req, res) => {
+const getDeviceHistory = async (req, res) => {
   try {
     const devices = await getDevices(req.user.id);
     return res.json({ devices });
