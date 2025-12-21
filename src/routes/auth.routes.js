@@ -7,32 +7,25 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const authCtrl = require('../controllers/auth.controller');
 
-
-
-// Public routes
+// -----------------------------
+// PUBLIC ROUTES
+// -----------------------------
 router.post('/register', authCtrl.register);
-
-router.post('/login', (req, res, next) => {
-  console.log('Login hit');
-  next();
-});
-
-router.post('/login', authLimiter, authCtrl.login);
+router.post('/login', authCtrl.login);
 
 router.post('/send-otp', authCtrl.sendOtp);
 router.post('/verify-otp', authCtrl.verifyOtp);
-router.post('/resend-otp', authCtrl.resendOtp);
 router.post('/reset-password', authCtrl.resetPassword);
 
-// NEW secure routes (corrected)
+// -----------------------------
+// AUTHENTICATED ROUTES
+// -----------------------------
+router.get('/me', auth, authCtrl.me);
+router.get('/devices', auth, authCtrl.getDeviceHistory);
+
 router.post('/change-password', auth, authCtrl.changePassword);
 router.post('/update-email/request', auth, authCtrl.requestEmailUpdate);
 router.post('/update-email/confirm', auth, authCtrl.confirmEmailUpdate);
-router.get('/devices', auth, authCtrl.getDeviceHistory);
 router.post('/delete-account', auth, authCtrl.deleteAccount);
-
-
-// Authenticated user profile
-router.get('/me', auth, authCtrl.me);
 
 module.exports = router;

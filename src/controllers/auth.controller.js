@@ -575,11 +575,11 @@ module.exports = {
   login,
   sendOtp,
   verifyOtp,
-  me,
   resetPassword,
   changePassword,
   deleteAccount,
   requestEmailUpdate,
   confirmEmailUpdate,
-  getDeviceHistory
+  getDeviceHistory,
+  me
 };
