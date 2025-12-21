@@ -5,6 +5,7 @@ const router = require('express').Router();
 const authCtrl = require('../controllers/auth.controller');
 const { authLimiter } = require('../config/rateLimiters');
 const auth = require('../middleware/auth');
+console.log('AUTH CONTROLLER EXPORTS:', Object.keys(authController));
 
 // Public routes
 router.post('/register', authCtrl.register);
