@@ -16,7 +16,9 @@ module.exports = async function auth(req, res, next) {
 
     const { rows } = await pool.query(
       `
-      SELECT id, email
+      SELECT
+        id,
+        email
       FROM users
       WHERE id = $1
       LIMIT 1
@@ -28,7 +30,7 @@ module.exports = async function auth(req, res, next) {
       return res.status(401).json({ message: 'Invalid token' });
     }
 
-    req.user = rows[0];
+    req.user = rows[0]; // 👈 NO balance, NO verified
     next();
   } catch (err) {
     console.error('auth middleware error:', err);
