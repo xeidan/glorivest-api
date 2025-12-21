@@ -1,6 +1,4 @@
-// src/controllers/auth.controller.js
 'use strict';
-
 
 const pool = require('../config/database').pool;
 const bcrypt = require('bcrypt');
@@ -8,69 +6,45 @@ const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
 const { sendMailSafe, EmailTpl } = require('../utils/email');
 const { logDevice, getDevices } = require('../utils/device');
-const { postTransaction } = require('../services/ledger.service');
-
-const { genAccountCode, tierSlugToCode } = require('../utils/accounts');
-const STRONG_PASSWORD_REGEX = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
-const OTP_DEFAULT_TTL_MIN = 10;
 
 // -----------------------------
-// Utility helpers
+// Constants
+// -----------------------------
+const OTP_TTL_MIN = 10;
+const DEMO_BALANCE_CENTS = 1_000_000;
+
+// -----------------------------
+// Helpers
 // -----------------------------
 function signToken(user) {
-  return jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(
+    { id: user.id, email: user.email },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
 }
 
 function genOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-async function saveOtp({ email, user_id = null, purpose, code, ttlMinutes = OTP_DEFAULT_TTL_MIN }) {
-  const expiresAt = new Date(Date.now() + ttlMinutes * 60000).toISOString();
-  const q = await pool.query(
-    `INSERT INTO otps(email, user_id, code, purpose, expires_at)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, expires_at`,
-    [email.toLowerCase(), user_id, code, purpose, expiresAt]
-  );
-  return q.rows[0];
+function error(res, status = 400, message = 'Bad request') {
+  return res.status(status).json({ message });
 }
 
-async function markOtpUsed(id) {
-  await pool.query(`UPDATE otps SET used = true WHERE id=$1`, [id]);
-}
-
-async function findValidOtp(email, code, purpose) {
-  const q = await pool.query(
-    `SELECT *
-     FROM otps
-     WHERE email=$1
-       AND code=$2
-       AND purpose=$3
-       AND used=false
-       AND expires_at > NOW()
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [email.toLowerCase(), code, purpose]
-  );
-  return q.rows[0];
-}
+const STRONG_PASSWORD_REGEX =
+  /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 
 function validatePassword(password) {
   return STRONG_PASSWORD_REGEX.test(password);
 }
 
-function error(res, status = 400, message = 'Bad request') {
-  return res.status(status).json({ message });
-}
-
 // -----------------------------
-// REGISTER
+// REGISTER (OTP ONLY, NO USER)
 // -----------------------------
 exports.register = async (req, res) => {
   try {
     const { email, password } = req.body;
-
     if (!email || !password) {
       return error(res, 400, 'Email and password are required');
     }
@@ -79,35 +53,161 @@ exports.register = async (req, res) => {
       return error(
         res,
         400,
-        'Password must be at least 8 characters long and include a letter, a number, and a symbol.'
+        'Password must be at least 8 characters and include a letter, number, and symbol'
       );
     }
 
     const normalizedEmail = email.toLowerCase().trim();
-
-    const exists = await pool.query(
-      'SELECT id FROM users WHERE email=$1 LIMIT 1',
-      [normalizedEmail]
-    );
-
-    if (exists.rows.length) {
-      return error(res, 400, 'Email already exists');
-    }
-
     const hash = await bcrypt.hash(password, 10);
+    const code = genOtp();
 
     await pool.query(
-      `INSERT INTO users (email, password_hash)
-       VALUES ($1, $2)`,
-      [normalizedEmail, hash]
+      `
+      INSERT INTO otps (email, code, purpose, expires_at, meta)
+      VALUES ($1, $2, 'verify', NOW() + INTERVAL '${OTP_TTL_MIN} minutes', $3)
+      `,
+      [normalizedEmail, code, JSON.stringify({ password_hash: hash })]
     );
 
-    // OTP is sent via /auth/send-otp
-    return res.json({ message: 'OTP sent. Verify to complete signup.' });
+    await sendMailSafe({
+      to: normalizedEmail,
+      subject: 'Your Glorivest verification code',
+      html: EmailTpl?.otp
+        ? EmailTpl.otp({ code, purpose: 'verify', email: normalizedEmail })
+        : `<p>Your OTP is <b>${code}</b></p>`
+    });
 
+    return res.json({ message: 'OTP sent' });
   } catch (err) {
     console.error('register error', err);
     return error(res, 500, 'Server error');
+  }
+};
+
+
+
+// -----------------------------
+// VERIFY OTP (CREATE USER + WALLETS)
+// -----------------------------
+exports.verifyOtp = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { email, code, purpose = 'verify' } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ message: 'Email and code required' });
+    }
+
+    await client.query('BEGIN');
+
+    // 1. Validate OTP
+    const otpQ = await client.query(
+      `
+      SELECT * FROM otps
+      WHERE email=$1
+        AND code=$2
+        AND purpose=$3
+        AND used=false
+        AND expires_at > now()
+      LIMIT 1
+      `,
+      [email.toLowerCase(), code, purpose]
+    );
+
+    if (!otpQ.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+
+    const otp = otpQ.rows[0];
+
+    // 2. Mark OTP used
+    await client.query(`UPDATE otps SET used=true WHERE id=$1`, [otp.id]);
+
+    // 3. Fetch user (must already exist from /register)
+    const userQ = await client.query(
+      `SELECT id, email FROM users WHERE email=$1 LIMIT 1`,
+      [email.toLowerCase()]
+    );
+
+    if (!userQ.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'User not found' });
+    }
+
+    const user = userQ.rows[0];
+
+    // 4. Check if wallets already exist
+    const walletsQ = await client.query(
+      `SELECT 1 FROM wallets WHERE user_id=$1 LIMIT 1`,
+      [user.id]
+    );
+
+    if (!walletsQ.rows.length) {
+      // REAL wallet
+      const real = await client.query(
+        `
+        INSERT INTO wallets (user_id, code, type)
+        VALUES ($1, $2, 'REAL')
+        RETURNING id
+        `,
+        [user.id, `GV${user.id}-REAL`]
+      );
+
+      // DEMO wallet
+      const demo = await client.query(
+        `
+        INSERT INTO wallets (user_id, code, type, balance_cents)
+        VALUES ($1, $2, 'DEMO', 1000000)
+        RETURNING id
+        `,
+        [user.id, `GV${user.id}-DEMO`]
+      );
+
+      // DEMO opening ledger
+      await client.query(
+        `
+        INSERT INTO ledger (
+          user_id,
+          wallet_id,
+          type,
+          amount_cents,
+          balance_after_cents
+        )
+        VALUES ($1, $2, 'demo_opening', 1000000, 1000000)
+        `,
+        [user.id, demo.rows[0].id]
+      );
+
+      // REFERRAL wallet
+      await client.query(
+        `
+        INSERT INTO wallets (user_id, code, type)
+        VALUES ($1, $2, 'REFERRAL')
+        `,
+        [user.id, `GV${user.id}-REF`]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.json({
+      message: 'OTP verified',
+      token,
+      user
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('verifyOtp error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  } finally {
+    client.release();
   }
 };
 
@@ -120,56 +220,46 @@ exports.register = async (req, res) => {
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return error(res, 400, 'Email and password are required');
+    if (!email || !password) {
+      return error(res, 400, 'Email and password required');
+    }
 
-    const q = await pool.query('SELECT id, email, password_hash FROM users WHERE email=$1 LIMIT 1', [email.toLowerCase()]);
-    if (!q.rows.length) return error(res, 400, 'Invalid credentials');
+    const { rows } = await pool.query(
+      `SELECT id, email, password_hash FROM users WHERE email=$1 LIMIT 1`,
+      [email.toLowerCase()]
+    );
 
-    const user = q.rows[0];
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) {
-      // Optionally log failed attempt here
+    if (!rows.length) {
       return error(res, 400, 'Invalid credentials');
     }
 
-    // Device logging + basic suspicious detection
+    const user = rows[0];
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return error(res, 400, 'Invalid credentials');
+    }
+
+    // device logging
     const userAgent = req.headers['user-agent'] || 'unknown';
-    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip || req.connection.remoteAddress || 'unknown';
+    const ip =
+      req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+      req.ip ||
+      'unknown';
 
     try {
       await logDevice(user.id, userAgent, ip);
-    } catch (e) {
-      console.warn('logDevice failed', e);
-    }
-
-    let suspicious = false;
-    try {
-      const devices = await getDevices(user.id); // most recent first
-      if (devices && devices.length > 1) {
-        const previous = devices[1]; // second-most recent is previous
-        if (previous.ip_address !== ip || previous.user_agent !== userAgent) {
-          suspicious = true;
-        }
-      }
-    } catch (e) {
-      console.warn('getDevices failed', e);
-    }
-
-    // Send email alert (best-effort)
-    try {
-      await sendMailSafe({
-        to: user.email,
-        subject: suspicious ? 'Suspicious Login Detected on Your Glorivest Account' : 'New Login to Your Glorivest Account',
-        html: EmailTpl?.loginAlert
-          ? EmailTpl.loginAlert({ ip, user_agent: userAgent, time: new Date().toISOString() })
-          : `<p>New login detected:</p><p><b>IP:</b> ${ip}</p><p><b>Device:</b> ${userAgent}</p>`
-      });
-    } catch (e) {
-      console.warn('sendMailSafe(login alert) failed', e);
-    }
+    } catch (_) {}
 
     const token = signToken(user);
-    return res.json({ token, user: { id: user.id, email: user.email }, suspicious });
+
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        glorivest_id: `GV${150000 + user.id}`
+      }
+    });
   } catch (err) {
     console.error('login error', err);
     return error(res, 500, 'Server error');
@@ -177,21 +267,15 @@ exports.login = async (req, res) => {
 };
 
 // -----------------------------
-// ME
+// ME (WALLET-BASED)
 // -----------------------------
 exports.me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const { rows } = await pool.query(
+    const { rows: userRows } = await pool.query(
       `
-      SELECT
-        id,
-        email,
-        reward_balance,
-        referral_code,
-        total_referrals,
-        referral_earnings
+      SELECT id, email
       FROM users
       WHERE id=$1
       LIMIT 1
@@ -199,501 +283,31 @@ exports.me = async (req, res) => {
       [userId]
     );
 
-    if (!rows.length) {
+    if (!userRows.length) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const user = rows[0];
+    const user = userRows[0];
 
-    const { rows: accounts } = await pool.query(
+    const { rows: wallets } = await pool.query(
       `
-      SELECT
-        a.id,
-        a.account_code,
-        a.balance_cents,
-        t.slug AS tier_slug,
-        t.name AS tier_name
-      FROM accounts a
-      JOIN account_tiers t ON t.id = a.tier_id
-      WHERE a.user_id=$1
-      ORDER BY a.created_at ASC
-      LIMIT 1
+      SELECT id, code, type, balance_cents, status
+      FROM wallets
+      WHERE user_id=$1
+      ORDER BY created_at ASC
       `,
       [userId]
     );
-
-    const acc = accounts[0] || null;
 
     return res.json({
       id: user.id,
       email: user.email,
       glorivest_id: `GV${150000 + user.id}`,
-
-      reward_balance: Number(user.reward_balance || 0),
-      referral_code: user.referral_code,
-      total_referrals: user.total_referrals || 0,
-      referral_earnings: Number(user.referral_earnings || 0),
-
-      default_account_id: acc?.id || null,
-      default_account_code: acc?.account_code || null,
-      default_account_balance: acc ? acc.balance_cents / 100 : 0,
-      default_account_tier: acc
-        ? { slug: acc.tier_slug, name: acc.tier_name }
-        : null
+      wallets
     });
   } catch (err) {
     console.error('me error', err);
     return res.status(500).json({ message: 'Server error' });
-  }
-};
-
-
-
-// -----------------------------
-// ACCOUNTS
-// -----------------------------
-exports.getAccounts = async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    const { rows } = await pool.query(
-      `
-      SELECT
-        a.id,
-        a.account_code,
-        a.balance_cents,
-        a.profit_cents,
-        a.status,
-        t.slug AS tier_slug,
-        t.name AS tier_name
-      FROM accounts a
-      JOIN account_tiers t ON t.id = a.tier_id
-      WHERE a.user_id=$1
-      ORDER BY a.created_at ASC
-      `,
-      [userId]
-    );
-
-    return res.json(rows);
-  } catch (err) {
-    console.error('getAccounts error', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
-
-
-
-
-// -----------------------------
-// SEND OTP (HARDENED)
-// -----------------------------
-exports.sendOtp = async (req, res) => {
-  try {
-    const { email, purpose = 'verify' } = req.body;
-    if (!email) return error(res, 400, 'Email required');
-
-    const normalizedEmail = email.toLowerCase();
-
-    let user = null;
-
-    // RESET requires existing account
-    if (purpose === 'reset') {
-      const { rows } = await pool.query(
-        'SELECT id FROM users WHERE email=$1 LIMIT 1',
-        [normalizedEmail]
-      );
-      if (!rows.length) {
-        return error(res, 400, 'No account with that email');
-      }
-      user = rows[0];
-    }
-
-    // VERIFY may or may not already exist
-    if (purpose === 'verify') {
-      const { rows } = await pool.query(
-        'SELECT id FROM users WHERE email=$1 LIMIT 1',
-        [normalizedEmail]
-      );
-      if (rows.length) user = rows[0];
-    }
-
-    // Generate OTP
-    const code = genOtp();
-
-    // Persist OTP
-    const otpRow = await saveOtp({
-      email: normalizedEmail,
-      user_id: user ? user.id : null,
-      purpose,
-      code
-    });
-
-    // 🔍 LOG — critical for debugging delivery
-    console.log('[OTP GENERATED]', {
-      email: normalizedEmail,
-      purpose,
-      code,
-      expires_at: otpRow.expires_at
-    });
-
-    // Build email
-    const subject =
-      purpose === 'verify'
-        ? 'Your Glorivest verification code'
-        : 'Your Glorivest password reset code';
-
-    const html = EmailTpl?.otp
-      ? EmailTpl.otp({ code, purpose, email: normalizedEmail })
-      : `<p>Your Glorivest OTP is <b>${code}</b></p>`;
-
-    // 🚨 SEND EMAIL — DO NOT SWALLOW ERRORS
-    await sendMailSafe({
-      to: normalizedEmail,
-      subject,
-      html
-    });
-
-    return res.json({
-      message: 'OTP sent',
-      expires_at: otpRow.expires_at
-    });
-
-  } catch (err) {
-    console.error('sendOtp error:', err);
-    return error(res, 500, 'Failed to send OTP');
-  }
-};
-
-
-// -----------------------------
-// VERIFY OTP
-// -----------------------------
-exports.verifyOtp = async (req, res) => {
-  try {
-    const { email, code, purpose = 'verify' } = req.body;
-
-    if (!email || !code) {
-      return error(res, 400, 'Email and code required');
-    }
-
-    const normalizedEmail = email.toLowerCase().trim();
-
-    const otp = await findValidOtp(normalizedEmail, code, purpose);
-    if (!otp) {
-      return error(res, 400, 'Invalid or expired code');
-    }
-
-    // Mark OTP as used
-    await markOtpUsed(otp.id);
-
-    // Create user IF NOT EXISTS (NO verified column)
-    const { rows } = await pool.query(
-      `INSERT INTO users (email)
-       VALUES ($1)
-       ON CONFLICT (email)
-       DO NOTHING
-       RETURNING id, email`,
-      [normalizedEmail]
-    );
-
-    let user;
-
-    if (rows.length) {
-      user = rows[0];
-    } else {
-      const q = await pool.query(
-        `SELECT id, email FROM users WHERE email=$1 LIMIT 1`,
-        [normalizedEmail]
-      );
-      user = q.rows[0];
-    }
-
-    const token = signToken(user);
-
-    // AUTO-CREATE DEFAULT ACCOUNTS (ONLY ONCE)
-    const exists = await pool.query(
-      `SELECT 1 FROM accounts WHERE user_id=$1 LIMIT 1`,
-      [user.id]
-    );
-
-    if (!exists.rows.length) {
-      // DEMO
-      const demoCode = genAccountCode(user.id, 1, 'demo');
-      await pool.query(
-        `INSERT INTO accounts (
-          user_id, tier_id, account_code, status,
-          balance_cents, profit_cents, created_at
-        )
-        VALUES (
-          $1,
-          (SELECT id FROM account_tiers WHERE slug='demo' LIMIT 1),
-          $2,
-          'active',
-          0,
-          0,
-          NOW()
-        )`,
-        [user.id, demoCode]
-      );
-
-      // STANDARD
-      const stdCode = genAccountCode(user.id, 2, 'standard');
-      await pool.query(
-        `INSERT INTO accounts (
-          user_id, tier_id, account_code, status,
-          balance_cents, profit_cents, created_at
-        )
-        VALUES (
-          $1,
-          (SELECT id FROM account_tiers WHERE slug='standard' LIMIT 1),
-          $2,
-          'active',
-          0,
-          0,
-          NOW()
-        )`,
-        [user.id, stdCode]
-      );
-    }
-
-    // Welcome email (best effort)
-    try {
-      await sendMailSafe({
-        to: normalizedEmail,
-        subject: 'Welcome to Glorivest',
-        html: EmailTpl?.welcome
-          ? EmailTpl.welcome({ email: normalizedEmail })
-          : `<p>Welcome ${normalizedEmail}</p>`
-      });
-    } catch (_) {}
-
-    return res.json({
-      message: 'OTP verified',
-      token,
-      user
-    });
-
-  } catch (err) {
-    console.error('verifyOtp error', err);
-    return error(res, 500, 'Server error');
-  }
-};
-
-
-
-
-
-
-// -----------------------------
-// CREATE ACCOUNT
-// -----------------------------
-
-exports.createAccount = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const tier_slug = (req.body.tier_slug || req.body.tier_code || req.body.tier || '').toString().toLowerCase();
-    if (!['standard','pro','elite'].includes(tier_slug)) {
-      return res.status(400).json({ message: 'Invalid tier' });
-    }
-    if (['demo', 'standard'].includes(tier_slug)) {
-  return res.status(403).json({ message: 'Default accounts cannot be created manually' });
-}
-    // ensure tier exists and get its id
-    const { rows: tierRows } = await pool.query(
-      `SELECT id FROM account_tiers WHERE slug=$1 LIMIT 1`,
-      [tier_slug]
-    );
-    if (!tierRows.length) return res.status(400).json({ message: 'Invalid tier' });
-    const tierId = tierRows[0].id;
-
-    // compute next sequence (count existing accounts)
-    const { rows: [{ c }] } = await pool.query(
-      `SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1`,
-      [userId]
-    );
-    const nextSeq = Number(c) + 1; // if user already had 1 (default) => nextSeq = 2
-
-    const account_code = genAccountCode(userId, nextSeq, tier_slug);
-
-    const { rows: [acc] } = await pool.query(
-      `INSERT INTO accounts (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
-       VALUES ($1, $2, $3, 'active', 0, 0, NOW())
-       RETURNING id, user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at`,
-      [userId, tierId, account_code]
-    );
-
-    // return a small enriched payload for frontend convenience
-    return res.status(201).json({
-      id: acc.id,
-      account_code: acc.account_code,
-      status: acc.status,
-      balance_cents: acc.balance_cents,
-      profit_cents: acc.profit_cents,
-      created_at: acc.created_at,
-      tier: tier_slug,
-      tier_code: tierSlugToCode(tier_slug)
-    });
-  } catch (err) {
-    console.error('createAccount error', err);
-    if (String(err.code) === '23505') {
-      return res.status(409).json({ message: 'Account code conflict, retry' });
-    }
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
-
-
-
-// -----------------------------
-// RESET PASSWORD (OTP-based)
-// -----------------------------
-exports.resetPassword = async (req, res) => {
-  try {
-    const { email, code, newPassword } = req.body;
-    if (!email || !code || !newPassword) return error(res, 400, 'Email, code and new password are required');
-
-    if (!validatePassword(newPassword)) {
-      return error(res, 400, 'Password must be at least 8 characters long and include a letter, a number, and a symbol.');
-    }
-
-    const otp = await findValidOtp(email, code, 'reset');
-    if (!otp) return error(res, 400, 'Invalid or expired code');
-
-    const q = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [email.toLowerCase()]);
-    if (!q.rows.length) return error(res, 400, 'Account not found');
-
-    const hash = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, q.rows[0].id]);
-
-    await markOtpUsed(otp.id); // consume OTP after successful reset
-    return res.json({ message: 'Password reset successful' });
-  } catch (err) {
-    console.error('resetPassword error', err);
-    return error(res, 500, 'Server error');
-  }
-};
-
-// -----------------------------
-// CHANGE PASSWORD (Authenticated)
-// -----------------------------
-exports.changePassword = async (req, res) => {
-  try {
-    const { oldPassword, newPassword } = req.body;
-    if (!oldPassword || !newPassword) return error(res, 400, 'Both current and new passwords are required');
-
-    if (!validatePassword(newPassword)) {
-      return error(res, 400, 'New password must be at least 8 characters long and include a letter, a number, and a symbol.');
-    }
-
-    const q = await pool.query('SELECT id, password_hash FROM users WHERE id=$1 LIMIT 1', [req.user.id]);
-    if (!q.rows.length) return error(res, 404, 'User not found');
-
-    const user = q.rows[0];
-    const match = await bcrypt.compare(oldPassword, user.password_hash);
-    if (!match) return error(res, 400, 'Incorrect current password');
-
-    const hash = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, user.id]);
-
-    return res.json({ message: 'Password changed successfully' });
-  } catch (err) {
-    console.error('changePassword error', err);
-    return error(res, 500, 'Server error');
-  }
-};
-
-// -----------------------------
-// DELETE ACCOUNT (Soft delete)
-// -----------------------------
-exports.deleteAccount = async (req, res) => {
-  try {
-    const { password } = req.body;
-    if (!password) return error(res, 400, 'Password required');
-
-    const q = await pool.query('SELECT id, password_hash FROM users WHERE id=$1 LIMIT 1', [req.user.id]);
-    if (!q.rows.length) return error(res, 404, 'User not found');
-
-    const user = q.rows[0];
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) return error(res, 400, 'Incorrect password');
-
-    // Soft-delete column must exist (see migrations). If you want hard delete, replace with DELETE.
-    await pool.query('UPDATE users SET deleted_at = NOW() WHERE id=$1', [user.id]);
-
-    return res.json({ message: 'Account deleted (soft)' });
-  } catch (err) {
-    console.error('deleteAccount error', err);
-    return error(res, 500, 'Server error');
-  }
-};
-
-// -----------------------------
-// EMAIL UPDATE (request + confirm)
-// -----------------------------
-exports.requestEmailUpdate = async (req, res) => {
-  try {
-    const { newEmail } = req.body;
-    if (!newEmail) return error(res, 400, 'New email required');
-
-    // Ensure email not in use
-    const exists = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [newEmail.toLowerCase()]);
-    if (exists.rows.length) return error(res, 400, 'Email already in use');
-
-    const code = genOtp();
-    await saveOtp({ email: newEmail, user_id: req.user.id, purpose: 'update-email', code, ttlMinutes: 15 });
-
-    try {
-      await sendMailSafe({
-        to: newEmail,
-        subject: 'Verify New Email Address',
-        html: EmailTpl?.otp ? EmailTpl.otp({ code, purpose: 'update-email', email: newEmail }) : `<p>Your verification code is <b>${code}</b></p>`
-      });
-    } catch (e) {
-      console.warn('requestEmailUpdate: sendMailSafe failed', e);
-    }
-
-    return res.json({ message: 'Verification code sent to new email' });
-  } catch (err) {
-    console.error('requestEmailUpdate error', err);
-    return error(res, 500, 'Server error');
-  }
-};
-
-exports.confirmEmailUpdate = async (req, res) => {
-  try {
-    const { newEmail, code } = req.body;
-    if (!newEmail || !code) return error(res, 400, 'Email and code required');
-
-    const otp = await findValidOtp(newEmail, code, 'update-email');
-    if (!otp) return error(res, 400, 'Invalid or expired code');
-
-    // Ensure OTP belongs to the requesting user
-    if (otp.user_id !== req.user.id) return error(res, 403, 'OTP not valid for this user');
-
-    await pool.query('UPDATE users SET email=$1 WHERE id=$2', [newEmail.toLowerCase(), req.user.id]);
-    await markOtpUsed(otp.id);
-    console.log('[OTP VERIFIED]', {
-      email: normalizedEmail,
-      code,
-      purpose
-    });
-
-
-    // Notify old email (best-effort)
-    try {
-      await sendMailSafe({
-        to: req.user.email,
-        subject: 'Your Glorivest email was changed',
-        html: EmailTpl?.emailChanged ? EmailTpl.emailChanged({ oldEmail: req.user.email, newEmail }) : `<p>Your account email was changed to ${newEmail}</p>`
-      });
-    } catch (e) {
-      console.warn('confirmEmailUpdate: notify old email failed', e);
-    }
-
-    return res.json({ message: 'Email updated successfully' });
-  } catch (err) {
-    console.error('confirmEmailUpdate error', err);
-    return error(res, 500, 'Server error');
   }
 };
 
@@ -708,22 +322,4 @@ exports.getDeviceHistory = async (req, res) => {
     console.error('getDeviceHistory error', err);
     return error(res, 500, 'Server error');
   }
-};
-
-// -----------------------------
-// Exports
-// -----------------------------
-module.exports = {
-  register: exports.register,
-  login: exports.login,
-  me: exports.me,
-  sendOtp: exports.sendOtp,
-  verifyOtp: exports.verifyOtp,
-  resendOtp: exports.sendOtp,
-  resetPassword: exports.resetPassword,
-  changePassword: exports.changePassword,
-  deleteAccount: exports.deleteAccount,
-  requestEmailUpdate: exports.requestEmailUpdate,
-  confirmEmailUpdate: exports.confirmEmailUpdate,
-  getDeviceHistory: exports.getDeviceHistory
 };

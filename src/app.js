@@ -43,7 +43,7 @@ app.use(morgan('dev'));
 // 4. ROUTES
 // ------------------------------------------------------
 app.use('/auth', authRoutes);
-app.use('/wallet', walletRoutes);
+app.use('/wallets', walletRoutes);
 app.use('/deposit', depositRoutes);
 app.use('/withdraw', withdrawalRoutes);
 app.use('/leaderboard', leaderboardRoutes);

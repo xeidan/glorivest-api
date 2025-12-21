@@ -91,17 +91,16 @@ exports.getAccountById = async (req, res) => {
 ========================================================= */
 exports.createAccount = async (req, res) => {
   const client = await pool.connect();
-
   try {
     const userId = req.user.id;
-    const { tier_code } = req.body; // demo | standard | pro | elite
+    const { tier_code } = req.body;
 
     if (!tier_code) {
       return res.status(400).json({ message: 'tier_code is required' });
     }
 
     const tierRes = await client.query(
-      'SELECT id, name, slug FROM account_tiers WHERE slug = $1 LIMIT 1',
+      'SELECT id, name, slug FROM account_tiers WHERE slug=$1 LIMIT 1',
       [tier_code]
     );
 
@@ -111,95 +110,86 @@ exports.createAccount = async (req, res) => {
 
     const tier = tierRes.rows[0];
     const isDemo = tier.slug === 'demo';
-    const startingBalance = isDemo ? 1_000_000 : 0; // $10,000 demo
+    const startingBalance = isDemo ? 1_000_000 : 0;
 
     await client.query('BEGIN');
 
-    const countRes = await client.query(
-      'SELECT COUNT(*)::int AS c FROM accounts WHERE user_id = $1',
+    const cntRes = await client.query(
+      'SELECT COUNT(*)::int AS c FROM accounts WHERE user_id=$1',
       [userId]
     );
 
-    const seq = (countRes.rows[0]?.c || 0) + 1;
-    const accountCode = genAccountCode(userId, seq, tier.slug);
+    const seq = cntRes.rows[0].c + 1;
+    const account_code = genAccountCode(userId, seq, tier.slug);
 
-    const insertRes = await client.query(
-      `INSERT INTO accounts (
-         user_id,
-         tier_id,
-         account_code,
-         status,
-         balance_cents,
-         profit_cents,
-         created_at
-       )
+    const insert = await client.query(
+      `INSERT INTO accounts
+       (user_id, tier_id, account_code, status, balance_cents, profit_cents, created_at)
        VALUES ($1, $2, $3, 'active', $4, 0, NOW())
        RETURNING id, account_code, status, balance_cents, profit_cents, created_at`,
-      [userId, tier.id, accountCode, startingBalance]
+      [userId, tier.id, account_code, startingBalance]
     );
 
-    const account = insertRes.rows[0];
+    const acc = insert.rows[0];
 
-    // Opening ledger entry
-    await postTransaction(
-      {
-        userId,
-        accountId: account.id,
-        type: 'opening_balance',
-        amountCents: startingBalance
-      },
-      client
-    );
+    await postTransaction({
+      userId,
+      accountId: acc.id,
+      type: 'opening_balance',
+      amountCents: startingBalance
+    }, client);
 
     await client.query('COMMIT');
 
     return res.status(201).json({
-      ...account,
-      tier: {
-        id: tier.id,
-        slug: tier.slug,
-        name: tier.name
-      }
+      ...acc,
+      tier: { id: tier.id, slug: tier.slug, name: tier.name }
     });
 
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    console.error('createAccount error', err);
-
-    if (String(err.code) === '23505') {
-      return res.status(409).json({ message: 'Account code conflict' });
-    }
-
+    await client.query('ROLLBACK');
+    console.error(err);
     return res.status(500).json({ message: 'Server error' });
   } finally {
     client.release();
   }
 };
 
+
 /* =========================================================
    RESET DEMO ACCOUNT
 ========================================================= */
 exports.resetDemo = async (req, res) => {
-  const account = req.account;
+  const client = await pool.connect();
+  try {
+    const account = req.account;
+    requireDemoAccount(account);
 
-  requireDemoAccount(account);
+    const DEFAULT = 1_000_000;
+    const diff = DEFAULT - account.balance_cents;
 
-  const DEFAULT = 1_000_000; // $10,000
-  const diff = DEFAULT - Number(account.balance_cents || 0);
+    if (diff === 0) {
+      return res.json({ success: true });
+    }
 
-  if (diff === 0) {
-    return res.json({ success: true, message: 'Already at default balance' });
-  }
+    await client.query('BEGIN');
 
-  await postTransaction(
-    {
+    await postTransaction({
       userId: req.user.id,
       accountId: account.id,
       type: 'demo_reset',
       amountCents: diff
-    },
-    req.db
-  );
+    }, client);
 
-  return res.json({ success: true });
+    await client.query('COMMIT');
+    res.json({ success: true });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: 'Demo reset failed' });
+  } finally {
+    client.release();
+  }
 };
+

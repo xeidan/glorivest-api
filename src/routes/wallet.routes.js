@@ -1,11 +1,21 @@
 // src/routes/wallet.routes.js
 'use strict';
 
-const router = require('express').Router();
-const walletCtrl = require('../controllers/wallet.controller');
-const auth = require('../middleware/auth');
+const express = require('express');
+const router = express.Router();
 
-router.get('/', auth, walletCtrl.getWallet);
-router.post('/create', auth, walletCtrl.createTronWallet);
+const auth = require('../middleware/auth');
+const walletController = require('../controllers/wallet.controller');
+
+// list wallets
+router.get('/', auth, walletController.getWallets);
+
+// reset demo wallet
+router.post(
+  '/:walletId/demo-reset',
+  auth,
+  walletController.resetDemoWallet
+);
 
 module.exports = router;
+
