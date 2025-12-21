@@ -323,3 +323,18 @@ exports.getDeviceHistory = async (req, res) => {
     return error(res, 500, 'Server error');
   }
 };
+
+
+module.exports = {
+  register,
+  login,
+  sendOtp,
+  verifyOtp,
+  me,
+  resetPassword,
+  changePassword,
+  deleteAccount,
+  requestEmailUpdate,
+  confirmEmailUpdate,
+  getDeviceHistory
+};

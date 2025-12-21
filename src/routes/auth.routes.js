@@ -1,11 +1,15 @@
 // src/routes/auth.routes.js
 'use strict';
 
-const router = require('express').Router();
-const authCtrl = require('../controllers/auth.controller');
-const { authLimiter } = require('../config/rateLimiters');
+const express = require('express');
+const router = express.Router();
+
 const auth = require('../middleware/auth');
+const authController = require('../controllers/auth.controller');
+
+// DEBUG — TEMPORARY
 console.log('AUTH CONTROLLER EXPORTS:', Object.keys(authController));
+
 
 // Public routes
 router.post('/register', authCtrl.register);
