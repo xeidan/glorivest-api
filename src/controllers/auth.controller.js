@@ -85,6 +85,52 @@ const register = async (req, res) => {
 };
 
 
+// -----------------------------
+// SEND OTP
+// -----------------------------
+const sendOtp = async (req, res) => {
+  try {
+    const { email, purpose = 'reset' } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // check user exists
+    const userQ = await pool.query(
+      `SELECT id FROM users WHERE email=$1 LIMIT 1`,
+      [normalizedEmail]
+    );
+
+    if (!userQ.rows.length) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const code = genOtp();
+
+    await pool.query(
+      `
+      INSERT INTO otps (email, code, purpose, expires_at)
+      VALUES ($1, $2, $3, NOW() + INTERVAL '${OTP_TTL_MIN} minutes')
+      `,
+      [normalizedEmail, code, purpose]
+    );
+
+    await sendMailSafe({
+      to: normalizedEmail,
+      subject: 'Your Glorivest OTP',
+      html: `<p>Your OTP is <b>${code}</b>. It expires in ${OTP_TTL_MIN} minutes.</p>`
+    });
+
+    return res.json({ message: 'OTP sent' });
+  } catch (err) {
+    console.error('sendOtp error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 
 // -----------------------------
 // VERIFY OTP (CREATE USER + WALLETS)
@@ -212,6 +258,73 @@ const verifyOtp = async (req, res) => {
 };
 
 
+// -----------------------------
+// RESET PASSWORD WHEN OTP VERIFIED
+// -----------------------------
+const resetPassword = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { email, code, newPassword } = req.body;
+
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({ message: 'Email, code and new password are required' });
+    }
+
+    if (!validatePassword(newPassword)) {
+      return res.status(400).json({
+        message: 'Password must be at least 8 characters and include a letter, number, and symbol'
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    await client.query('BEGIN');
+
+    // validate OTP
+    const otpQ = await client.query(
+      `
+      SELECT id FROM otps
+      WHERE email=$1
+        AND code=$2
+        AND purpose='reset'
+        AND used=false
+        AND expires_at > now()
+      LIMIT 1
+      `,
+      [normalizedEmail, code]
+    );
+
+    if (!otpQ.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+
+    // mark OTP used
+    await client.query(
+      `UPDATE otps SET used=true WHERE id=$1`,
+      [otpQ.rows[0].id]
+    );
+
+    const hash = await bcrypt.hash(newPassword, 10);
+
+    await client.query(
+      `UPDATE users SET password_hash=$1 WHERE email=$2`,
+      [hash, normalizedEmail]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({ message: 'Password reset successful' });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('resetPassword error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  } finally {
+    client.release();
+  }
+};
+
 
 
 // -----------------------------
@@ -310,6 +423,151 @@ const me = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+// -----------------------------
+// DEVICE HISTORY
+// -----------------------------
+
+const changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user.id;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: 'Current and new password required' });
+    }
+
+    if (!validatePassword(newPassword)) {
+      return res.status(400).json({
+        message: 'Password must be at least 8 characters and include a letter, number, and symbol'
+      });
+    }
+
+    const userQ = await pool.query(
+      `SELECT password_hash FROM users WHERE id=$1`,
+      [userId]
+    );
+
+    if (!userQ.rows.length) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const match = await bcrypt.compare(currentPassword, userQ.rows[0].password_hash);
+    if (!match) {
+      return res.status(400).json({ message: 'Invalid current password' });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      `UPDATE users SET password_hash=$1 WHERE id=$2`,
+      [hash, userId]
+    );
+
+    return res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    console.error('changePassword error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const deleteAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    await pool.query(
+      `DELETE FROM users WHERE id=$1`,
+      [userId]
+    );
+
+    return res.json({ message: 'Account deleted successfully' });
+  } catch (err) {
+    console.error('deleteAccount error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const requestEmailUpdate = async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+    const userId = req.user.id;
+
+    if (!newEmail) {
+      return res.status(400).json({ message: 'New email required' });
+    }
+
+    const code = genOtp();
+
+    await pool.query(
+      `
+      INSERT INTO otps (email, code, purpose, expires_at, meta)
+      VALUES ($1, $2, 'email_update', NOW() + INTERVAL '${OTP_TTL_MIN} minutes', $3)
+      `,
+      [newEmail.toLowerCase(), code, JSON.stringify({ user_id: userId })]
+    );
+
+    await sendMailSafe({
+      to: newEmail,
+      subject: 'Confirm your new email',
+      html: `<p>Your OTP is <b>${code}</b>. It expires in ${OTP_TTL_MIN} minutes.</p>`
+    });
+
+    return res.json({ message: 'Verification code sent to new email' });
+  } catch (err) {
+    console.error('requestEmailUpdate error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const confirmEmailUpdate = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { email, code } = req.body;
+    const userId = req.user.id;
+
+    await client.query('BEGIN');
+
+    const otpQ = await client.query(
+      `
+      SELECT id FROM otps
+      WHERE email=$1
+        AND code=$2
+        AND purpose='email_update'
+        AND used=false
+        AND expires_at > now()
+      LIMIT 1
+      `,
+      [email.toLowerCase(), code]
+    );
+
+    if (!otpQ.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+
+    await client.query(
+      `UPDATE otps SET used=true WHERE id=$1`,
+      [otpQ.rows[0].id]
+    );
+
+    await client.query(
+      `UPDATE users SET email=$1 WHERE id=$2`,
+      [email.toLowerCase(), userId]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({ message: 'Email updated successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('confirmEmailUpdate error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  } finally {
+    client.release();
+  }
+};
+
 
 // -----------------------------
 // DEVICE HISTORY
