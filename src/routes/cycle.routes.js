@@ -4,74 +4,74 @@ const express = require('express');
 const router = express.Router();
 
 const auth = require('../middleware/auth');
-const {
-  startCycle,
-  stopCycle,
-  getCurrentCycle
-} = require('../controllers/cycle.controller');
+const { pool } = require('../config/database');
+const requireLiveAccount = require('../utils/requireLiveAccount');
 
-// ------------------------------------
-// START CYCLE
-// POST /api/cycle/start
-// ------------------------------------
-router.post('/start', auth, async (req, res) => {
-  try {
-    const { walletId, expectedProfit } = req.body;
-    const userId = req.user.id;
-
-    if (!walletId || !expectedProfit) {
-      return res.status(400).json({ message: 'walletId and expectedProfit required' });
-    }
-
-    const cycle = await startCycle({
-      userId,
-      walletId,
-      expectedProfit
-    });
-
-    res.json({ cycle });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// ------------------------------------
-// STOP CYCLE
-// POST /api/cycle/stop
-// ------------------------------------
-router.post('/stop', auth, async (req, res) => {
-  try {
-    const { walletId } = req.body;
-    const userId = req.user.id;
-
-    if (!walletId) {
-      return res.status(400).json({ message: 'walletId required' });
-    }
-
-    const cycle = await stopCycle({ userId, walletId });
-    res.json({ cycle });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// ------------------------------------
-// CURRENT CYCLE (READ-ONLY)
-// GET /api/cycle/current?walletId=
-// ------------------------------------
+/**
+ * GET /api/cycle/current?walletId=35
+ */
 router.get('/current', auth, async (req, res) => {
   try {
     const walletId = Number(req.query.walletId);
-    const userId = req.user.id;
 
     if (!walletId) {
-      return res.status(400).json({ message: 'walletId required' });
+      return res.status(400).json({ message: 'walletId is required' });
     }
 
-    const cycle = await getCurrentCycle({ userId, walletId });
-    res.json({ cycle });
+    // 1️⃣ Load wallet (THIS WAS MISSING BEFORE)
+    const walletRes = await pool.query(
+      `
+      SELECT *
+      FROM wallets
+      WHERE id = $1 AND user_id = $2
+      LIMIT 1
+      `,
+      [walletId, req.user.id]
+    );
+
+    if (!walletRes.rows.length) {
+      return res.status(404).json({ message: 'Wallet not found' });
+    }
+
+    const account = walletRes.rows[0];
+
+    // 2️⃣ Validate wallet safely
+    requireLiveAccount(account);
+
+    // 3️⃣ Fetch current cycle
+    const cycleRes = await pool.query(
+      `
+      SELECT
+        *,
+        LEAST(
+          expected_profit,
+          expected_profit *
+          GREATEST(
+            0,
+            EXTRACT(EPOCH FROM (now() - start_at)) /
+            EXTRACT(EPOCH FROM (end_at - start_at))
+          )
+        ) AS computed_accrued_profit
+      FROM investment_cycles
+      WHERE wallet_id = $1
+        AND status = 'active'
+      LIMIT 1
+      `,
+      [walletId]
+    );
+
+    if (!cycleRes.rows.length) {
+      return res.json({ cycle: null });
+    }
+
+    return res.json({ cycle: cycleRes.rows[0] });
+
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('get current cycle error:', err);
+
+    return res.status(err.statusCode || 500).json({
+      error: err.message || 'Server error'
+    });
   }
 });
 
