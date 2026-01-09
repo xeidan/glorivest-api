@@ -15,16 +15,18 @@ module.exports = async function auth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
 
     const { rows } = await pool.query(
-      `
-      SELECT
-        id,
-        email
-      FROM users
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [decoded.id]
-    );
+  `
+  SELECT
+    id,
+    email,
+    status
+  FROM users
+  WHERE id = $1
+  LIMIT 1
+  `,
+  [decoded.id]
+);
+
 
     if (!rows.length) {
       return res.status(401).json({ message: 'Invalid token' });
