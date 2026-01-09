@@ -1,17 +1,30 @@
+'use strict';
+
 const express = require('express');
 const router = express.Router();
+
 const auth = require('../middleware/auth');
 const {
   startCycle,
-  stopCycle
-} = require('../services/investmentCycle.service');
+  stopCycle,
+  getCurrentCycle
+} = require('../controllers/cycle.controller');
 
+// ------------------------------------
+// START CYCLE
+// POST /api/cycle/start
+// ------------------------------------
 router.post('/start', auth, async (req, res) => {
   try {
     const { walletId, expectedProfit } = req.body;
+    const userId = req.user.id;
+
+    if (!walletId || !expectedProfit) {
+      return res.status(400).json({ message: 'walletId and expectedProfit required' });
+    }
 
     const cycle = await startCycle({
-      userId: req.user.id,
+      userId,
       walletId,
       expectedProfit
     });
@@ -22,48 +35,44 @@ router.post('/start', auth, async (req, res) => {
   }
 });
 
+// ------------------------------------
+// STOP CYCLE
+// POST /api/cycle/stop
+// ------------------------------------
 router.post('/stop', auth, async (req, res) => {
   try {
     const { walletId } = req.body;
+    const userId = req.user.id;
 
-    const cycle = await stopCycle({
-      userId: req.user.id,
-      walletId
-    });
-
-    res.json({ cycle });
-  } catch (err) {
-  console.error(err);
-  res.status(500).json({
-    message: 'Server error',
-    error: err.message
-  });
-}
-});
-
-
-router.get('/current', auth, async (req, res) => {
-  try {
-    const { walletId } = req.query;
     if (!walletId) {
-      return res.status(400).json({ error: 'walletId is required' });
+      return res.status(400).json({ message: 'walletId required' });
     }
 
-    const cycle = await getCurrentCycle({
-      userId: req.user.id,
-      walletId,
-    });
-
-    if (!cycle) {
-      return res.json({ cycle: null });
-    }
-
+    const cycle = await stopCycle({ userId, walletId });
     res.json({ cycle });
   } catch (err) {
-    console.error('get current cycle error', err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(400).json({ error: err.message });
   }
 });
 
+// ------------------------------------
+// CURRENT CYCLE (READ-ONLY)
+// GET /api/cycle/current?walletId=
+// ------------------------------------
+router.get('/current', auth, async (req, res) => {
+  try {
+    const walletId = Number(req.query.walletId);
+    const userId = req.user.id;
+
+    if (!walletId) {
+      return res.status(400).json({ message: 'walletId required' });
+    }
+
+    const cycle = await getCurrentCycle({ userId, walletId });
+    res.json({ cycle });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 module.exports = router;
