@@ -52,39 +52,42 @@ exports.getMyAccounts = async (req, res) => {
 /* =========================================================
    GET SINGLE ACCOUNT
 ========================================================= */
+
 exports.getAccountById = async (req, res) => {
   try {
-    const accountId = Number(req.params.id);
     const userId = req.user.id;
 
-    const q = await pool.query(
-      `SELECT 
-         a.id,
-         a.account_code,
-         a.status,
-         a.balance_cents,
-         a.profit_cents,
-         a.created_at,
-         t.id   AS tier_id,
-         t.name AS tier_name,
-         t.slug AS tier_slug
-       FROM accounts a
-       LEFT JOIN account_tiers t ON t.id = a.tier_id
-       WHERE a.id = $1 AND a.user_id = $2
-       LIMIT 1`,
-      [accountId, userId]
+    const userQ = await pool.query(
+      `SELECT id, email FROM users WHERE id = $1`,
+      [userId]
     );
 
-    if (!q.rows.length) {
-      return res.status(404).json({ message: 'Account not found' });
+    if (!userQ.rows.length) {
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    return res.json(q.rows[0]);
+    const walletsQ = await pool.query(
+      `
+      SELECT id, code, type, balance_cents, status
+      FROM wallets
+      WHERE user_id = $1
+      ORDER BY created_at ASC
+      `,
+      [userId]
+    );
+
+    return res.json({
+      id: userQ.rows[0].id,
+      email: userQ.rows[0].email,
+      glorivest_id: `GV${150000 + userId}`,
+      wallets: walletsQ.rows
+    });
   } catch (err) {
     console.error('getAccountById error', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 /* =========================================================
    CREATE ACCOUNT
