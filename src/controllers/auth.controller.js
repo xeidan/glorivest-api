@@ -1,6 +1,7 @@
 'use strict';
 
-const pool = require('../config/database').pool;
+const db = require('../config/database');
+const pool = db.pool;
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
@@ -264,9 +265,13 @@ const login = async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('login error', err);
-    return error(res, 500, 'Server error');
-  }
+  console.error('LOGIN ERROR FULL:', err);
+  return res.status(500).json({
+    message: 'Server error',
+    error: err.message,
+    stack: err.stack
+  });
+}
 };
 
 // -----------------------------

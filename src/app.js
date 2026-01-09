@@ -49,6 +49,8 @@ app.use('/withdraw', withdrawalRoutes);
 app.use('/leaderboard', leaderboardRoutes);
 app.use('/notify', notifyRoutes);
 app.use('/bot', botRoutes);
+app.use('/api/cycle', require('./routes/cycle.routes'));
+
 
 // 🔑 IMPORTANT: mount BOTH paths (frontend uses both)
 app.use('/accounts', accountRoutes);
