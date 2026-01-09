@@ -41,4 +41,29 @@ router.post('/stop', auth, async (req, res) => {
 }
 });
 
+
+router.get('/current', auth, async (req, res) => {
+  try {
+    const { walletId } = req.query;
+    if (!walletId) {
+      return res.status(400).json({ error: 'walletId is required' });
+    }
+
+    const cycle = await getCurrentCycle({
+      userId: req.user.id,
+      walletId,
+    });
+
+    if (!cycle) {
+      return res.json({ cycle: null });
+    }
+
+    res.json({ cycle });
+  } catch (err) {
+    console.error('get current cycle error', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
 module.exports = router;

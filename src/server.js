@@ -9,6 +9,11 @@ const withdrawalWorker = require('./workers/withdrawal.worker');
 
 const PORT = process.env.PORT || 3000;
 
+const { completeExpiredCycles } = require('./workers/completeCycles');
+
+setInterval(completeExpiredCycles, 10 * 60 * 1000); // every 10 minutes
+
+
 // tell Express we're behind a proxy (Heroku, etc.)
 app.set('trust proxy', 1);
 

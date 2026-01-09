@@ -65,7 +65,62 @@ async function stopCycle({ userId, walletId }) {
   return res.rows[0];
 }
 
+
+async function getCurrentCycle({ userId, walletId }) {
+  const res = await pool.query(
+    `
+    SELECT
+      id,
+      user_id,
+      wallet_id,
+      start_at,
+      end_at,
+      expected_profit,
+      accrued_profit,
+      status,
+      created_at,
+      updated_at,
+      LEAST(
+        expected_profit,
+        expected_profit *
+        GREATEST(
+          0,
+          EXTRACT(EPOCH FROM (now() - start_at)) /
+          EXTRACT(EPOCH FROM (end_at - start_at))
+        )
+      ) AS computed_accrued_profit
+    FROM investment_cycles
+    WHERE user_id = $1
+      AND wallet_id = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [userId, walletId]
+  );
+
+  if (!res.rows.length) return null;
+
+  const row = res.rows[0];
+
+  const expected = Number(row.expected_profit);
+  const accrued =
+    row.status === 'active'
+      ? Number(row.computed_accrued_profit)
+      : Number(row.accrued_profit);
+
+  const progressPercent =
+    expected === 0 ? 0 : Math.min(100, (accrued / expected) * 100);
+
+  return {
+    ...row,
+    accrued_profit: accrued,
+    progress_percent: Number(progressPercent.toFixed(2)),
+  };
+}
+
+
 module.exports = {
   startCycle,
   stopCycle,
+  getCurrentCycle,
 };
