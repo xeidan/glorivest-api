@@ -1,36 +1,23 @@
 'use strict';
 
-const { withTx } = require('../config/database');
-const { postTransaction } = require('../services/ledger.service');
+const { pool } = require('../config/database');
 
 async function completeExpiredCycles() {
-  await withTx(async (client) => {
-    // 1. Fetch expired active cycles (FOR UPDATE = lock rows)
-    const { rows: cycles } = await client.query(
-      `
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const cycles = await client.query(`
       SELECT *
       FROM investment_cycles
       WHERE status = 'active'
         AND now() >= end_at
       FOR UPDATE
-      `
-    );
+    `);
 
-    for (const cycle of cycles) {
-      const { id, user_id, wallet_id, expected_profit } = cycle;
-
-      // 2. Credit wallet (capital already locked earlier)
-      await postTransaction(
-        {
-          userId: user_id,
-          walletId: wallet_id,
-          type: 'cycle_payout',
-          amountCents: Number(expected_profit)
-        },
-        client
-      );
-
-      // 3. Mark cycle completed
+    for (const cycle of cycles.rows) {
+      // 1️⃣ Mark cycle completed
       await client.query(
         `
         UPDATE investment_cycles
@@ -40,14 +27,37 @@ async function completeExpiredCycles() {
           updated_at = now()
         WHERE id = $1
         `,
-        [id]
+        [cycle.id]
+      );
+
+      // 2️⃣ Credit wallet (principal + profit)
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = balance_cents + $1
+        WHERE id = $2
+        `,
+        [
+          Math.round(Number(cycle.expected_profit) * 100),
+          cycle.wallet_id
+        ]
       );
     }
 
-    if (cycles.length > 0) {
-      console.log(`Completed ${cycles.length} investment cycles`);
+    await client.query('COMMIT');
+
+    if (cycles.rowCount > 0) {
+      console.log(`✅ Completed ${cycles.rowCount} cycles`);
     }
-  });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('completeExpiredCycles error', err);
+  } finally {
+    client.release();
+  }
 }
+
+setInterval(completeExpiredCycles, 60 * 1000); // every 1 min
 
 module.exports = { completeExpiredCycles };

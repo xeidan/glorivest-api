@@ -1,10 +1,19 @@
-// // src/workers/index.js
-// 'use strict';
+'use strict';
 
-// require('dotenv').config();
+if (process.env.ENABLE_TRON === 'true') {
+  require('./tronPoller');
+  require('./tronSweeper');
+}
 
-// require('./poller.worker').start();
-// require('./sweep.worker').start();
-// require('./withdrawal.worker').start();
+if (process.env.ENABLE_WITHDRAWALS === 'true') {
+  require('./withdrawalWorker');
+}
 
-// console.log('🔥 All workers launched.');
+if (process.env.ENABLE_CYCLE_CRON === 'true') {
+  require('./completeCycles');
+}
+if (process.env.ENABLE_CYCLE_CRON === 'true') {
+  const { completeExpiredCycles } = require('./completeCycles');
+  setInterval(completeExpiredCycles, 10 * 60 * 1000);
+}
+
