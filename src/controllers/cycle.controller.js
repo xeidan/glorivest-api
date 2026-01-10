@@ -1,53 +1,66 @@
 'use strict';
 
 const { pool } = require('../config/database');
+const requireLiveAccount = require('../utils/requireLiveAccount');
 
-// -----------------------------
-// START CYCLE
-// -----------------------------
-async function startCycle({ userId, walletId, expectedProfit }) {
+// --------------------------------------------------
+// START CYCLE (MULTIPLE PER WALLET SUPPORTED)
+// --------------------------------------------------
+async function startCycle({ userId, walletId, capitalAmount, expectedProfit }) {
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
-    // Ensure wallet belongs to user
+    // 1️⃣ Lock wallet row
     const walletRes = await client.query(
-      `SELECT id FROM wallets WHERE id = $1 AND user_id = $2`,
+      `
+      SELECT *
+      FROM wallets
+      WHERE id = $1 AND user_id = $2
+      FOR UPDATE
+      `,
       [walletId, userId]
     );
 
-    if (walletRes.rowCount === 0) {
+    if (!walletRes.rows.length) {
       throw new Error('Wallet not found or not owned by user');
     }
 
-    // Ensure no active cycle
-    const activeRes = await client.query(
-      `
-      SELECT id FROM investment_cycles
-      WHERE wallet_id = $1 AND status = 'active'
-      `,
-      [walletId]
-    );
+    const wallet = walletRes.rows[0];
+    requireLiveAccount(wallet);
 
-    if (activeRes.rowCount > 0) {
-      throw new Error('Active investment cycle already exists');
+    if (Number(wallet.balance_cents) < Number(capitalAmount)) {
+      throw new Error('Insufficient wallet balance');
     }
 
+    // 2️⃣ Deduct capital from wallet
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents - $1
+      WHERE id = $2
+      `,
+      [capitalAmount, walletId]
+    );
+
+    // 3️⃣ Create independent investment cycle
     const startAt = new Date();
     const endAt = new Date(startAt.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-    const insertRes = await client.query(
+    const cycleRes = await client.query(
       `
       INSERT INTO investment_cycles
-        (user_id, wallet_id, start_at, end_at, expected_profit, status)
-      VALUES ($1, $2, $3, $4, $5, 'active')
+        (user_id, wallet_id, capital_amount, expected_profit, start_at, end_at, status)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, 'active')
       RETURNING *
       `,
-      [userId, walletId, startAt, endAt, expectedProfit]
+      [userId, walletId, capitalAmount, expectedProfit, startAt, endAt]
     );
 
     await client.query('COMMIT');
-    return insertRes.rows[0];
+    return cycleRes.rows[0];
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -57,36 +70,49 @@ async function startCycle({ userId, walletId, expectedProfit }) {
   }
 }
 
-// -----------------------------
-// STOP CYCLE (FORFEIT)
-// -----------------------------
-async function stopCycle({ userId, walletId }) {
-  const res = await pool.query(
-    `
-    UPDATE investment_cycles
-    SET
-      status = 'forfeited',
-      accrued_profit = 0,
-      updated_at = now()
-    WHERE user_id = $1
-      AND wallet_id = $2
-      AND status = 'active'
-    RETURNING *
-    `,
-    [userId, walletId]
-  );
+// --------------------------------------------------
+// STOP SINGLE CYCLE (FORFEIT)
+// --------------------------------------------------
+async function stopCycle({ userId, cycleId }) {
+  const client = await pool.connect();
 
-  if (res.rowCount === 0) {
-    throw new Error('No active cycle to stop');
+  try {
+    await client.query('BEGIN');
+
+    const res = await client.query(
+      `
+      UPDATE investment_cycles
+      SET
+        status = 'forfeited',
+        accrued_profit = 0,
+        updated_at = now()
+      WHERE id = $1
+        AND user_id = $2
+        AND status = 'active'
+      RETURNING *
+      `,
+      [cycleId, userId]
+    );
+
+    if (!res.rows.length) {
+      throw new Error('Active cycle not found');
+    }
+
+    await client.query('COMMIT');
+    return res.rows[0];
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-
-  return res.rows[0];
 }
 
-// -----------------------------
-// GET CURRENT CYCLE
-// -----------------------------
-async function getCurrentCycle(req, res) {
+// --------------------------------------------------
+// GET ALL ACTIVE CYCLES FOR WALLET
+// --------------------------------------------------
+async function getActiveCycles(req, res) {
   try {
     const userId = req.user.id;
     const walletId = Number(req.query.walletId);
@@ -112,23 +138,21 @@ async function getCurrentCycle(req, res) {
       WHERE user_id = $1
         AND wallet_id = $2
         AND status = 'active'
-      LIMIT 1
+      ORDER BY start_at ASC
       `,
       [userId, walletId]
     );
 
-    res.json({
-      cycle: result.rows[0] || null
-    });
+    return res.json({ cycles: result.rows });
 
   } catch (err) {
-    console.error('getCurrentCycle error', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error('getActiveCycles error:', err);
+    return res.status(500).json({ error: 'Server error' });
   }
 }
 
 module.exports = {
   startCycle,
   stopCycle,
-  getCurrentCycle
+  getActiveCycles
 };
