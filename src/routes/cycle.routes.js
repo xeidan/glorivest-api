@@ -215,4 +215,26 @@ router.get('/active', auth, async (req, res) => {
 
 
 
+// POST /api/cycle/forfeit
+router.post('/forfeit', auth, async (req, res) => {
+  try {
+    const { cycleId } = req.body;
+
+    if (!cycleId) {
+      return res.status(400).json({ message: 'cycleId is required' });
+    }
+
+    const cycle = await cycleService.stopCycle({
+      userId: req.user.id,
+      cycleId
+    });
+
+    res.json({ cycle });
+
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+
 module.exports = router;
