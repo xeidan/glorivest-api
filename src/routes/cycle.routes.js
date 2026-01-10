@@ -6,6 +6,8 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const { pool } = require('../config/database');
 const requireLiveAccount = require('../utils/requireLiveAccount');
+const cycleService = require('../services/cycle.service');
+
 
 /**
  * GET /api/cycle/current?walletId=35
