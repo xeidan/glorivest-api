@@ -8,7 +8,7 @@ async function completeExpiredCycles() {
   try {
     await client.query('BEGIN');
 
-    const cycles = await client.query(`
+    const { rows: cycles } = await client.query(`
       SELECT *
       FROM investment_cycles
       WHERE status = 'active'
@@ -16,48 +16,47 @@ async function completeExpiredCycles() {
       FOR UPDATE
     `);
 
-    for (const cycle of cycles.rows) {
-      // 1️⃣ Mark cycle completed
-      await client.query(
-        `
-        UPDATE investment_cycles
-        SET
-          accrued_profit = expected_profit,
-          status = 'completed',
-          updated_at = now()
-        WHERE id = $1
-        `,
-        [cycle.id]
-      );
+    for (const cycle of cycles) {
+      const payout =
+        Number(cycle.capital_amount) +
+        Number(cycle.expected_profit);
 
-      // 2️⃣ Credit wallet (principal + profit)
+      // 1️⃣ Credit wallet
       await client.query(
         `
         UPDATE wallets
         SET balance_cents = balance_cents + $1
         WHERE id = $2
         `,
-        [
-          Math.round(Number(cycle.expected_profit) * 100),
-          cycle.wallet_id
-        ]
+        [payout, cycle.wallet_id]
+      );
+
+      // 2️⃣ Complete cycle
+      await client.query(
+        `
+        UPDATE investment_cycles
+        SET
+          status = 'completed',
+          accrued_profit = expected_profit,
+          updated_at = now()
+        WHERE id = $1
+        `,
+        [cycle.id]
       );
     }
 
     await client.query('COMMIT');
 
-    if (cycles.rowCount > 0) {
-      console.log(`✅ Completed ${cycles.rowCount} cycles`);
+    if (cycles.length > 0) {
+      console.log(`✅ Completed ${cycles.length} cycles`);
     }
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('completeExpiredCycles error', err);
+    console.error('❌ completeExpiredCycles failed', err);
   } finally {
     client.release();
   }
 }
-
-setInterval(completeExpiredCycles, 60 * 1000); // every 1 min
 
 module.exports = { completeExpiredCycles };
