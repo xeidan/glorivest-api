@@ -8,30 +8,39 @@ async function completeExpiredCycles() {
   try {
     await client.query('BEGIN');
 
-    const { rows: cycles } = await client.query(`
+    // 1️⃣ Lock all expired active cycles
+    const { rows: cycles } = await client.query(
+      `
       SELECT *
       FROM investment_cycles
       WHERE status = 'active'
         AND now() >= end_at
       FOR UPDATE
-    `);
+      `
+    );
 
+    if (cycles.length === 0) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    // 2️⃣ Process each cycle safely
     for (const cycle of cycles) {
-      const payout =
-        Number(cycle.capital_amount) +
-        Number(cycle.expected_profit);
+      const capital = Number(cycle.capital_amount);
+      const profit = Number(cycle.expected_profit);
+      const totalPayout = capital + profit;
 
-      // 1️⃣ Credit wallet
+      // Credit wallet (capital + profit)
       await client.query(
         `
         UPDATE wallets
         SET balance_cents = balance_cents + $1
         WHERE id = $2
         `,
-        [payout, cycle.wallet_id]
+        [totalPayout, cycle.wallet_id]
       );
 
-      // 2️⃣ Complete cycle
+      // Mark cycle completed (idempotency gate)
       await client.query(
         `
         UPDATE investment_cycles
@@ -40,20 +49,17 @@ async function completeExpiredCycles() {
           accrued_profit = expected_profit,
           updated_at = now()
         WHERE id = $1
+          AND status = 'active'
         `,
         [cycle.id]
       );
     }
 
     await client.query('COMMIT');
-
-    if (cycles.length > 0) {
-      console.log(`✅ Completed ${cycles.length} cycles`);
-    }
-
+    console.log(`✅ Completed ${cycles.length} investment cycles`);
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('❌ completeExpiredCycles failed', err);
+    console.error('❌ completeExpiredCycles failed:', err);
   } finally {
     client.release();
   }
