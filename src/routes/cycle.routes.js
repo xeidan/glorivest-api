@@ -73,69 +73,89 @@ router.get('/current', auth, async (req, res) => {
  * body: { walletId, expectedProfit }
  */
 router.post('/start', auth, async (req, res) => {
+  const { walletId, capitalAmount, expectedProfit } = req.body;
+
+  if (!walletId || !capitalAmount || capitalAmount <= 0) {
+    return res.status(400).json({ message: 'walletId and capitalAmount required' });
+  }
+
+  const client = await pool.connect();
+
   try {
-    const walletId = Number(req.body.walletId);
-    const expectedProfit = Number(req.body.expectedProfit);
+    await client.query('BEGIN');
 
-    if (!walletId || !expectedProfit) {
-      return res.status(400).json({
-        message: 'walletId and expectedProfit are required'
-      });
-    }
-
-    // Load wallet
-    const walletRes = await pool.query(
+    // 1️⃣ Load wallet
+    const walletRes = await client.query(
       `
       SELECT *
       FROM wallets
       WHERE id = $1 AND user_id = $2
-      LIMIT 1
+      FOR UPDATE
       `,
       [walletId, req.user.id]
     );
 
     if (!walletRes.rows.length) {
-      return res.status(404).json({ message: 'Wallet not found' });
+      throw { statusCode: 404, message: 'Wallet not found' };
     }
 
-    const account = walletRes.rows[0];
-    requireLiveAccount(account);
+    const wallet = walletRes.rows[0];
+    requireLiveAccount(wallet);
 
-    // Ensure no active cycle
-    const activeRes = await pool.query(
+    // 2️⃣ Ensure sufficient balance
+    if (Number(wallet.balance_cents) < Number(capitalAmount)) {
+      throw { statusCode: 400, message: 'Insufficient wallet balance' };
+    }
+
+    // 3️⃣ Deduct capital from wallet
+    await client.query(
       `
-      SELECT id
-      FROM investment_cycles
-      WHERE wallet_id = $1 AND status = 'active'
-      LIMIT 1
+      UPDATE wallets
+      SET balance_cents = balance_cents - $1,
+          updated_at = now()
+      WHERE id = $2
       `,
-      [walletId]
+      [capitalAmount, walletId]
     );
 
-    if (activeRes.rows.length) {
-      return res.status(400).json({
-        message: 'Active investment cycle already exists'
-      });
-    }
-
+    // 4️⃣ Create cycle
     const startAt = new Date();
     const endAt = new Date(startAt.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-    const insertRes = await pool.query(
+    const cycleRes = await client.query(
       `
       INSERT INTO investment_cycles
-        (user_id, wallet_id, start_at, end_at, expected_profit, status)
-      VALUES ($1, $2, $3, $4, $5, 'active')
+        (user_id, wallet_id, start_at, end_at, capital_amount, expected_profit, status)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, 'active')
       RETURNING *
       `,
-      [req.user.id, walletId, startAt, endAt, expectedProfit]
+      [
+        req.user.id,
+        walletId,
+        startAt,
+        endAt,
+        capitalAmount,
+        expectedProfit
+      ]
     );
 
-    return res.json({ cycle: insertRes.rows[0] });
+    await client.query('COMMIT');
+
+    return res.json({ cycle: cycleRes.rows[0] });
+
   } catch (err) {
-    console.error('start cycle error:', err);
-    return res.status(500).json({ error: 'Server error' });
+    await client.query('ROLLBACK');
+
+    console.error('cycle start error:', err);
+
+    return res.status(err.statusCode || 500).json({
+      error: err.message || 'Server error'
+    });
+  } finally {
+    client.release();
   }
 });
+
 
 module.exports = router;
