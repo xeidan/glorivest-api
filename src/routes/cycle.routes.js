@@ -75,89 +75,38 @@ router.get('/current', auth, async (req, res) => {
  * body: { walletId, expectedProfit }
  */
 router.post('/start', auth, async (req, res) => {
-  const { walletId, capitalAmount, expectedProfit } = req.body;
-
-  if (!walletId || !capitalAmount || capitalAmount <= 0) {
-    return res.status(400).json({ message: 'walletId and capitalAmount required' });
-  }
-
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
+    const idempotencyKey = req.header('Idempotency-Key');
+    const { walletId, capitalAmount, expectedProfit } = req.body;
 
-    // 1️⃣ Load wallet
-    const walletRes = await client.query(
-      `
-      SELECT *
-      FROM wallets
-      WHERE id = $1 AND user_id = $2
-      FOR UPDATE
-      `,
-      [walletId, req.user.id]
-    );
-
-    if (!walletRes.rows.length) {
-      throw { statusCode: 404, message: 'Wallet not found' };
+    if (!idempotencyKey) {
+      return res.status(400).json({ error: 'Idempotency-Key header is required' });
     }
 
-    const wallet = walletRes.rows[0];
-    requireLiveAccount(wallet);
-
-    // 2️⃣ Ensure sufficient balance
-    if (Number(wallet.balance_cents) < Number(capitalAmount)) {
-      throw { statusCode: 400, message: 'Insufficient wallet balance' };
+    if (!walletId || !capitalAmount || capitalAmount <= 0) {
+      return res.status(400).json({
+        error: 'walletId and valid capitalAmount are required'
+      });
     }
 
-    // 3️⃣ Deduct capital from wallet
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents - $1,
-          updated_at = now()
-      WHERE id = $2
-      `,
-      [capitalAmount, walletId]
-    );
+    const cycle = await cycleService.startCycle({
+      userId: req.user.id,
+      walletId,
+      capitalAmount,
+      expectedProfit,
+      idempotencyKey
+    });
 
-    // 4️⃣ Create cycle
-    const startAt = new Date();
-    const endAt = new Date(startAt.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-    const cycleRes = await client.query(
-      `
-      INSERT INTO investment_cycles
-        (user_id, wallet_id, start_at, end_at, capital_amount, expected_profit, status)
-      VALUES
-        ($1, $2, $3, $4, $5, $6, 'active')
-      RETURNING *
-      `,
-      [
-        req.user.id,
-        walletId,
-        startAt,
-        endAt,
-        capitalAmount,
-        expectedProfit
-      ]
-    );
-
-    await client.query('COMMIT');
-
-    return res.json({ cycle: cycleRes.rows[0] });
+    return res.json({ cycle });
 
   } catch (err) {
-    await client.query('ROLLBACK');
-
     console.error('cycle start error:', err);
-
-    return res.status(err.statusCode || 500).json({
+    return res.status(err.statusCode || 400).json({
       error: err.message || 'Server error'
     });
-  } finally {
-    client.release();
   }
 });
+
 
 
 /**
@@ -223,10 +172,10 @@ router.post('/forfeit', auth, async (req, res) => {
     const { cycleId } = req.body;
 
     if (!cycleId) {
-      return res.status(400).json({ message: 'cycleId is required' });
+      return res.status(400).json({ error: 'cycleId required' });
     }
 
-    const cycle = await cycleService.stopCycle({
+    const cycle = await cycleService.forfeitCycle({
       userId: req.user.id,
       cycleId
     });
@@ -234,7 +183,9 @@ router.post('/forfeit', auth, async (req, res) => {
     res.json({ cycle });
 
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(err.statusCode || 500).json({
+      error: err.message || 'Server error'
+    });
   }
 });
 
