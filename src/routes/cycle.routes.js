@@ -74,35 +74,30 @@ router.get('/current', auth, async (req, res) => {
  * POST /api/cycle/start
  * body: { walletId, expectedProfit }
  */
+
 router.post('/start', auth, async (req, res) => {
   try {
     const idempotencyKey = req.header('Idempotency-Key');
-    const { walletId, capitalAmount, expectedProfit } = req.body;
 
     if (!idempotencyKey) {
-      return res.status(400).json({ error: 'Idempotency-Key header is required' });
-    }
-
-    if (!walletId || !capitalAmount || capitalAmount <= 0) {
       return res.status(400).json({
-        error: 'walletId and valid capitalAmount are required'
+        error: 'Idempotency-Key header is required'
       });
     }
 
     const cycle = await cycleService.startCycle({
       userId: req.user.id,
-      walletId,
-      capitalAmount,
-      expectedProfit,
+      walletId: req.body.walletId,
+      capitalAmount: req.body.capitalAmount,
+      expectedProfit: req.body.expectedProfit,
       idempotencyKey
     });
 
-    return res.json({ cycle });
+    res.json({ cycle });
 
   } catch (err) {
-    console.error('cycle start error:', err);
-    return res.status(err.statusCode || 400).json({
-      error: err.message || 'Server error'
+    res.status(err.statusCode || 400).json({
+      error: err.message
     });
   }
 });

@@ -4,7 +4,7 @@
 const { pool } = require('../config/database');
 const requireLiveAccount = require('../utils/requireLiveAccount');
 
-async function stopCycle({ userId, cycleId }) {
+async function forfeitCycle({ userId, cycleId }) {
   const client = await pool.connect();
 
   try {
@@ -154,5 +154,6 @@ async function startCycle({
 
 module.exports = {
   startCycle,
-  stopCycle
+  forfeitCycle
 };
+
