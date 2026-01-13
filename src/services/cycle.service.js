@@ -4,12 +4,21 @@
 const { pool } = require('../config/database');
 const requireLiveAccount = require('../utils/requireLiveAccount');
 
+/**
+ * =========================
+ * FORFEIT CYCLE (5.5.3)
+ * =========================
+ * - Return ONLY capital
+ * - No profit
+ * - Ledger first, wallet second
+ */
 async function forfeitCycle({ userId, cycleId }) {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
+    // 1️⃣ Lock cycle
     const cycleRes = await client.query(
       `
       SELECT *
@@ -28,6 +37,22 @@ async function forfeitCycle({ userId, cycleId }) {
 
     const cycle = cycleRes.rows[0];
 
+    // 2️⃣ Ledger refund (capital only)
+    await client.query(
+      `
+      INSERT INTO ledger_entries
+        (user_id, wallet_id, type, amount_cents, reference_id)
+      VALUES ($1, $2, 'cycle_refund', $3, $4)
+      `,
+      [
+        userId,
+        cycle.wallet_id,
+        Number(cycle.capital_amount),
+        cycle.id
+      ]
+    );
+
+    // 3️⃣ Wallet cache update
     await client.query(
       `
       UPDATE wallets
@@ -37,6 +62,7 @@ async function forfeitCycle({ userId, cycleId }) {
       [cycle.capital_amount, cycle.wallet_id]
     );
 
+    // 4️⃣ Mark cycle forfeited
     const updateRes = await client.query(
       `
       UPDATE investment_cycles
@@ -61,6 +87,14 @@ async function forfeitCycle({ userId, cycleId }) {
   }
 }
 
+/**
+ * =========================
+ * START CYCLE (5.5.2)
+ * =========================
+ * - Idempotent
+ * - Locks wallet
+ * - Ledger records capital lock
+ */
 async function startCycle({
   userId,
   walletId,
@@ -73,6 +107,7 @@ async function startCycle({
   try {
     await client.query('BEGIN');
 
+    // 1️⃣ Idempotency check
     const idem = await client.query(
       `
       SELECT response
@@ -89,11 +124,13 @@ async function startCycle({
       return idem.rows[0].response;
     }
 
+    // 2️⃣ Lock wallet
     const walletRes = await client.query(
       `
       SELECT *
       FROM wallets
-      WHERE id = $1 AND user_id = $2
+      WHERE id = $1
+        AND user_id = $2
       FOR UPDATE
       `,
       [walletId, userId]
@@ -110,15 +147,7 @@ async function startCycle({
       throw { statusCode: 400, message: 'Insufficient wallet balance' };
     }
 
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents - $1
-      WHERE id = $2
-      `,
-      [capitalAmount, walletId]
-    );
-
+    // 3️⃣ Create cycle
     const cycleRes = await client.query(
       `
       INSERT INTO investment_cycles
@@ -132,6 +161,32 @@ async function startCycle({
 
     const cycle = cycleRes.rows[0];
 
+    // 4️⃣ Ledger lock
+    await client.query(
+      `
+      INSERT INTO ledger_entries
+        (user_id, wallet_id, type, amount_cents, reference_id)
+      VALUES ($1, $2, 'cycle_lock', $3, $4)
+      `,
+      [
+        userId,
+        walletId,
+        -Number(capitalAmount),
+        cycle.id
+      ]
+    );
+
+    // 5️⃣ Wallet cache update
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents - $1
+      WHERE id = $2
+      `,
+      [capitalAmount, walletId]
+    );
+
+    // 6️⃣ Save idempotency result
     await client.query(
       `
       INSERT INTO idempotency_keys
@@ -156,4 +211,3 @@ module.exports = {
   startCycle,
   forfeitCycle
 };
-

@@ -1,26 +1,17 @@
-// src/routes/index.js
 'use strict';
 
 const Router = require('express').Router;
-
-const authRoutes = require('./auth.routes');
-const accountRoutes = require('./account.routes');
-const walletRoutes = require('./wallet.routes');
-const depositRoutes = require('./deposit.routes');
-const withdrawalRoutes = require('./withdraw.routes');
-const botRoutes = require('./bot.routes');
-const leaderboardRoutes = require('./leaderboard.routes');
-const notifyRoutes = require('./notify.routes');
-
 const router = Router();
 
-router.use('/auth', authRoutes);
-router.use('/accounts', accountRoutes);
-router.use('/wallet', walletRoutes);
-router.use('/deposits', depositRoutes);
-router.use('/withdrawals', withdrawalRoutes);
-router.use('/bot', botRoutes);
-router.use('/leaderboard', leaderboardRoutes);
-router.use('/notify', notifyRoutes);
+router.use('/auth', require('./auth.routes'));
+router.use('/accounts', require('./account.routes'));
+router.use('/wallets', require('./wallet.routes'));
+router.use('/deposit', require('./deposit.routes'));
+router.use('/withdraw', require('./withdraw.routes'));
+router.use('/transactions', require('./transactions.routes'));
+router.use('/bot', require('./bot.routes'));
+router.use('/leaderboard', require('./leaderboard.routes'));
+router.use('/notify', require('./notify.routes'));
+router.use('/cycle', require('./cycle.routes'));
 
 module.exports = router;

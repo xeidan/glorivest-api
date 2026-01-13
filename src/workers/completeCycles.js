@@ -59,8 +59,14 @@ async function completeExpiredCycles() {
       // 4️⃣ Update wallet balance
       await client.query(
         `
-        UPDATE wallets
-        SET balance_cents = balance_cents + $1
+        UPDATE wallets w
+SET balance_cents = (
+  SELECT COALESCE(SUM(amount_cents), 0)
+  FROM ledger_entries l
+  WHERE l.wallet_id = w.id
+)
+WHERE w.id = $1;
+
         WHERE id = $2
         `,
         [totalPayout, cycle.wallet_id]
