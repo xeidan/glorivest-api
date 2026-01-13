@@ -1,34 +1,12 @@
 'use strict';
 
-const router = require('express').Router();
-const { requireAuth } = require('../middleware/auth');
-const { pool } = require('../config/database');
+const Router = require('express').Router;
+const auth = require('../middleware/auth');
+const { getMyTransactions } = require('../controllers/transactions.controller');
 
-router.get('/', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
+const router = Router();
+console.log('getMyTransactions =', typeof getMyTransactions);
 
-    const { rows } = await pool.query(
-      `
-      SELECT
-        id,
-        type,
-        amount_cents,
-        reference_id,
-        created_at
-      FROM ledger_entries
-      WHERE user_id = $1
-      ORDER BY created_at DESC
-      LIMIT 100
-      `,
-      [userId]
-    );
-
-    res.json(rows);
-  } catch (err) {
-    console.error('GET /transactions error', err);
-    res.status(500).json({ message: 'Failed to fetch transactions' });
-  }
-});
+router.get('/', auth, getMyTransactions);
 
 module.exports = router;
