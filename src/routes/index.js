@@ -4,7 +4,6 @@ const Router = require('express').Router;
 const router = Router();
 
 router.use('/auth', require('./auth.routes'));
-router.use('/accounts', require('./account.routes'));
 router.use('/wallets', require('./wallet.routes'));
 router.use('/deposit', require('./deposit.routes'));
 router.use('/withdraw', require('./withdraw.routes'));

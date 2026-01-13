@@ -1,3 +1,4 @@
+// app.js
 'use strict';
 
 require('dotenv').config();
@@ -16,17 +17,16 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
 app.options('*', cors());
 
-// 2. BODY PARSERS
+// 2. Body
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 3. LOGGING
+// 3. Logging
 app.use(morgan('dev'));
 
-// 4. API ROUTES (🔥 THIS IS THE FIX 🔥)
+// 4. API (🔥 ONLY THIS 🔥)
 app.use('/api', routes);
 
 // 5. 404
