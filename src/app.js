@@ -1,4 +1,3 @@
-// app.js
 'use strict';
 
 require('dotenv').config();
@@ -11,13 +10,12 @@ const routes = require('./routes'); // index.js
 
 const app = express();
 
-// CORS
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-// ✅ SINGLE API ENTRY POINT
+// ✅ SINGLE API PREFIX
 app.use('/api', routes);
 
 // 404

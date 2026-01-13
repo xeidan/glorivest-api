@@ -1,15 +1,6 @@
 'use strict';
 
-const Router = require('express').Router;
-
-const authRoutes = require('./auth.routes');
-const walletRoutes = require('./wallet.routes');
-const depositRoutes = require('./deposit.routes');
-const withdrawalRoutes = require('./withdraw.routes');
-const transactionsRoutes = require('./transactions.routes');
-const cycleRoutes = require('./cycle.routes');
-
-const router = Router();
+const router = require('express').Router();
 
 router.use('/auth', require('./auth.routes'));
 router.use('/wallets', require('./wallet.routes'));
