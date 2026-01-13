@@ -7,18 +7,17 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 
-const routes = require('./routes'); // index.js
+const routes = require('./routes');
 
 const app = express();
 
-app.use(cors({ origin: '*', allowedHeaders: ['Content-Type', 'Authorization'] }));
-app.use(express.json());
+app.use(cors());
+app.use(express.json());            // ✅ ONLY THIS
+app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-// ✅ SINGLE ENTRY POINT
-app.use('/api', routes);
+app.use('/api', routes);             // ✅ SINGLE ENTRY POINT
 
-// 404
 app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });

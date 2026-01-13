@@ -4,7 +4,7 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../middleware/auth');
+const requireAuth = require('../middleware/auth');
 const authCtrl = require('../controllers/auth.controller');
 
 // -----------------------------
@@ -20,12 +20,12 @@ router.post('/reset-password', authCtrl.resetPassword);
 // -----------------------------
 // AUTHENTICATED ROUTES
 // -----------------------------
-router.get('/me', auth, authCtrl.me);
-router.get('/devices', auth, authCtrl.getDeviceHistory);
+router.get('/me', requireAuth, authCtrl.me);
+router.get('/devices', requireAuth, authCtrl.getDeviceHistory);
 
-router.post('/change-password', auth, authCtrl.changePassword);
-router.post('/update-email/request', auth, authCtrl.requestEmailUpdate);
-router.post('/update-email/confirm', auth, authCtrl.confirmEmailUpdate);
-router.post('/delete-account', auth, authCtrl.deleteAccount);
+router.post('/change-password', requireAuth, authCtrl.changePassword);
+router.post('/update-email/request', requireAuth, authCtrl.requestEmailUpdate);
+router.post('/update-email/confirm', requireAuth, authCtrl.confirmEmailUpdate);
+router.post('/delete-account', requireAuth, authCtrl.deleteAccount);
 
 module.exports = router;

@@ -217,33 +217,48 @@ const verifyOtp = async (req, res) => {
 
 
 
-
 // -----------------------------
 // LOGIN
 // -----------------------------
 const login = async (req, res) => {
   try {
+    // 🔍 HARD GUARD — this catches bad JSON early
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({
+        message: 'Invalid request body'
+      });
+    }
+
     const { email, password } = req.body;
+
     if (!email || !password) {
-      return error(res, 400, 'Email and password required');
+      return res.status(400).json({
+        message: 'Email and password required'
+      });
     }
 
     const { rows } = await pool.query(
-      `SELECT id, email, password_hash FROM users WHERE email=$1 LIMIT 1`,
+      `SELECT id, email, password_hash
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
       [email.toLowerCase()]
     );
 
     if (!rows.length) {
-      return error(res, 400, 'Invalid credentials');
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     const user = rows[0];
+
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) {
-      return error(res, 400, 'Invalid credentials');
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // device logging
+    // -----------------------------
+    // DEVICE LOGGING (SAFE)
+    // -----------------------------
     const userAgent = req.headers['user-agent'] || 'unknown';
     const ip =
       req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
@@ -252,9 +267,11 @@ const login = async (req, res) => {
 
     try {
       await logDevice(user.id, userAgent, ip);
-    } catch (_) {}
+    } catch (e) {
+      console.warn('Device log failed:', e.message);
+    }
 
-    const token = signToken(user);
+    const token = signToken({ id: user.id, email: user.email });
 
     return res.json({
       token,
@@ -264,15 +281,20 @@ const login = async (req, res) => {
         glorivest_id: `GV${150000 + user.id}`
       }
     });
+
   } catch (err) {
-  console.error('LOGIN ERROR FULL:', err);
-  return res.status(500).json({
-    message: 'Server error',
-    error: err.message,
-    stack: err.stack
-  });
-}
+    console.error('LOGIN ERROR FULL:', err);
+
+    return res.status(500).json({
+      message: 'Server error'
+    });
+  }
 };
+
+module.exports = {
+  login
+};
+
 
 // -----------------------------
 // ME (WALLET-BASED)
