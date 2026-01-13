@@ -7,29 +7,18 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 
-const routes = require('./routes');
+const routes = require('./routes'); // index.js
 
 const app = express();
 
-// 1. CORS
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.options('*', cors());
-
-// 2. Body
+app.use(cors({ origin: '*', allowedHeaders: ['Content-Type', 'Authorization'] }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// 3. Logging
 app.use(morgan('dev'));
 
-// 4. API (🔥 ONLY THIS 🔥)
+// ✅ SINGLE ENTRY POINT
 app.use('/api', routes);
 
-// 5. 404
+// 404
 app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
