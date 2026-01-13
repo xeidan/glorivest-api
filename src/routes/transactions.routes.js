@@ -1,7 +1,7 @@
 'use strict';
 
 const router = require('express').Router();
-const { requireAuth } = require('../middlewares/auth');
+const { requireAuth } = require('../middleware/auth');
 const { pool } = require('../config/database');
 
 router.get('/', requireAuth, async (req, res) => {
