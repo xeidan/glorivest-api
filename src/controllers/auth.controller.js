@@ -303,9 +303,7 @@ const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // -----------------------------
-    // User
-    // -----------------------------
+    // 1. User
     const { rows: userRows } = await pool.query(
       `
       SELECT id, email, referral_code
@@ -322,9 +320,7 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
-    // -----------------------------
-    // Wallets
-    // -----------------------------
+    // 2. Wallets
     const { rows: wallets } = await pool.query(
       `
       SELECT id, code, type, balance_cents, status
@@ -335,9 +331,7 @@ const me = async (req, res) => {
       [userId]
     );
 
-    // -----------------------------
-    // Referral stats
-    // -----------------------------
+    // 3. Referral count
     const { rows: refCount } = await pool.query(
       `
       SELECT COUNT(*)::int AS count
@@ -347,28 +341,30 @@ const me = async (req, res) => {
       [userId]
     );
 
+    // 4. Referral wallet
     const referralWallet = wallets.find(w => w.type === 'REFERRAL');
 
-    // -----------------------------
-    // Final response (SINGLE return)
-    // -----------------------------
     return res.json({
       id: user.id,
       email: user.email,
-      referral_code: user.referral_code,
       glorivest_id: `GV${150000 + user.id}`,
+
+      referral_code: user.referral_code,
       total_referrals: refCount[0].count,
       referral_earnings: referralWallet
         ? Number(referralWallet.balance_cents) / 100
         : 0,
+
       wallets
     });
 
   } catch (err) {
-    console.error('me error', err);
+    console.error('me error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
 
 
 // -----------------------------
