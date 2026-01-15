@@ -303,7 +303,9 @@ const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // 1. User basic info
+    // -----------------------------
+    // User
+    // -----------------------------
     const { rows: userRows } = await pool.query(
       `
       SELECT id, email, referral_code
@@ -320,7 +322,9 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
-    // 2. Wallets
+    // -----------------------------
+    // Wallets
+    // -----------------------------
     const { rows: wallets } = await pool.query(
       `
       SELECT id, code, type, balance_cents, status
@@ -331,7 +335,9 @@ const me = async (req, res) => {
       [userId]
     );
 
-    // 3. Referral count
+    // -----------------------------
+    // Referral stats
+    // -----------------------------
     const { rows: refCount } = await pool.query(
       `
       SELECT COUNT(*)::int AS count
@@ -341,27 +347,28 @@ const me = async (req, res) => {
       [userId]
     );
 
-    // 4. Referral wallet balance
     const referralWallet = wallets.find(w => w.type === 'REFERRAL');
 
+    // -----------------------------
+    // Final response (SINGLE return)
+    // -----------------------------
     return res.json({
       id: user.id,
       email: user.email,
       referral_code: user.referral_code,
+      glorivest_id: `GV${150000 + user.id}`,
       total_referrals: refCount[0].count,
       referral_earnings: referralWallet
         ? Number(referralWallet.balance_cents) / 100
         : 0,
-      glorivest_id: `GV${150000 + user.id}`,
       wallets
     });
 
   } catch (err) {
-    console.error('me error:', err);
+    console.error('me error', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
-
 
 
 // -----------------------------
