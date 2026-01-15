@@ -28,7 +28,3 @@ exports.getWallets = async (req, res) => {
 };
 
 
-
-module.exports = {
-  resetDemo
-};
