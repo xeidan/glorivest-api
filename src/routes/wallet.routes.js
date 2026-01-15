@@ -11,11 +11,6 @@ const walletController = require('../controllers/wallet.controller');
 router.get('/', auth, walletController.getWallets);
 
 // reset demo wallet
-router.post(
-  '/:walletId/demo-reset',
-  auth,
-  walletController.resetDemoWallet
-);
+router.post('/:id/demo-reset', auth, walletController.resetDemo);
 
 module.exports = router;
-

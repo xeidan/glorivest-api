@@ -7,6 +7,8 @@ const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
 const { sendMailSafe, EmailTpl } = require('../utils/email');
 const { logDevice, getDevices } = require('../utils/device');
+const { ensureUserWallets } = require('../services/wallet.service');
+
 
 // -----------------------------
 // Constants
@@ -27,6 +29,10 @@ function signToken(user) {
 
 function genOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function generateReferralCode(userId) {
+  return `GVREF${100000 + userId}`;
 }
 
 function error(res, status = 400, message = 'Bad request') {
@@ -139,57 +145,20 @@ const verifyOtp = async (req, res) => {
 
     const user = userQ.rows[0];
 
-    // 4. Check if wallets already exist
-    const walletsQ = await client.query(
-      `SELECT 1 FROM wallets WHERE user_id=$1 LIMIT 1`,
-      [user.id]
+    // Ensure referral code exists
+    const referralCode = generateReferralCode(user.id);
+
+    await client.query(
+      `
+      UPDATE users
+      SET referral_code = COALESCE(referral_code, $1)
+      WHERE id = $2
+      `,
+      [referralCode, user.id]
     );
 
-    if (!walletsQ.rows.length) {
-      // REAL wallet
-      const real = await client.query(
-        `
-        INSERT INTO wallets (user_id, code, type)
-        VALUES ($1, $2, 'REAL')
-        RETURNING id
-        `,
-        [user.id, `GV${user.id}-REAL`]
-      );
 
-      // DEMO wallet
-      const demo = await client.query(
-        `
-        INSERT INTO wallets (user_id, code, type, balance_cents)
-        VALUES ($1, $2, 'DEMO', 1000000)
-        RETURNING id
-        `,
-        [user.id, `GV${user.id}-DEMO`]
-      );
-
-      // DEMO opening ledger
-      await client.query(
-        `
-        INSERT INTO ledger (
-          user_id,
-          wallet_id,
-          type,
-          amount_cents,
-          balance_after_cents
-        )
-        VALUES ($1, $2, 'demo_opening', 1000000, 1000000)
-        `,
-        [user.id, demo.rows[0].id]
-      );
-
-      // REFERRAL wallet
-      await client.query(
-        `
-        INSERT INTO wallets (user_id, code, type)
-        VALUES ($1, $2, 'REFERRAL')
-        `,
-        [user.id, `GV${user.id}-REF`]
-      );
-    }
+    await ensureUserWallets(user.id);
 
     await client.query('COMMIT');
 
@@ -271,6 +240,9 @@ const login = async (req, res) => {
       console.warn('Device log failed:', e.message);
     }
 
+    // Ensure user has wallets// Ensure wallets always exist
+    await ensureUserWallets(user.id);
+
     const token = signToken({ id: user.id, email: user.email });
 
     return res.json({
@@ -303,11 +275,14 @@ const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
+    // -----------------------------
+    // User
+    // -----------------------------
     const { rows: userRows } = await pool.query(
       `
-      SELECT id, email
+      SELECT id, email, referral_code
       FROM users
-      WHERE id=$1
+      WHERE id = $1
       LIMIT 1
       `,
       [userId]
@@ -319,22 +294,48 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
+    // -----------------------------
+    // Wallets
+    // -----------------------------
     const { rows: wallets } = await pool.query(
       `
       SELECT id, code, type, balance_cents, status
       FROM wallets
-      WHERE user_id=$1
+      WHERE user_id = $1
       ORDER BY created_at ASC
       `,
       [userId]
     );
 
+    // -----------------------------
+    // Referral stats
+    // -----------------------------
+    const { rows: refCount } = await pool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM users
+      WHERE referred_by = $1
+      `,
+      [userId]
+    );
+
+    const referralWallet = wallets.find(w => w.type === 'REFERRAL');
+
+    // -----------------------------
+    // Final response (SINGLE return)
+    // -----------------------------
     return res.json({
       id: user.id,
       email: user.email,
+      referral_code: user.referral_code,
       glorivest_id: `GV${150000 + user.id}`,
+      total_referrals: refCount[0].count,
+      referral_earnings: referralWallet
+        ? Number(referralWallet.balance_cents) / 100
+        : 0,
       wallets
     });
+
   } catch (err) {
     console.error('me error', err);
     return res.status(500).json({ message: 'Server error' });

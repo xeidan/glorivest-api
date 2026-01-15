@@ -1,35 +1,71 @@
 // src/services/wallet.service.js
-'use strict';
+const pool = require('../db');
 
-const { pool } = require('../config/database');
-const tron = require('../crypto/tron');
-const { decrypt } = require('../utils/crypto');
-
-exports.generateUserWallet = async (userId) => {
-  const { address, privEnc } = await tron.createWallet();
-
+/**
+ * Ensure user has REAL, DEMO, and REFERRAL wallets.
+ * Safe to call multiple times.
+ */
+async function ensureUserWallets(userId) {
+  // Ensure wallets exist
   await pool.query(
-    `UPDATE users 
-     SET tron_wallet=$1, tron_private_encrypted=$2
-     WHERE id=$3`,
-    [address, privEnc, userId]
+    `
+    INSERT INTO wallets (user_id, type, balance_cents, status)
+    VALUES
+      ($1, 'REAL', 0, 'active'),
+      ($1, 'DEMO', 1000000, 'active'),
+      ($1, 'REFERRAL', 0, 'active')
+    ON CONFLICT (user_id, type) DO NOTHING
+    `,
+    [userId]
   );
 
-  return { address };
-};
+  // HARD NORMALIZE demo wallet (authoritative)
+  await pool.query(
+    `
+    UPDATE wallets
+    SET balance_cents = 1000000
+    WHERE user_id=$1 AND type='DEMO'
+    `,
+    [userId]
+  );
+}
 
-// Get live balance from TRON node
-exports.getTronBalance = tron.getUsdtBalance;
 
-// Sweep a specific wallet
-exports.sweepWallet = async (wallet) => {
-  const bal = await tron.getUsdtBalance(wallet.address);
-  if (bal <= 0) return false;
+/**
+ * Reset demo wallet to $10,000
+ */
+async function resetDemoWallet(userId, walletId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM wallets WHERE id=$1 AND user_id=$2 AND type='DEMO'`,
+    [walletId, userId]
+  );
 
-  let priv;
-  try { priv = decrypt(wallet.priv_enc); }
-  catch { return false; }
+  if (!rows.length) {
+    throw new Error('Invalid demo wallet');
+  }
 
-  await tron.sendFromPrivateKey(priv, wallet.destination, bal);
-  return true;
+  await pool.query(
+    `UPDATE wallets SET balance_cents=1000000 WHERE id=$1`,
+    [walletId]
+  );
+}
+
+/**
+ * Credit referral wallet
+ */
+async function creditReferralWallet(userId, cents) {
+  await pool.query(
+    `
+    UPDATE wallets
+    SET balance_cents = balance_cents + $1
+    WHERE user_id=$2 AND type='REFERRAL'
+    `,
+    [cents, userId]
+  );
+}
+
+module.exports = {
+  ensureUserWallets,
+  resetDemoWallet,
+  creditReferralWallet
 };
