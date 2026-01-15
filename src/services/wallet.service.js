@@ -1,12 +1,11 @@
 // src/services/wallet.service.js
-const pool = require('../db');
+const { pool } = require('../config/database');
 
 /**
  * Ensure user has REAL, DEMO, and REFERRAL wallets.
  * Safe to call multiple times.
  */
 async function ensureUserWallets(userId) {
-  // Ensure wallets exist
   await pool.query(
     `
     INSERT INTO wallets (user_id, type, balance_cents, status)
@@ -18,18 +17,7 @@ async function ensureUserWallets(userId) {
     `,
     [userId]
   );
-
-  // HARD NORMALIZE demo wallet (authoritative)
-  await pool.query(
-    `
-    UPDATE wallets
-    SET balance_cents = 1000000
-    WHERE user_id=$1 AND type='DEMO'
-    `,
-    [userId]
-  );
 }
-
 
 /**
  * Reset demo wallet to $10,000

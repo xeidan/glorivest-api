@@ -27,16 +27,7 @@ exports.getWallets = async (req, res) => {
   res.json(rows);
 };
 
-const { resetDemoWallet } = require('../services/wallet.service');
 
-exports.resetDemo = async (req, res) => {
-  try {
-    await resetDemoWallet(req.user.id, req.params.id);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
-};
 
 module.exports = {
   resetDemo
