@@ -8,6 +8,7 @@ const { JWT_SECRET } = require('../config/env');
 const { sendMailSafe, EmailTpl } = require('../utils/email');
 const { logDevice, getDevices } = require('../utils/device');
 const { ensureUserWallets } = require('../services/wallet.service');
+const { generateReferralCode } = require('../utils/referralCode');
 
 
 // -----------------------------
@@ -45,6 +46,33 @@ const STRONG_PASSWORD_REGEX =
 function validatePassword(password) {
   return STRONG_PASSWORD_REGEX.test(password);
 }
+
+
+// -----------------------------
+// REFERRAL CODE ENSURE
+// -----------------------------
+const user = userQ.rows[0];
+
+// Generate referral code ONLY if missing
+if (!user.referral_code) {
+  let referralCode;
+  let exists = true;
+
+  while (exists) {
+    referralCode = generateReferralCode();
+    const check = await client.query(
+      `SELECT 1 FROM users WHERE referral_code = $1 LIMIT 1`,
+      [referralCode]
+    );
+    exists = check.rows.length > 0;
+  }
+
+  await client.query(
+    `UPDATE users SET referral_code = $1 WHERE id = $2`,
+    [referralCode, user.id]
+  );
+}
+
 
 // -----------------------------
 // REGISTER (OTP ONLY, NO USER)
@@ -168,6 +196,8 @@ const verifyOtp = async (req, res) => {
       { expiresIn: '7d' }
     );
 
+    
+
     return res.json({
       message: 'OTP verified',
       token,
@@ -273,9 +303,7 @@ const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // -----------------------------
-    // User
-    // -----------------------------
+    // 1. User basic info
     const { rows: userRows } = await pool.query(
       `
       SELECT id, email, referral_code
@@ -292,9 +320,7 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
-    // -----------------------------
-    // Wallets
-    // -----------------------------
+    // 2. Wallets
     const { rows: wallets } = await pool.query(
       `
       SELECT id, code, type, balance_cents, status
@@ -305,9 +331,7 @@ const me = async (req, res) => {
       [userId]
     );
 
-    // -----------------------------
-    // Referral stats
-    // -----------------------------
+    // 3. Referral count
     const { rows: refCount } = await pool.query(
       `
       SELECT COUNT(*)::int AS count
@@ -317,28 +341,27 @@ const me = async (req, res) => {
       [userId]
     );
 
+    // 4. Referral wallet balance
     const referralWallet = wallets.find(w => w.type === 'REFERRAL');
 
-    // -----------------------------
-    // Final response (SINGLE return)
-    // -----------------------------
     return res.json({
       id: user.id,
       email: user.email,
       referral_code: user.referral_code,
-      glorivest_id: `GV${150000 + user.id}`,
       total_referrals: refCount[0].count,
       referral_earnings: referralWallet
         ? Number(referralWallet.balance_cents) / 100
         : 0,
+      glorivest_id: `GV${150000 + user.id}`,
       wallets
     });
 
   } catch (err) {
-    console.error('me error', err);
+    console.error('me error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 
 // -----------------------------
