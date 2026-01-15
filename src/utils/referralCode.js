@@ -1,11 +1,15 @@
-const CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+// src/utils/referralCode.js
+'use strict';
 
-function generateReferralCode(length = 5) {
+function generateReferralCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let code = '';
-  for (let i = 0; i < length; i++) {
-    code += CHARS[Math.floor(Math.random() * CHARS.length)];
+  for (let i = 0; i < 5; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return code;
 }
 
-module.exports = { generateReferralCode };
+module.exports = {
+  generateReferralCode
+};
