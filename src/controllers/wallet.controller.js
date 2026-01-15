@@ -28,3 +28,7 @@ exports.getWallets = async (req, res) => {
 };
 
 
+
+module.exports = {
+  getWallets
+};
