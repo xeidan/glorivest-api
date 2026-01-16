@@ -99,7 +99,7 @@ const transferReferralToReal = async (req, res) => {
       return res.status(400).json({ message: 'Required wallets missing' });
     }
 
-    if (Number(referralWallet.balance_cents) < amount_cents) {
+if (Number(referralWallet.balance_cents) < Number(amount_cents)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'Insufficient referral balance' });
     }

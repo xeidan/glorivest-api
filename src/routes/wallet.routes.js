@@ -10,4 +10,5 @@ router.get('/', auth, walletController.getWallets);
 router.post('/:id/demo-reset', auth, walletController.resetDemoWallet);
 router.post('/referral-transfer', auth, walletController.transferReferralToReal);
 
+
 module.exports = router;
