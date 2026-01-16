@@ -63,10 +63,6 @@ const resetDemoWallet = async (req, res) => {
 
 
 
-// Transfer referral funds to real wallet
-
-const { pool } = require('../config/database');
-
 /**
  * Transfer funds from REFERRAL wallet → REAL wallet
  */
