@@ -1,149 +1,140 @@
-// src/controllers/trade.controller.js
 'use strict';
 
 const { pool } = require('../config/database');
 
 /**
- * Open a trade (DEMO or REAL only)
+ * START TRADE / BOT CYCLE
  */
-const openTrade = async (req, res) => {
+const startTrade = async (req, res) => {
+  const userId = req.user.id;
+  const { amount_cents, wallet_type } = req.body;
+
+  if (!amount_cents || amount_cents <= 0) {
+    return res.status(400).json({ message: 'Invalid amount' });
+  }
+
+  if (!['DEMO', 'REAL'].includes(wallet_type)) {
+    return res.status(400).json({ message: 'Invalid wallet type' });
+  }
+
   const client = await pool.connect();
+
   try {
-    const userId = req.user.id;
-    const { wallet_id, symbol, amount_cents, side } = req.body;
-
-    if (!wallet_id || !symbol || !amount_cents || !side) {
-      return res.status(400).json({ message: 'Missing required fields' });
-    }
-
     await client.query('BEGIN');
 
-    // 1. Validate wallet
-    const walletQ = await client.query(
+    // Lock wallet
+    const { rows } = await client.query(
       `
-      SELECT id, type, balance_cents
+      SELECT id, balance_cents
       FROM wallets
-      WHERE id=$1 AND user_id=$2 AND status='active'
-      LIMIT 1
+      WHERE user_id=$1 AND type=$2
+      FOR UPDATE
       `,
-      [wallet_id, userId]
+      [userId, wallet_type]
     );
 
-    if (!walletQ.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Invalid wallet' });
+    if (!rows.length) throw new Error('Wallet not found');
+
+    const wallet = rows[0];
+
+    if (Number(wallet.balance_cents) < amount_cents) {
+      throw new Error('Insufficient balance');
     }
 
-    const wallet = walletQ.rows[0];
-
-    if (!['DEMO', 'REAL'].includes(wallet.type)) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ message: 'Trading not allowed on this wallet' });
-    }
-
-    if (Number(wallet.balance_cents) < Number(amount_cents)) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Insufficient balance' });
-    }
-
-    // 2. Debit wallet
+    // Deduct capital
     await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents - $1
-      WHERE id=$2
-      `,
+      `UPDATE wallets SET balance_cents = balance_cents - $1 WHERE id=$2`,
       [amount_cents, wallet.id]
     );
 
-    // 3. Create trade
-    const tradeQ = await client.query(
+    // Create cycle
+    const { rows: cycleRows } = await client.query(
       `
-      INSERT INTO trades (user_id, wallet_id, symbol, side, amount_cents, status)
-      VALUES ($1, $2, $3, $4, $5, 'OPEN')
+      INSERT INTO trading_cycles (user_id, wallet_type, capital_cents, status)
+      VALUES ($1,$2,$3,'RUNNING')
       RETURNING *
       `,
-      [userId, wallet.id, symbol, side, amount_cents]
+      [userId, wallet_type, amount_cents]
     );
 
     await client.query('COMMIT');
 
-    return res.json({
-      message: 'Trade opened',
-      trade: tradeQ.rows[0]
-    });
+    res.json({ cycle: cycleRows[0] });
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('openTrade error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    res.status(400).json({ message: err.message });
   } finally {
     client.release();
   }
 };
 
 /**
- * Close trade (credit back to same wallet)
+ * COMPLETE TRADE / BOT CYCLE
+ * (used by worker OR manual claim)
  */
-const closeTrade = async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const userId = req.user.id;
-    const { trade_id, pnl_cents } = req.body;
+const completeCycle = async (req, res) => {
+  const userId = req.user.id;
+  const { cycle_id, profit_cents } = req.body;
 
+  const client = await pool.connect();
+
+  try {
     await client.query('BEGIN');
 
-    const tradeQ = await client.query(
+    const { rows } = await client.query(
       `
       SELECT *
-      FROM trades
-      WHERE id=$1 AND user_id=$2 AND status='OPEN'
-      LIMIT 1
+      FROM trading_cycles
+      WHERE id=$1 AND user_id=$2 AND status='RUNNING'
+      FOR UPDATE
       `,
-      [trade_id, userId]
+      [cycle_id, userId]
     );
 
-    if (!tradeQ.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Trade not found' });
-    }
+    if (!rows.length) throw new Error('Active cycle not found');
 
-    const trade = tradeQ.rows[0];
+    const cycle = rows[0];
 
-    // 1. Close trade
-    await client.query(
-      `
-      UPDATE trades
-      SET status='CLOSED', pnl_cents=$1, closed_at=now()
-      WHERE id=$2
-      `,
-      [pnl_cents, trade.id]
-    );
-
-    // 2. Credit wallet
+    // Credit wallet
     await client.query(
       `
       UPDATE wallets
       SET balance_cents = balance_cents + $1
+      WHERE user_id=$2 AND type=$3
+      `,
+      [
+        cycle.capital_cents + (profit_cents || 0),
+        userId,
+        cycle.wallet_type
+      ]
+    );
+
+    // Close cycle
+    await client.query(
+      `
+      UPDATE trading_cycles
+      SET status='COMPLETED',
+          profit_cents=$1,
+          completed_at=now()
       WHERE id=$2
       `,
-      [trade.amount_cents + pnl_cents, trade.wallet_id]
+      [profit_cents || 0, cycle.id]
     );
 
     await client.query('COMMIT');
 
-    return res.json({ message: 'Trade closed' });
+    res.json({ message: 'Cycle completed' });
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('closeTrade error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    res.status(400).json({ message: err.message });
   } finally {
     client.release();
   }
 };
 
 module.exports = {
-  openTrade,
-  closeTrade
+  startTrade,
+  completeCycle
 };

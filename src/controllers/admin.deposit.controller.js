@@ -1,16 +1,19 @@
+// admin.deposit.controller.js
 'use strict';
 
 const REWARD_PERCENT = 0.05;
 
-/**
- * Reward referrer on FIRST approved deposit only
- * Must be called inside the same transaction that approves the deposit
- */
 const rewardReferral = async (client, depositId) => {
+  // Lock deposit + user
   const { rows } = await client.query(
     `
-    SELECT d.id, d.amount_cents, d.referral_rewarded,
-           u.id AS user_id, u.referred_by, u.first_deposit_done
+    SELECT 
+      d.id,
+      d.amount_cents,
+      d.referral_rewarded,
+      u.id AS user_id,
+      u.referred_by,
+      u.first_deposit_done
     FROM deposits d
     JOIN users u ON u.id = d.user_id
     WHERE d.id = $1
@@ -23,25 +26,47 @@ const rewardReferral = async (client, depositId) => {
 
   const deposit = rows[0];
 
+  // Guards
   if (
-    deposit.referral_rewarded ||
-    deposit.first_deposit_done ||
-    !deposit.referred_by
+    !deposit.referred_by ||          // no referrer
+    deposit.first_deposit_done ||    // already rewarded
+    deposit.referral_rewarded
   ) {
     return;
   }
 
-  const rewardCents = Math.floor(deposit.amount_cents * REWARD_PERCENT);
+  // 1️⃣ Resolve referral_code → referrer user.id
+  const { rows: refRows } = await client.query(
+    `
+    SELECT id
+    FROM users
+    WHERE referral_code = $1
+    LIMIT 1
+    `,
+    [deposit.referred_by] // TEXT → TEXT
+  );
 
+  if (!refRows.length) return;
+
+  const referrerId = refRows[0].id;
+
+  // 2️⃣ Calculate reward
+  const rewardCents = Math.floor(
+    Number(deposit.amount_cents) * REWARD_PERCENT
+  );
+
+  // 3️⃣ Credit referrer wallet
   await client.query(
     `
     UPDATE wallets
     SET balance_cents = balance_cents + $1
-    WHERE user_id = $2 AND type = 'REFERRAL'
+    WHERE user_id = $2
+      AND type = 'REFERRAL'
     `,
-    [rewardCents, deposit.referred_by]
+    [rewardCents, referrerId]
   );
 
+  // 4️⃣ Mark flags
   await client.query(
     `
     UPDATE users
@@ -61,6 +86,4 @@ const rewardReferral = async (client, depositId) => {
   );
 };
 
-module.exports = {
-  rewardReferral
-};
+module.exports = { rewardReferral };

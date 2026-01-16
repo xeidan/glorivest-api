@@ -28,4 +28,5 @@ router.post('/update-email/request', requireAuth, authCtrl.requestEmailUpdate);
 router.post('/update-email/confirm', requireAuth, authCtrl.confirmEmailUpdate);
 router.post('/delete-account', requireAuth, authCtrl.deleteAccount);
 
+
 module.exports = router;
