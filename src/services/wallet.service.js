@@ -1,43 +1,69 @@
-// src/services/wallet.service.js
 'use strict';
 
 const { pool } = require('../config/database');
 
 /**
+ * Generate deterministic wallet code
+ * Example: GV2-REAL, GV2-DEMO, GV2-REF
+ */
+function makeWalletCode(userId, type) {
+  return `GV${userId}-${type}`;
+}
+
+/**
  * Ensure user has REAL, DEMO, and REFERRAL wallets.
- * Safe to call multiple times.
+ * SAFE to call multiple times.
  */
 async function ensureUserWallets(userId) {
-  await pool.query(
-    `
-    INSERT INTO wallets (user_id, type, balance_cents, status)
-    VALUES
-      ($1, 'REAL', 0, 'active'),
-      ($1, 'DEMO', 1000000, 'active'),
-      ($1, 'REFERRAL', 0, 'active')
-    ON CONFLICT (user_id, type) DO NOTHING
-    `,
-    [userId]
-  );
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    await client.query(
+      `
+      INSERT INTO wallets (user_id, code, type, balance_cents, status)
+      VALUES
+        ($1, $2, 'REAL', 0, 'active'),
+        ($1, $3, 'DEMO', 1000000, 'active'),
+        ($1, $4, 'REFERRAL', 0, 'active')
+      ON CONFLICT (user_id, type) DO NOTHING
+      `,
+      [
+        userId,
+        makeWalletCode(userId, 'REAL'),
+        makeWalletCode(userId, 'DEMO'),
+        makeWalletCode(userId, 'REFERRAL')
+      ]
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
  * Reset demo wallet to $10,000
  */
 async function resetDemoWallet(userId, walletId) {
-  const { rows } = await pool.query(
-    `SELECT id FROM wallets WHERE id=$1 AND user_id=$2 AND type='DEMO'`,
+  const { rowCount } = await pool.query(
+    `
+    UPDATE wallets
+    SET balance_cents = 1000000
+    WHERE id = $1
+      AND user_id = $2
+      AND type = 'DEMO'
+    `,
     [walletId, userId]
   );
 
-  if (!rows.length) {
+  if (!rowCount) {
     throw new Error('Invalid demo wallet');
   }
-
-  await pool.query(
-    `UPDATE wallets SET balance_cents=1000000 WHERE id=$1`,
-    [walletId]
-  );
 }
 
 /**
@@ -48,7 +74,8 @@ async function creditReferralWallet(userId, cents) {
     `
     UPDATE wallets
     SET balance_cents = balance_cents + $1
-    WHERE user_id=$2 AND type='REFERRAL'
+    WHERE user_id = $2
+      AND type = 'REFERRAL'
     `,
     [cents, userId]
   );
