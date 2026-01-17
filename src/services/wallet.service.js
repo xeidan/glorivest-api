@@ -15,36 +15,24 @@ function makeWalletCode(userId, type) {
  * SAFE to call multiple times.
  */
 async function ensureUserWallets(userId) {
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    await client.query(
-      `
-      INSERT INTO wallets (user_id, code, type, balance_cents, status)
-      VALUES
-        ($1, $2, 'REAL', 0, 'active'),
-        ($1, $3, 'DEMO', 1000000, 'active'),
-        ($1, $4, 'REFERRAL', 0, 'active')
-      ON CONFLICT (user_id, type) DO NOTHING
-      `,
-      [
-        userId,
-        makeWalletCode(userId, 'REAL'),
-        makeWalletCode(userId, 'DEMO'),
-        makeWalletCode(userId, 'REFERRAL')
-      ]
-    );
-
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  await pool.query(
+    `
+    INSERT INTO wallets (user_id, code, type, balance_cents, status)
+    VALUES
+      ($1, $2, 'REAL', 0, 'active'),
+      ($1, $3, 'DEMO', 1000000, 'active'),
+      ($1, $4, 'REFERRAL', 0, 'active')
+    ON CONFLICT (user_id, type) DO NOTHING
+    `,
+    [
+      userId,
+      `GV${userId}-REAL`,
+      `GV${userId}-DEMO`,
+      `GV${userId}-REF`
+    ]
+  );
 }
+
 
 /**
  * Reset demo wallet to $10,000

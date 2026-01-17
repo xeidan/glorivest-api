@@ -52,7 +52,8 @@ function validatePassword(password) {
 // -----------------------------
 const register = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, referral_code: inputReferralCode } = req.body;
+
     if (!email || !password) {
       return error(res, 400, 'Email and password are required');
     }
@@ -66,17 +67,54 @@ const register = async (req, res) => {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
+
+    // 1️⃣ Check if email already exists
+    const { rows: existing } = await pool.query(
+      `SELECT id FROM users WHERE email = $1`,
+      [normalizedEmail]
+    );
+
+    if (existing.length) {
+      return error(res, 409, 'Email already registered');
+    }
+
+    // 2️⃣ Resolve referral code → BIGINT user id
+    let referredBy = null;
+
+    if (inputReferralCode) {
+      const { rows } = await pool.query(
+        `SELECT id FROM users WHERE referral_code = $1`,
+        [inputReferralCode.trim()]
+      );
+
+      if (rows.length) {
+        referredBy = rows[0].id; // ✅ BIGINT
+      }
+    }
+
+    // 3️⃣ Hash password
     const hash = await bcrypt.hash(password, 10);
+
+    // 4️⃣ Generate OTP
     const code = genOtp();
 
+    // 5️⃣ Store OTP + registration payload
     await pool.query(
       `
       INSERT INTO otps (email, code, purpose, expires_at, meta)
       VALUES ($1, $2, 'verify', NOW() + INTERVAL '${OTP_TTL_MIN} minutes', $3)
       `,
-      [normalizedEmail, code, JSON.stringify({ password_hash: hash })]
+      [
+        normalizedEmail,
+        code,
+        JSON.stringify({
+          password_hash: hash,
+          referred_by: referredBy // ✅ stored safely for verification step
+        })
+      ]
     );
 
+    // 6️⃣ Send email
     await sendMailSafe({
       to: normalizedEmail,
       subject: 'Your Glorivest verification code',
@@ -86,6 +124,7 @@ const register = async (req, res) => {
     });
 
     return res.json({ message: 'OTP sent' });
+
   } catch (err) {
     console.error('register error', err);
     return error(res, 500, 'Server error');
@@ -96,81 +135,92 @@ const register = async (req, res) => {
 
 
 
+
 // -----------------------------
 // VERIFY OTP (CREATE USER + WALLETS)
 // -----------------------------
 const verifyOtp = async (req, res) => {
   const client = await pool.connect();
+
   try {
     const { email, code, purpose = 'verify' } = req.body;
+
     if (!email || !code) {
       return res.status(400).json({ message: 'Email and code required' });
     }
 
+    const normalizedEmail = email.toLowerCase().trim();
+
     await client.query('BEGIN');
 
-    // 1. Validate OTP
-    const otpQ = await client.query(
+    // 1️⃣ Validate OTP
+    const { rows: otpRows } = await client.query(
       `
-      SELECT * FROM otps
-      WHERE email=$1
-        AND code=$2
-        AND purpose=$3
-        AND used=false
+      SELECT *
+      FROM otps
+      WHERE email = $1
+        AND code = $2
+        AND purpose = $3
+        AND used = false
         AND expires_at > now()
       LIMIT 1
       `,
-      [email.toLowerCase(), code, purpose]
+      [normalizedEmail, code, purpose]
     );
 
-    if (!otpQ.rows.length) {
+    if (!otpRows.length) {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'Invalid or expired OTP' });
     }
 
-    const otp = otpQ.rows[0];
+    const otp = otpRows[0];
+    const meta = otp.meta || {};
 
-    // 2. Mark OTP used
-    await client.query(`UPDATE otps SET used=true WHERE id=$1`, [otp.id]);
-
-    // 3. Fetch user (must already exist from /register)
-    const userQ = await client.query(
-      `SELECT id, email FROM users WHERE email=$1 LIMIT 1`,
-      [email.toLowerCase()]
-    );
-
-    if (!userQ.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'User not found' });
+    if (!meta.password_hash) {
+      throw new Error('OTP meta missing password hash');
     }
 
-    const user = userQ.rows[0];
-
-    // 3. Ensure referral code exists
-    const referralCode = generateReferralCode();
-
+    // 2️⃣ Mark OTP as used
     await client.query(
-      `
-      UPDATE users
-      SET referral_code = COALESCE(referral_code, $1)
-      WHERE id = $2
-      `,
-      [referralCode, user.id]
+      `UPDATE otps SET used = true WHERE id = $1`,
+      [otp.id]
     );
 
-// 4. Ensure wallets
+    // 3️⃣ Create user (THIS WAS MISSING)
+    const referralCode = generateReferralCode();
 
+    const { rows: userRows } = await client.query(
+      `
+      INSERT INTO users (
+        email,
+        password_hash,
+        referral_code,
+        referred_by
+      )
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, email
+      `,
+      [
+        normalizedEmail,
+        meta.password_hash,
+        referralCode,
+        meta.referred_by ?? null // ✅ BIGINT OR NULL ONLY
+      ]
+    );
+
+    const user = userRows[0];
+
+    // 4️⃣ Ensure wallets (REAL, DEMO, REFERRAL)
     await ensureUserWallets(user.id);
 
     await client.query('COMMIT');
 
+    // 5️⃣ Issue JWT
     const token = jwt.sign(
       { id: user.id, email: user.email },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
-
-    
 
     return res.json({
       message: 'OTP verified',
@@ -186,6 +236,7 @@ const verifyOtp = async (req, res) => {
     client.release();
   }
 };
+
 
 
 
@@ -277,12 +328,13 @@ const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // 1️⃣ User
+    // 1️⃣ Fetch user (NO referral joins, NO casts)
     const { rows: userRows } = await pool.query(
       `
       SELECT id, email, referral_code
       FROM users
       WHERE id = $1
+      LIMIT 1
       `,
       [userId]
     );
@@ -293,7 +345,7 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
-    // 2️⃣ Wallets
+    // 2️⃣ Fetch wallets
     const { rows: wallets } = await pool.query(
       `
       SELECT id, code, type, balance_cents, status
@@ -307,23 +359,19 @@ const me = async (req, res) => {
     const referralWallet =
       wallets.find(w => w.type === 'REFERRAL') || null;
 
-    // 3️⃣ Referral count — TEXT → TEXT ONLY
-    let totalReferrals = 0;
+    // 3️⃣ COUNT referrals CORRECTLY (BIGINT → BIGINT)
+    const { rows: countRows } = await pool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM users
+      WHERE referred_by = $1
+      `,
+      [userId] // ✅ THIS IS THE FIX
+    );
 
-    if (user.referral_code) {
-      const { rows } = await pool.query(
-        `
-        SELECT COUNT(*)::int AS count
-        FROM users
-        WHERE referred_by = $1
-        `,
-        [user.referral_code] // ✅ STRING ONLY
-      );
+    const totalReferrals = countRows[0]?.count || 0;
 
-      totalReferrals = rows[0].count;
-    }
-
-    // 4️⃣ Response
+    // 4️⃣ Respond
     return res.json({
       id: user.id,
       email: user.email,
@@ -342,9 +390,6 @@ const me = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
-
-
-
 
 
 
