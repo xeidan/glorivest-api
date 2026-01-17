@@ -277,13 +277,12 @@ const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // 1. Fetch user
+    // 1️⃣ User
     const { rows: userRows } = await pool.query(
       `
       SELECT id, email, referral_code
       FROM users
       WHERE id = $1
-      LIMIT 1
       `,
       [userId]
     );
@@ -294,7 +293,7 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
-    // 2. Fetch wallets
+    // 2️⃣ Wallets
     const { rows: wallets } = await pool.query(
       `
       SELECT id, code, type, balance_cents, status
@@ -308,7 +307,7 @@ const me = async (req, res) => {
     const referralWallet =
       wallets.find(w => w.type === 'REFERRAL') || null;
 
-    // 3. Count referrals (TEXT → TEXT ONLY)
+    // 3️⃣ Referral count — TEXT → TEXT ONLY
     let totalReferrals = 0;
 
     if (user.referral_code) {
@@ -318,13 +317,13 @@ const me = async (req, res) => {
         FROM users
         WHERE referred_by = $1
         `,
-        [user.referral_code] // ✅ TEXT
+        [user.referral_code] // ✅ STRING ONLY
       );
 
-      totalReferrals = rows[0]?.count || 0;
+      totalReferrals = rows[0].count;
     }
 
-    // 4. Respond
+    // 4️⃣ Response
     return res.json({
       id: user.id,
       email: user.email,
@@ -343,6 +342,7 @@ const me = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 
 
