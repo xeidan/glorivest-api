@@ -50,7 +50,6 @@ const resetDemoWallet = async (req, res) => {
     );
 
     await client.query('COMMIT');
-
     res.json({ balance_cents: DEMO_BALANCE_CENTS });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -61,16 +60,14 @@ const resetDemoWallet = async (req, res) => {
   }
 };
 
-
-
 /**
  * Transfer funds from REFERRAL wallet → REAL wallet
  */
 const transferReferralToReal = async (req, res) => {
   const userId = req.user.id;
-  const { amount_cents } = req.body;
+  const amount = Number(req.body.amount_cents);
 
-  if (!amount_cents || amount_cents <= 0) {
+  if (!Number.isInteger(amount) || amount <= 0) {
     return res.status(400).json({ message: 'Invalid amount' });
   }
 
@@ -79,7 +76,6 @@ const transferReferralToReal = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Lock both wallets
     const { rows: wallets } = await client.query(
       `
       SELECT id, type, balance_cents
@@ -95,36 +91,32 @@ const transferReferralToReal = async (req, res) => {
     const realWallet = wallets.find(w => w.type === 'REAL');
 
     if (!referralWallet || !realWallet) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Required wallets missing' });
+      throw new Error('Required wallets not found');
     }
 
-if (Number(referralWallet.balance_cents) < Number(amount_cents)) {
+    if (Number(referralWallet.balance_cents) < amount) {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'Insufficient referral balance' });
     }
 
-    // Deduct from referral
     await client.query(
       `
       UPDATE wallets
       SET balance_cents = balance_cents - $1
       WHERE id = $2
       `,
-      [amount_cents, referralWallet.id]
+      [amount, referralWallet.id]
     );
 
-    // Credit real wallet
     await client.query(
       `
       UPDATE wallets
       SET balance_cents = balance_cents + $1
       WHERE id = $2
       `,
-      [amount_cents, realWallet.id]
+      [amount, realWallet.id]
     );
 
-    // Optional: record internal transaction
     await client.query(
       `
       INSERT INTO transactions (
@@ -133,34 +125,24 @@ if (Number(referralWallet.balance_cents) < Number(amount_cents)) {
         amount_cents,
         meta
       )
-      VALUES ($1, 'REFERRAL_TRANSFER', $2, $3)
+      VALUES ($1, 'referral_transfer', $2, jsonb_build_object(
+        'from_wallet', 'REFERRAL',
+        'to_wallet', 'REAL'
+      ))
       `,
-      [
-        userId,
-        amount_cents,
-        JSON.stringify({
-          from: 'REFERRAL',
-          to: 'REAL'
-        })
-      ]
+      [userId, amount]
     );
 
     await client.query('COMMIT');
-
-    return res.json({
-      message: 'Referral funds transferred',
-      amount_cents
-    });
-
+    res.json({ message: 'Transfer successful' });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('transferReferralToReal error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Referral transfer error:', err);
+    res.status(500).json({ message: 'Transfer failed' });
   } finally {
     client.release();
   }
 };
-
 
 module.exports = {
   getWallets,

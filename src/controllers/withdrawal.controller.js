@@ -1,33 +1,49 @@
-// src/controllers/withdrawal.controller.js
-'use strict';
+// 🔒 WALLET RULE ENFORCEMENT — HARD STOP
+const { wallet_id, amount_cents } = req.body;
 
-const withdrawalService = require('../services/withdrawal.service');
+if (!wallet_id || !amount_cents) {
+  return res.status(400).json({ message: 'wallet_id and amount_cents required' });
+}
 
-exports.requestWithdrawal = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { amount_usd, address } = req.body;
+// Fetch wallet
+const { rows: walletRows } = await pool.query(
+  `
+  SELECT id, type, balance_cents
+  FROM wallets
+  WHERE id = $1 AND user_id = $2
+  LIMIT 1
+  `,
+  [wallet_id, req.user.id]
+);
 
-    const r = await withdrawalService.createWithdrawalRequest(
-      userId,
-      amount_usd,
-      address
-    );
+if (!walletRows.length) {
+  return res.status(404).json({ message: 'Wallet not found' });
+}
 
-    return res.json(r);
-  } catch (err) {
-    console.error('requestWithdrawal error:', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
+const wallet = walletRows[0];
 
-exports.myWithdrawals = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const list = await withdrawalService.listWithdrawals(userId);
-    return res.json(list);
-  } catch (err) {
-    console.error('myWithdrawals error:', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
+// ❌ DEMO WALLET: NEVER ALLOWED
+if (wallet.type === 'DEMO') {
+  return res.status(403).json({
+    message: 'Withdrawals are not allowed from demo wallet'
+  });
+}
+
+// ❌ REFERRAL WALLET: NEVER ALLOWED
+if (wallet.type === 'REFERRAL') {
+  return res.status(403).json({
+    message: 'Withdrawals are not allowed from referral wallet'
+  });
+}
+
+// ✅ ONLY REAL WALLET ALLOWED
+if (wallet.type !== 'REAL') {
+  return res.status(403).json({
+    message: 'Invalid wallet type for withdrawal'
+  });
+}
+
+// ❌ INSUFFICIENT BALANCE
+if (Number(wallet.balance_cents) < Number(amount_cents)) {
+  return res.status(400).json({ message: 'Insufficient balance' });
+}

@@ -104,4 +104,58 @@ WHERE w.id = $1;
   }
 }
 
+'use strict';
+const { pool } = require('../config/database');
+
+(async () => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `
+      SELECT * FROM trading_cycles
+      WHERE status='RUNNING'
+        AND completes_at <= NOW()
+      FOR UPDATE
+      `
+    );
+
+    for (const c of rows) {
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = balance_cents + $1
+        WHERE user_id=$2 AND type=$3
+        `,
+        [
+          c.capital_cents + c.expected_profit_cents,
+          c.user_id,
+          c.wallet_type
+        ]
+      );
+
+      await client.query(
+        `
+        UPDATE trading_cycles
+        SET status='COMPLETED',
+            profit_cents=$1,
+            completed_at=NOW()
+        WHERE id=$2
+        `,
+        [c.expected_profit_cents, c.id]
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error(e);
+  } finally {
+    client.release();
+    process.exit();
+  }
+})();
+
+
 module.exports = { completeExpiredCycles };
