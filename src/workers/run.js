@@ -1,4 +1,8 @@
 'use strict';
+require('dotenv').config();
+
+console.log('[WORKER ENV]', process.env.DATABASE_URL);
+
 
 const { runTradingWorker } = require('./trading.worker');
 
