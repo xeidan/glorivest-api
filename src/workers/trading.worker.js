@@ -137,28 +137,21 @@ async function finalizeCycle(client, cycle) {
   const capital = Number(cycle.capital_cents);
   const expectedProfit = Number(cycle.expected_profit_cents);
 
+  // SAFETY
+  if (!capital || capital <= 0) return;
+
   await client.query('BEGIN');
 
   try {
-    // 1️⃣ Close remaining positions
+    // 1️⃣ Close any open positions (COSMETIC ONLY)
     await closeOpenPositions(client, cycle);
 
-    // 2️⃣ Compute realized PnL
-    const { rows } = await client.query(
-      `
-      SELECT COALESCE(SUM(pnl_cents),0) AS total
-      FROM bot_positions
-      WHERE trading_cycle_id = $1
-      `,
-      [cycleId]
-    );
+    // 2️⃣ Determine final profit
+    const finalProfit = cycle.stopped_early
+      ? 0
+      : expectedProfit;
 
-    const realizedProfit = Number(rows[0].total);
-
-    // 3️⃣ Enforce ROI cap
-    const finalProfit = Math.min(realizedProfit, expectedProfit);
-
-    // 4️⃣ Credit wallet (capital + capped profit)
+    // 3️⃣ Credit wallet (capital + profit)
     await client.query(
       `
       UPDATE wallets
@@ -173,7 +166,7 @@ async function finalizeCycle(client, cycle) {
       ]
     );
 
-    // 5️⃣ Close cycle
+    // 4️⃣ Close cycle
     await client.query(
       `
       UPDATE trading_cycles
@@ -191,5 +184,6 @@ async function finalizeCycle(client, cycle) {
     throw err;
   }
 }
+
 
 module.exports = { runTradingWorker };

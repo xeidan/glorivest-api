@@ -3,6 +3,8 @@
 const { pool } = require('../config/database');
 const { resolveTier, resolveROI } = require('../services/trade.roi');
 const { resolveROI } = require('../utils/roi');
+const { getTier, getRoiPercent } = require('../utils/roi');
+
 
 const BOT_FEE_CENTS = 500; // $5
 
@@ -13,70 +15,128 @@ const startTrade = async (req, res) => {
   const userId = req.user.id;
   const { amount_cents, wallet_type, duration_months } = req.body;
 
-  if (!amount_cents || !duration_months) {
-    return res.status(400).json({ message: 'Missing parameters' });
+  // ---------------------------
+  // 1️⃣ Validate inputs
+  // ---------------------------
+  if (!amount_cents || Number(amount_cents) <= 0) {
+    return res.status(400).json({ message: 'Invalid amount' });
   }
 
-  const roiData = resolveROI(amount_cents, duration_months);
-  if (!roiData) {
-    return res.status(400).json({ message: 'Invalid tier or duration' });
+  if (![1, 3, 6].includes(Number(duration_months))) {
+    return res.status(400).json({ message: 'Invalid duration' });
   }
 
-  const { tier, roi } = roiData;
-  const expectedProfit = Math.floor(amount_cents * (roi / 100));
+  if (!['REAL', 'DEMO'].includes(wallet_type)) {
+    return res.status(400).json({ message: 'Invalid wallet type' });
+  }
+
+  const capital = Number(amount_cents);
+
+  // ---------------------------
+  // 2️⃣ Determine tier + ROI (LOCK CONTRACT)
+  // ---------------------------
+  let tier, roiPercent;
+  try {
+    tier = getTier(capital);
+    roiPercent = getRoiPercent(tier, Number(duration_months));
+  } catch (err) {
+    return res.status(400).json({ message: err.message });
+  }
+
+  const expectedProfitCents = Math.floor(
+    capital * (roiPercent / 100)
+  );
 
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
-    // lock wallet
+    // ---------------------------
+    // 3️⃣ Lock wallet
+    // ---------------------------
     const { rows } = await client.query(
-      `SELECT id, balance_cents FROM wallets
-       WHERE user_id=$1 AND type=$2 FOR UPDATE`,
+      `
+      SELECT id, balance_cents
+      FROM wallets
+      WHERE user_id = $1
+        AND type = $2
+      FOR UPDATE
+      `,
       [userId, wallet_type]
     );
 
-    if (!rows.length) throw new Error('Wallet not found');
-    if (Number(rows[0].balance_cents) < amount_cents)
+    if (!rows.length) {
+      throw new Error('Wallet not found');
+    }
+
+    const wallet = rows[0];
+
+    if (Number(wallet.balance_cents) < capital) {
       throw new Error('Insufficient balance');
+    }
 
-    await client.query(
-      `UPDATE wallets SET balance_cents = balance_cents - $1 WHERE id=$2`,
-      [amount_cents, rows[0].id]
-    );
-
-    const completesAt =
-      `NOW() + INTERVAL '${duration_months} months'`;
-
+    // ---------------------------
+    // 4️⃣ Deduct capital
+    // ---------------------------
     await client.query(
       `
+      UPDATE wallets
+      SET balance_cents = balance_cents - $1
+      WHERE id = $2
+      `,
+      [capital, wallet.id]
+    );
+
+    // ---------------------------
+    // 5️⃣ Create trading cycle (ALL TERMS FIXED)
+    // ---------------------------
+    const { rows: cycleRows } = await client.query(
+      `
       INSERT INTO trading_cycles (
-        user_id, wallet_type, capital_cents,
-        duration_months, roi_percent,
-        expected_profit_cents, status, completes_at
+        user_id,
+        wallet_type,
+        capital_cents,
+        tier,
+        duration_months,
+        roi_percent,
+        expected_profit_cents,
+        status,
+        started_at,
+        completes_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,'RUNNING',${completesAt})
+      VALUES (
+        $1, $2, $3,
+        $4, $5, $6, $7,
+        'RUNNING',
+        NOW(),
+        NOW() + ($5 || ' months')::INTERVAL
+      )
+      RETURNING *
       `,
       [
         userId,
         wallet_type,
-        amount_cents,
+        capital,
+        tier,
         duration_months,
-        roi,
-        expectedProfit
+        roiPercent,
+        expectedProfitCents
       ]
     );
 
     await client.query('COMMIT');
-    res.json({ message: 'Cycle started', tier, roi });
 
-  } catch (e) {
+    return res.json({ cycle: cycleRows[0] });
+
+  } catch (err) {
     await client.query('ROLLBACK');
-    res.status(400).json({ message: e.message });
+    return res.status(400).json({ message: err.message });
   } finally {
     client.release();
   }
 };
+
 
 
 /**
