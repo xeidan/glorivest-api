@@ -2,9 +2,9 @@
 
 const { pool } = require('../config/database');
 
-/* ===============================
+/* ======================================================
    WORKER ENTRY POINT
-=============================== */
+====================================================== */
 async function runTradingWorker() {
   const client = await pool.connect();
 
@@ -26,34 +26,41 @@ async function runTradingWorker() {
   }
 }
 
-/* ===============================
-   PROCESS ONE CYCLE
-=============================== */
+/* ======================================================
+   PROCESS SINGLE CYCLE
+====================================================== */
 async function processCycle(client, cycle) {
-  const now = Date.now();
-  const end = new Date(cycle.completes_at).getTime();
+  const nowTs = Date.now();
+  const completesAtTs = new Date(cycle.completes_at).getTime();
 
-  if (now >= end) {
+  if (nowTs >= completesAtTs) {
     await finalizeCycle(client, cycle);
     return;
   }
 
-  const shouldOpen = Math.random() < 0.2;
-  if (shouldOpen) {
+  // Randomly open positions while running
+  if (Math.random() < 0.2) {
     await openPosition(client, cycle);
   }
 }
 
-/* ===============================
-   OPEN POSITION
-=============================== */
+/* ======================================================
+   OPEN BOT POSITION
+====================================================== */
 async function openPosition(client, cycle) {
+  const capitalCents = Number(cycle.capital_cents);
+
+  if (!capitalCents || capitalCents <= 0) return;
+
   const symbol = 'VIX75';
   const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
-  const entryPrice = 1000 + Math.random() * 50;
+  const entryPrice = Number((1000 + Math.random() * 50).toFixed(2));
+
   const volume = Number(
-    (cycle.capital_cents / 100 / entryPrice).toFixed(4)
+    ((capitalCents / 100) / entryPrice).toFixed(4)
   );
+
+  if (volume <= 0) return;
 
   await client.query(
     `
@@ -64,9 +71,10 @@ async function openPosition(client, cycle) {
       side,
       volume,
       entry_price,
-      status
+      status,
+      opened_at
     )
-    VALUES ($1,$2,$3,$4,$5,$6,'OPEN')
+    VALUES ($1,$2,$3,$4,$5,$6,'OPEN',NOW())
     `,
     [
       cycle.user_id,
@@ -79,9 +87,9 @@ async function openPosition(client, cycle) {
   );
 }
 
-/* ===============================
-   CLOSE OPEN POSITIONS
-=============================== */
+/* ======================================================
+   CLOSE ALL OPEN POSITIONS
+====================================================== */
 async function closeOpenPositions(client, cycle) {
   const { rows: positions } = await client.query(
     `
@@ -94,9 +102,15 @@ async function closeOpenPositions(client, cycle) {
   );
 
   for (const p of positions) {
-    const exitPrice = p.entry_price * (0.95 + Math.random() * 0.1);
+    const entry = Number(p.entry_price);
+    const volume = Number(p.volume);
+
+    const exitPrice = Number(
+      (entry * (0.95 + Math.random() * 0.1)).toFixed(2)
+    );
+
     const pnlCents = Math.floor(
-      (exitPrice - p.entry_price) * p.volume * 100
+      (exitPrice - entry) * volume * 100
     );
 
     await client.query(
@@ -113,54 +127,68 @@ async function closeOpenPositions(client, cycle) {
   }
 }
 
-/* ===============================
-   FINALIZE CYCLE (ROI ENFORCED)
-=============================== */
+/* ======================================================
+   FINALIZE CYCLE (ROI-CAPPED PAYOUT)
+====================================================== */
 async function finalizeCycle(client, cycle) {
-  await closeOpenPositions(client, cycle);
+  const cycleId = cycle.id;
+  const userId = cycle.user_id;
 
-  const { rows } = await client.query(
-    `
-    SELECT COALESCE(SUM(pnl_cents),0) AS total
-    FROM bot_positions
-    WHERE trading_cycle_id = $1
-    `,
-    [cycle.id]
-  );
-
-  const realized = Number(rows[0].total);
-  const cappedProfit = Math.min(realized, cycle.expected_profit_cents);
+  const capital = Number(cycle.capital_cents);
+  const expectedProfit = Number(cycle.expected_profit_cents);
 
   await client.query('BEGIN');
 
   try {
+    // 1️⃣ Close remaining positions
+    await closeOpenPositions(client, cycle);
+
+    // 2️⃣ Compute realized PnL
+    const { rows } = await client.query(
+      `
+      SELECT COALESCE(SUM(pnl_cents),0) AS total
+      FROM bot_positions
+      WHERE trading_cycle_id = $1
+      `,
+      [cycleId]
+    );
+
+    const realizedProfit = Number(rows[0].total);
+
+    // 3️⃣ Enforce ROI cap
+    const finalProfit = Math.min(realizedProfit, expectedProfit);
+
+    // 4️⃣ Credit wallet (capital + capped profit)
     await client.query(
       `
       UPDATE wallets
       SET balance_cents = balance_cents + $1
-      WHERE user_id=$2 AND type=$3
+      WHERE user_id = $2
+        AND type = $3
       `,
       [
-        cycle.capital_cents + cappedProfit,
-        cycle.user_id,
+        capital + finalProfit,
+        userId,
         cycle.wallet_type
       ]
     );
 
+    // 5️⃣ Close cycle
     await client.query(
       `
       UPDATE trading_cycles
-      SET status='COMPLETED',
-          profit_cents=$1
-      WHERE id=$2
+      SET status = 'COMPLETED',
+          profit_cents = $1,
+          completed_at = NOW()
+      WHERE id = $2
       `,
-      [cappedProfit, cycle.id]
+      [finalProfit, cycleId]
     );
 
     await client.query('COMMIT');
-  } catch (e) {
+  } catch (err) {
     await client.query('ROLLBACK');
-    throw e;
+    throw err;
   }
 }
 
