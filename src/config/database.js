@@ -9,13 +9,10 @@ if (!DATABASE_URL && NODE_ENV === 'production') {
 }
 
 const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: DATABASE_URL && NODE_ENV === 'production'
-    ? { rejectUnauthorized: false }
-    : false,
-  max: Number(process.env.PG_MAX_POOL || 20),
-  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
-  connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS || 2000),
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 async function withTx(fn) {
