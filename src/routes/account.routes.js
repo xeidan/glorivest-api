@@ -19,14 +19,14 @@ const withdrawalController = require('../controllers/withdrawal.controller');
 // DASHBOARD CORE
 // ==================================================
 
-// GET /accounts → list user accounts
+// GET /api/accounts
 router.get(
   '/',
   auth,
   accountController.getMyAccounts
 );
 
-// GET /accounts/me → current active account
+// GET /api/accounts/me
 router.get(
   '/me',
   auth,
@@ -37,7 +37,7 @@ router.get(
 // DEMO ONLY
 // ==================================================
 
-// POST /accounts/:accountId/demo-reset
+// POST /api/accounts/:accountId/demo-reset
 router.post(
   '/:accountId/demo-reset',
   auth,
@@ -50,13 +50,13 @@ router.post(
 // LIVE ONLY
 // ==================================================
 
-// POST /accounts/:accountId/withdraw
+// POST /api/accounts/:accountId/withdraw
 router.post(
   '/:accountId/withdraw',
   auth,
   loadAccount,
   guardRoute(requireLiveAccount),
-  withdrawalController.requestWithdrawal
+  withdrawalController.createWithdrawal
 );
 
 module.exports = router;
