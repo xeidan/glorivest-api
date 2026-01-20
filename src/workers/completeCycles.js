@@ -104,8 +104,6 @@ WHERE w.id = $1;
   }
 }
 
-'use strict';
-const { pool } = require('../config/database');
 
 (async () => {
   const client = await pool.connect();
