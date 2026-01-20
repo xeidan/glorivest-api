@@ -578,6 +578,109 @@ const getPositions = async (req, res) => {
   }
 };
 
+
+
+const getTradeOverview = async (req, res) => {
+  const userId = req.user.id;
+  const client = await pool.connect();
+
+  try {
+    /* ===============================
+       SUMMARY
+    =============================== */
+    const { rows: summaryRows } = await client.query(
+      `
+      SELECT
+        COALESCE(SUM(capital_cents) FILTER (WHERE status = 'RUNNING'), 0)
+          AS total_active_capital_cents,
+        COALESCE(SUM(profit_cents) FILTER (WHERE status = 'COMPLETED'), 0)
+          AS total_realized_profit_cents,
+        COUNT(*) FILTER (WHERE status = 'RUNNING')
+          AS active_cycle_count
+      FROM trading_cycles
+      WHERE user_id = $1
+      `,
+      [userId]
+    );
+
+    const summary = summaryRows[0];
+
+    /* ===============================
+       ACTIVE CYCLES
+    =============================== */
+    const { rows: activeCycles } = await client.query(
+      `
+      SELECT
+        id,
+        tier,
+        duration_months,
+        roi_percent,
+        capital_cents,
+        expected_profit_cents,
+        started_at,
+        completes_at,
+        GREATEST(
+          FLOOR(EXTRACT(EPOCH FROM (NOW() - started_at)) / 86400),
+          0
+        )::INT AS days_run,
+        (duration_months * 30) AS total_days,
+        LEAST(
+          ROUND(
+            (
+              EXTRACT(EPOCH FROM (NOW() - started_at)) /
+              EXTRACT(EPOCH FROM (completes_at - started_at))
+            ) * 100
+          ),
+          100
+        )::INT AS progress_percent
+      FROM trading_cycles
+      WHERE user_id = $1
+        AND status = 'RUNNING'
+      ORDER BY started_at DESC
+      `,
+      [userId]
+    );
+
+    /* ===============================
+       COMPLETED CYCLES
+    =============================== */
+    const { rows: completedCycles } = await client.query(
+      `
+      SELECT
+        id,
+        tier,
+        duration_months,
+        roi_percent,
+        capital_cents,
+        expected_profit_cents,
+        profit_cents,
+        started_at,
+        completed_at,
+        stopped_early
+      FROM trading_cycles
+      WHERE user_id = $1
+        AND status = 'COMPLETED'
+      ORDER BY completed_at DESC
+      LIMIT 50
+      `,
+      [userId]
+    );
+
+    return res.json({
+      summary,
+      active_cycles: activeCycles,
+      completed_cycles: completedCycles
+    });
+
+  } catch (err) {
+    console.error('[TRADE OVERVIEW]', err);
+    return res.status(500).json({ message: 'Failed to load trade overview' });
+  } finally {
+    client.release();
+  }
+};
+
+
 module.exports = {
   startTrade,
   getTradeSummary,
@@ -590,7 +693,8 @@ module.exports = {
   getTradeHistory,
   getTransferableProfits,
   getTradeOverview,
-  getPositions
+  getPositions,
+  getTradeOverview
 };
 
 
