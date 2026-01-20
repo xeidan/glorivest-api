@@ -1,9 +1,8 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const { resolveTier, resolveROI } = require('../services/trade.roi');
-const { resolveROI } = require('../utils/roi');
 const { getTier, getRoiPercent } = require('../utils/roi');
+
 
 
 const BOT_FEE_CENTS = 500; // $5
@@ -478,70 +477,6 @@ const getTransferableProfits = async (req, res) => {
 
 
 
-const getTradeOverview = async (req, res) => {
-  const userId = req.user.id;
-
-  try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        id,
-        status,
-        capital_cents,
-        duration_months,
-        roi_percent,
-        expected_profit_cents,
-        started_at,
-        completes_at,
-        stopped_early,
-        profit_cents
-      FROM trading_cycles
-      WHERE user_id = $1
-      ORDER BY started_at DESC
-      `,
-      [userId]
-    );
-
-    const now = Date.now();
-
-    const cycles = rows.map(c => {
-      let progress_percent = 0;
-
-      if (c.status === 'RUNNING') {
-        const start = new Date(c.started_at).getTime();
-        const end = new Date(c.completes_at).getTime();
-
-        if (end > start) {
-          progress_percent = Math.min(
-            100,
-            Math.floor(((now - start) / (end - start)) * 100)
-          );
-        }
-      }
-
-      return {
-        id: c.id,
-        status: c.status, // RUNNING | COMPLETED | STOPPED
-        capital_cents: Number(c.capital_cents),
-        duration_months: c.duration_months,
-        roi_percent: Number(c.roi_percent),
-        expected_profit_cents: Number(c.expected_profit_cents),
-        profit_cents: Number(c.profit_cents || 0),
-        started_at: c.started_at,
-        completes_at: c.completes_at,
-        stopped_early: c.stopped_early,
-        progress_percent
-      };
-    });
-
-    res.json({ cycles });
-
-  } catch (err) {
-    console.error('Trade overview error:', err);
-    res.status(500).json({ message: 'Failed to load trade overview' });
-  }
-};
-
 
 /**
  * GET POSITIONS (OPEN + CLOSED)
@@ -694,7 +629,6 @@ module.exports = {
   getTransferableProfits,
   getTradeOverview,
   getPositions,
-  getTradeOverview
 };
 
 
