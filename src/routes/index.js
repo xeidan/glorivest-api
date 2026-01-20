@@ -11,7 +11,6 @@ router.use('/notify', require('./notify.routes'));
 router.use('/accounts', require('./account.routes'));
 router.use('/cycle', require('./cycle.routes'));
 router.use('/trades', require('./trade.routes'));
-router.use('/positions', require('./positions.routes'));
 
 
 module.exports = router;
