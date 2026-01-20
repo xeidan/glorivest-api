@@ -6,24 +6,47 @@ const router = express.Router();
 const requireAuth = require('../middleware/auth');
 const trade = require('../controllers/trade.controller');
 
+// ===============================
+// TRADE LIFECYCLE
+// ===============================
+
+// Start a new trade cycle
 router.post('/start', requireAuth, trade.startTrade);
 
-router.get('/summary', requireAuth, trade.getTradeSummary);
-router.get('/active', requireAuth, trade.getActiveTrades);
-
+// Stop a running cycle early
 router.post('/stop', requireAuth, trade.stopTrade);
 
-router.get('/profits', requireAuth, trade.getTradeProfits);
+// ===============================
+// OVERVIEW & DASHBOARD
+// ===============================
+
+// Full overview (summary + active + completed)
+router.get('/overview', requireAuth, trade.getTradeOverview);
+
+// Lightweight summary (numbers only)
+router.get('/summary', requireAuth, trade.getTradeSummary);
+
+// Active cycles list
+router.get('/active', requireAuth, trade.getActiveCycles);
+
+// Trade history (completed / stopped)
+router.get('/history', requireAuth, trade.getTradeHistory);
+
+// ===============================
+// PROFITS & TRANSFERS
+// ===============================
+
+// Transferable profits list
+router.get('/profits', requireAuth, trade.getTransferableProfits);
+
+// Transfer profits to REAL wallet
 router.post('/transfer-profits', requireAuth, trade.transferTradeProfits);
 
-router.get('/active', requireAuth, tradeController.getActiveCycles);
-router.get('/summary', requireAuth, tradeController.getTradeSummary);
-router.get('/history', requireAuth, tradeController.getTradeHistory);
-router.get('/profits', requireAuth, tradeController.getTransferableProfits);
-router.post('/transfer-profits', requireAuth, tradeController.transferTradeProfits);
-router.get('/overview', requireAuth, tradeController.getTradeOverview);
+// ===============================
+// POSITIONS
+// ===============================
 
-router.get('/', requireAuth, controller.getPositions);
-
+// Bot positions (open + closed)
+router.get('/positions', requireAuth, trade.getPositions);
 
 module.exports = router;
