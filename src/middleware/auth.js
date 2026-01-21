@@ -1,4 +1,5 @@
 'use strict';
+console.log('[AUTH HEADERS]', req.headers);
 
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database').pool;
