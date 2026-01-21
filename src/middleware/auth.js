@@ -1,10 +1,7 @@
 'use strict';
-console.log('[AUTH HEADERS]', req.headers);
 
 const jwt = require('jsonwebtoken');
-const pool = require('../config/database').pool;
 const { JWT_SECRET } = require('../config/env');
-
 
 module.exports = function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -16,11 +13,10 @@ module.exports = function requireAuth(req, res, next) {
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
 
-    // 🔒 HARD GUARANTEE
     req.user = {
-      id: Number(decoded.id),   // ⬅️ MUST BE NUMBER
+      id: Number(decoded.id),
       email: decoded.email
     };
 
@@ -30,8 +26,7 @@ module.exports = function requireAuth(req, res, next) {
 
     next();
   } catch (err) {
-    console.error('auth middleware error:', err);
+    console.error('auth middleware error:', err.message);
     return res.status(401).json({ message: 'Unauthorized' });
   }
 };
-
