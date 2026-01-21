@@ -1,5 +1,6 @@
 'use strict';
 require('dotenv').config();
+require('./index');
 
 console.log('[WORKER ENV]', process.env.DATABASE_URL);
 
