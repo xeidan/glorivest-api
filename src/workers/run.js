@@ -1,14 +1,12 @@
 'use strict';
 
 require('dotenv').config();
-require('./index');
+require('./index'); // cron + pollers
 
 const { runTradingWorker } = require('./trading.worker');
 
 console.log('[WORKER] started');
-console.log('[WORKER ENV]', process.env.DATABASE_URL);
 
-// main trading loop
 setInterval(async () => {
   try {
     await runTradingWorker();
@@ -17,5 +15,5 @@ setInterval(async () => {
   }
 }, 30_000);
 
-// 🔒 HARD KEEP-ALIVE (required for Heroku workers)
-process.stdin.resume();
+// keep process alive
+setInterval(() => {}, 60_000);
