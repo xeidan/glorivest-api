@@ -516,13 +516,47 @@ const getPositions = async (req, res) => {
 
 
 const getTradeOverview = async (req, res) => {
-  return res.json({
-    active_cycles: 0,
-    total_invested_cents: 0,
-    expected_profit_cents: 0,
-    realized_profit_cents: 0,
-    roi_percent: 0
-  });
+  const userId = req.user.id;
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'RUNNING') AS active_cycles,
+        COALESCE(SUM(capital_cents), 0) AS total_invested_cents,
+        COALESCE(SUM(expected_profit_cents), 0) AS expected_profit_cents,
+        COALESCE(
+          SUM(expected_profit_cents)
+          FILTER (WHERE status = 'COMPLETED'),
+          0
+        ) AS realized_profit_cents
+      FROM trading_cycles
+      WHERE user_id = $1
+      `,
+      [userId]
+    );
+
+    const row = rows[0];
+
+    const totalInvested = Number(row.total_invested_cents);
+    const realizedProfit = Number(row.realized_profit_cents);
+
+    const roiPercent =
+      totalInvested > 0
+        ? Number(((realizedProfit / totalInvested) * 100).toFixed(2))
+        : 0;
+
+    return res.json({
+      active_cycles: Number(row.active_cycles),
+      total_invested_cents: totalInvested,
+      expected_profit_cents: Number(row.expected_profit_cents),
+      realized_profit_cents: realizedProfit,
+      roi_percent: roiPercent
+    });
+  } catch (err) {
+    console.error('getTradeOverview error:', err);
+    return res.status(500).json({ message: 'Failed to load trade overview' });
+  }
 };
 
 
