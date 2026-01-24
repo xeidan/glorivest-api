@@ -109,7 +109,7 @@ const startTrade = async (req, res) => {
         $4, $5, $6, $7,
         'RUNNING',
         NOW(),
-        NOW() + ($5 || ' months')::INTERVAL
+        NOW() + make_interval(months => $5)
       )
       RETURNING *
       `,
