@@ -109,50 +109,9 @@ async function stopCycle({ userId, cycleId }) {
   }
 }
 
-// --------------------------------------------------
-// GET ALL ACTIVE CYCLES FOR WALLET
-// --------------------------------------------------
-async function getActiveCycles(req, res) {
-  try {
-    const userId = req.user.id;
-    const walletId = Number(req.query.walletId);
 
-    if (!walletId) {
-      return res.status(400).json({ error: 'walletId is required' });
-    }
-
-    const result = await pool.query(
-      `
-      SELECT
-        *,
-        LEAST(
-          expected_profit,
-          expected_profit *
-          GREATEST(
-            0,
-            EXTRACT(EPOCH FROM (now() - start_at)) /
-            EXTRACT(EPOCH FROM (end_at - start_at))
-          )
-        ) AS computed_accrued_profit
-      FROM investment_cycles
-      WHERE user_id = $1
-        AND wallet_id = $2
-        AND status = 'active'
-      ORDER BY start_at ASC
-      `,
-      [userId, walletId]
-    );
-
-    return res.json({ cycles: result.rows });
-
-  } catch (err) {
-    console.error('getActiveCycles error:', err);
-    return res.status(500).json({ error: 'Server error' });
-  }
-}
 
 module.exports = {
   startCycle,
-  stopCycle,
-  getActiveCycles
+  stopCycle
 };

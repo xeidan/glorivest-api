@@ -16,7 +16,6 @@ router.post('/stop', requireAuth, trade.stopTrade);
 // OVERVIEWS
 // ===============================
 router.get('/summary', requireAuth, trade.getTradeSummary);
-router.get('/active', requireAuth, trade.getActiveTrades);
 router.get('/overview', requireAuth, trade.getTradeOverview);
 router.get('/history', requireAuth, trade.getTradeHistory);
 
