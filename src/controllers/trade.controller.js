@@ -549,6 +549,47 @@ const getTradeOverview = async (req, res) => {
 
 
 
+/**
+ * ===============================
+ * GET TRADE PROFITS
+ * ===============================
+ * - Returns completed cycle profits
+ * - Excludes zero / forfeited profits
+ * - Ordered newest → oldest
+ */
+const getTradeProfits = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id AS trade_cycle_id,
+        profit_cents,
+        completed_at,
+        profit_transferred
+      FROM trading_cycles
+      WHERE user_id = $1
+        AND status = 'COMPLETED'
+        AND profit_cents > 0
+      ORDER BY completed_at DESC
+      `,
+      [userId]
+    );
+
+    return res.json({
+      count: rows.length,
+      profits: rows
+    });
+  } catch (err) {
+    console.error('getTradeProfits error:', err);
+    return res.status(500).json({
+      message: 'Failed to load trade profits'
+    });
+  }
+};
+
+
 
 
 
@@ -562,6 +603,7 @@ module.exports = {
   getTransferableProfits,
   getTradeOverview,
   getPositions,
+  getTradeProfits
 };
 
 
