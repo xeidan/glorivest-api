@@ -4,9 +4,9 @@ const { pool } = require('../config/database');
 
 /**
  * Trading simulation worker
- * ❌ Does NOT touch wallets
- * ❌ Does NOT complete cycles
- * ❌ Does NOT transfer profits
+ * ✅ Does NOT touch wallets
+ * ✅ Does NOT complete cycles
+ * ✅ Cosmetic positions only
  */
 async function runTradingWorker() {
   const client = await pool.connect();
@@ -18,6 +18,7 @@ async function runTradingWorker() {
       FROM trading_cycles
       WHERE status = 'RUNNING'
         AND stopped_early = false
+        AND completes_at > NOW()
       `
     );
 
@@ -26,14 +27,14 @@ async function runTradingWorker() {
     }
 
   } catch (err) {
-    console.error('[WORKER] error:', err);
+    console.error('[TRADING WORKER] error:', err);
   } finally {
     client.release();
   }
 }
 
 /**
- * Randomly open cosmetic bot positions
+ * Random cosmetic bot positions
  */
 async function maybeOpenPosition(client, cycle) {
   if (Math.random() > 0.2) return;
