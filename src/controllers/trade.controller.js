@@ -276,19 +276,13 @@ const stopTrade = async (req, res) => {
   const userId = req.user.id;
   const { trade_cycle_id } = req.body;
 
-  if (!trade_cycle_id) {
-    return res.status(400).json({ message: 'trade_cycle_id required' });
-  }
-
   const client = await pool.connect();
-
   try {
     await client.query('BEGIN');
 
-    // 🔒 Lock cycle
     const { rows } = await client.query(
       `
-      SELECT *
+      SELECT id
       FROM trading_cycles
       WHERE id = $1
         AND user_id = $2
@@ -298,48 +292,30 @@ const stopTrade = async (req, res) => {
       [trade_cycle_id, userId]
     );
 
-    if (!rows.length) {
-      throw new Error('Cycle not found or not running');
-    }
+    if (!rows.length) throw new Error('Cycle not found');
 
-    const c = rows[0];
-
-    // 1️⃣ Return capital ONLY
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents + $1
-      WHERE user_id = $2
-        AND type = $3
-      `,
-      [c.capital_cents, userId, c.wallet_type]
-    );
-
-    // 2️⃣ Permanently close cycle (profit forfeited)
     await client.query(
       `
       UPDATE trading_cycles
-      SET
-        status = 'STOPPED',
-        stopped_early = true,
-        completed_at = NOW(),
-        profit_cents = 0,
-        profit_transferred = true
+      SET status = 'STOPPED',
+          stopped_early = true,
+          completed_at = NOW()
       WHERE id = $1
       `,
       [trade_cycle_id]
     );
 
     await client.query('COMMIT');
-    return res.json({ message: 'Cycle stopped' });
+    res.json({ message: 'Cycle stopped' });
 
-  } catch (err) {
+  } catch (e) {
     await client.query('ROLLBACK');
-    return res.status(400).json({ message: err.message });
+    res.status(400).json({ message: e.message });
   } finally {
     client.release();
   }
 };
+
 
 
 
@@ -560,34 +536,25 @@ const getTradeOverview = async (req, res) => {
 const getTradeProfits = async (req, res) => {
   const userId = req.user.id;
 
-  try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        id AS trade_cycle_id,
-        profit_cents,
-        completed_at,
-        profit_transferred
-      FROM trading_cycles
-      WHERE user_id = $1
-        AND status = 'COMPLETED'
-        AND profit_cents > 0
-      ORDER BY completed_at DESC
-      `,
-      [userId]
-    );
+  const { rows } = await pool.query(
+    `
+    SELECT
+      id,
+      profit_cents,
+      completed_at
+    FROM trading_cycles
+    WHERE user_id = $1
+      AND status = 'COMPLETED'
+      AND profit_cents > 0
+      AND profit_transferred = false
+    ORDER BY completed_at ASC
+    `,
+    [userId]
+  );
 
-    return res.json({
-      count: rows.length,
-      profits: rows
-    });
-  } catch (err) {
-    console.error('getTradeProfits error:', err);
-    return res.status(500).json({
-      message: 'Failed to load trade profits'
-    });
-  }
+  res.json(rows);
 };
+
 
 
 
