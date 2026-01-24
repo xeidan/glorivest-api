@@ -558,7 +558,6 @@ module.exports = {
   stopTrade,
   transferTradeProfits,
   completeCycle,
-  getActiveCycles,
   getTradeHistory,
   getTransferableProfits,
   getTradeOverview,
