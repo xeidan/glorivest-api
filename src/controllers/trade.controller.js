@@ -143,11 +143,39 @@ const startTrade = async (req, res) => {
  * ❗ NOT CALLED BY CLIENT DIRECTLY
  */
 const completeCycle = async (cycleId, client) => {
-  // This will be used later by:
-  // - cron
-  // - worker
-  // - admin process
+  const { rows } = await client.query(
+    `
+    SELECT *
+    FROM trading_cycles
+    WHERE id = $1
+      AND status = 'RUNNING'
+    FOR UPDATE
+    `,
+    [cycleId]
+  );
+
+  if (!rows.length) return; // idempotent exit
+
+  const c = rows[0];
+
+  const profitCents = c.expected_profit_cents;
+
+  // 1️⃣ Mark cycle completed
+  await client.query(
+    `
+    UPDATE trading_cycles
+    SET
+      status = 'COMPLETED',
+      completed_at = NOW(),
+      profit_cents = $2
+    WHERE id = $1
+    `,
+    [cycleId, profitCents]
+  );
+
+  // ❗ DO NOT TOUCH WALLET HERE
 };
+
 
 
 /**
@@ -162,7 +190,8 @@ const getTradeSummary = async (req, res) => {
       COALESCE(SUM(capital_cents),0) AS total_active_capital_cents,
       COUNT(*) AS active_cycle_count
     FROM trading_cycles
-    WHERE user_id = $1 AND status = 'RUNNING'
+    WHERE user_id = $1
+      AND status = 'RUNNING'
     `,
     [userId]
   );
@@ -172,17 +201,19 @@ const getTradeSummary = async (req, res) => {
     SELECT
       COALESCE(SUM(profit_cents),0) AS total_realized_profit_cents
     FROM trading_cycles
-    WHERE user_id = $1 AND status = 'COMPLETED'
+    WHERE user_id = $1
+      AND status = 'COMPLETED'
     `,
     [userId]
   );
 
   res.json({
-    total_active_capital_cents: rows[0].total_active_capital_cents,
+    total_active_capital_cents: Number(rows[0].total_active_capital_cents),
     active_cycle_count: Number(rows[0].active_cycle_count),
-    total_realized_profit_cents: profitRows[0].total_realized_profit_cents
+    total_realized_profit_cents: Number(profitRows[0].total_realized_profit_cents)
   });
 };
+
 
 
 
@@ -245,47 +276,66 @@ const stopTrade = async (req, res) => {
   const userId = req.user.id;
   const { trade_cycle_id } = req.body;
 
+  if (!trade_cycle_id) {
+    return res.status(400).json({ message: 'trade_cycle_id required' });
+  }
+
   const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
+    // 🔒 Lock cycle
     const { rows } = await client.query(
       `
-      SELECT * FROM trading_cycles
-      WHERE id=$1 AND user_id=$2 AND status='RUNNING'
+      SELECT *
+      FROM trading_cycles
+      WHERE id = $1
+        AND user_id = $2
+        AND status = 'RUNNING'
       FOR UPDATE
       `,
       [trade_cycle_id, userId]
     );
 
-    if (!rows.length) throw new Error('Cycle not found');
+    if (!rows.length) {
+      throw new Error('Cycle not found or not running');
+    }
+
     const c = rows[0];
 
-    // return capital ONLY
+    // 1️⃣ Return capital ONLY
     await client.query(
-      `UPDATE wallets SET balance_cents = balance_cents + $1
-       WHERE user_id=$2 AND type=$3`,
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents + $1
+      WHERE user_id = $2
+        AND type = $3
+      `,
       [c.capital_cents, userId, c.wallet_type]
     );
 
+    // 2️⃣ Permanently close cycle (profit forfeited)
     await client.query(
       `
       UPDATE trading_cycles
-      SET status='STOPPED',
-          stopped_early=true,
-          completed_at=NOW(),
-          profit_cents=0
-      WHERE id=$1
+      SET
+        status = 'STOPPED',
+        stopped_early = true,
+        completed_at = NOW(),
+        profit_cents = 0,
+        profit_transferred = true
+      WHERE id = $1
       `,
       [trade_cycle_id]
     );
 
     await client.query('COMMIT');
-    res.json({ message: 'Cycle stopped' });
+    return res.json({ message: 'Cycle stopped' });
 
-  } catch (e) {
+  } catch (err) {
     await client.query('ROLLBACK');
-    res.status(400).json({ message: e.message });
+    return res.status(400).json({ message: err.message });
   } finally {
     client.release();
   }
@@ -293,40 +343,7 @@ const stopTrade = async (req, res) => {
 
 
 
-/**
- * GET TRADE PROFITS (Transfer tab)
- */
-const getTradeProfits = async (req, res) => {
-  const userId = req.user.id;
 
-  try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        tp.trade_cycle_id,
-        tp.profit_cents,
-        tp.transferred,
-        tp.created_at
-      FROM trade_profits tp
-      WHERE tp.user_id = $1
-      ORDER BY tp.created_at DESC
-      `,
-      [userId]
-    );
-
-    return res.json(rows);
-  } catch (err) {
-    console.error('Get profits error:', err);
-    return res.status(500).json({ message: 'Failed to load profits' });
-  }
-};
-
-
-
-
-/**
- * TRANSFER ALL AVAILABLE PROFITS TO REAL WALLET
- */
 const transferTradeProfits = async (req, res) => {
   const userId = req.user.id;
   const client = await pool.connect();
@@ -334,6 +351,7 @@ const transferTradeProfits = async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // 🔒 Lock all transferable profits
     const { rows } = await client.query(
       `
       SELECT id, profit_cents
@@ -348,23 +366,27 @@ const transferTradeProfits = async (req, res) => {
     );
 
     if (!rows.length) {
-      await client.query('ROLLBACK');
+      await client.query('COMMIT');
       return res.json({ transferred_cents: 0 });
     }
 
-    const total = rows.reduce(
-      (sum, r) => sum + Number(r.profit_cents), 0
+    const totalProfit = rows.reduce(
+      (sum, r) => sum + Number(r.profit_cents),
+      0
     );
 
+    // 1️⃣ Credit REAL wallet
     await client.query(
       `
       UPDATE wallets
       SET balance_cents = balance_cents + $1
-      WHERE user_id = $2 AND type = 'REAL'
+      WHERE user_id = $2
+        AND type = 'REAL'
       `,
-      [total, userId]
+      [totalProfit, userId]
     );
 
+    // 2️⃣ Mark profits as transferred
     await client.query(
       `
       UPDATE trading_cycles
@@ -375,12 +397,11 @@ const transferTradeProfits = async (req, res) => {
     );
 
     await client.query('COMMIT');
+    return res.json({ transferred_cents: totalProfit });
 
-    res.json({ transferred_cents: total });
-
-  } catch (e) {
+  } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ message: 'Transfer failed' });
+    return res.status(500).json({ message: 'Transfer failed' });
   } finally {
     client.release();
   }
@@ -388,44 +409,6 @@ const transferTradeProfits = async (req, res) => {
 
 
 
-
-// controllers/trade.controller.js
-const getActiveCycles = async (req, res) => {
-  const userId = req.user.id;
-
-  const { rows } = await pool.query(
-    `
-    SELECT
-      id,
-      capital_cents,
-      duration_months,
-      roi_percent,
-      expected_profit_cents,
-      started_at,
-      completes_at,
-      EXTRACT(DAY FROM (NOW() - started_at))::INT AS days_run,
-      LEAST(
-        100,
-        ROUND(
-          (EXTRACT(EPOCH FROM (NOW() - started_at)) /
-           EXTRACT(EPOCH FROM (completes_at - started_at))) * 100
-        )
-      )::INT AS progress_percent,
-      CASE
-        WHEN capital_cents >= 500000 THEN 'Elite'
-        WHEN capital_cents >= 50000 THEN 'Pro'
-        ELSE 'Standard'
-      END AS tier
-    FROM trading_cycles
-    WHERE user_id = $1
-      AND status = 'RUNNING'
-    ORDER BY started_at ASC
-    `,
-    [userId]
-  );
-
-  res.json(rows);
-};
 
 
 const getTradeHistory = async (req, res) => {
@@ -520,21 +503,26 @@ const getTradeOverview = async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `
-      SELECT
-        COUNT(*) FILTER (WHERE status = 'RUNNING') AS active_cycles,
-        COALESCE(SUM(capital_cents), 0) AS total_invested_cents,
-        COALESCE(SUM(expected_profit_cents), 0) AS expected_profit_cents,
-        COALESCE(
-          SUM(expected_profit_cents)
-          FILTER (WHERE status = 'COMPLETED'),
-          0
-        ) AS realized_profit_cents
-      FROM trading_cycles
-      WHERE user_id = $1
-      `,
-      [userId]
-    );
+  `
+  SELECT
+    COUNT(*) FILTER (WHERE status = 'RUNNING') AS active_cycles,
+    COALESCE(SUM(capital_cents), 0) AS total_invested_cents,
+    COALESCE(
+      SUM(expected_profit_cents)
+      FILTER (WHERE status = 'RUNNING'),
+      0
+    ) AS expected_profit_cents,
+    COALESCE(
+      SUM(profit_cents)
+      FILTER (WHERE status = 'COMPLETED'),
+      0
+    ) AS realized_profit_cents
+  FROM trading_cycles
+  WHERE user_id = $1
+  `,
+  [userId]
+);
+
 
     const row = rows[0];
 
@@ -567,9 +555,7 @@ const getTradeOverview = async (req, res) => {
 module.exports = {
   startTrade,
   getTradeSummary,
-  getActiveTrades,
   stopTrade,
-  getTradeProfits,
   transferTradeProfits,
   completeCycle,
   getActiveCycles,

@@ -2,63 +2,49 @@
 
 const { pool } = require('../config/database');
 
-/* ======================================================
-   WORKER ENTRY POINT
-====================================================== */
+/**
+ * Trading simulation worker
+ * ❌ Does NOT touch wallets
+ * ❌ Does NOT complete cycles
+ * ❌ Does NOT transfer profits
+ */
 async function runTradingWorker() {
   const client = await pool.connect();
 
   try {
-    const { rows: cycles } = await client.query(`
-      SELECT *
+    const { rows: cycles } = await client.query(
+      `
+      SELECT id, user_id, capital_cents
       FROM trading_cycles
       WHERE status = 'RUNNING'
         AND stopped_early = false
-    `);
+      `
+    );
 
     for (const cycle of cycles) {
-      await processCycle(client, cycle);
+      await maybeOpenPosition(client, cycle);
     }
+
   } catch (err) {
-    console.error('[WORKER] Fatal error:', err);
+    console.error('[WORKER] error:', err);
   } finally {
     client.release();
   }
 }
 
-/* ======================================================
-   PROCESS SINGLE CYCLE
-====================================================== */
-async function processCycle(client, cycle) {
-  const nowTs = Date.now();
-  const completesAtTs = new Date(cycle.completes_at).getTime();
+/**
+ * Randomly open cosmetic bot positions
+ */
+async function maybeOpenPosition(client, cycle) {
+  if (Math.random() > 0.2) return;
 
-  if (nowTs >= completesAtTs) {
-    await finalizeCycle(client, cycle);
-    return;
-  }
-
-  // Randomly open positions while running
-  if (Math.random() < 0.2) {
-    await openPosition(client, cycle);
-  }
-}
-
-/* ======================================================
-   OPEN BOT POSITION
-====================================================== */
-async function openPosition(client, cycle) {
   const capitalCents = Number(cycle.capital_cents);
-
-  if (!capitalCents || capitalCents <= 0) return;
+  if (capitalCents <= 0) return;
 
   const symbol = 'VIX75';
   const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
   const entryPrice = Number((1000 + Math.random() * 50).toFixed(2));
-
-  const volume = Number(
-    ((capitalCents / 100) / entryPrice).toFixed(4)
-  );
+  const volume = Number(((capitalCents / 100) / entryPrice).toFixed(4));
 
   if (volume <= 0) return;
 
@@ -86,104 +72,5 @@ async function openPosition(client, cycle) {
     ]
   );
 }
-
-/* ======================================================
-   CLOSE ALL OPEN POSITIONS
-====================================================== */
-async function closeOpenPositions(client, cycle) {
-  const { rows: positions } = await client.query(
-    `
-    SELECT *
-    FROM bot_positions
-    WHERE trading_cycle_id = $1
-      AND status = 'OPEN'
-    `,
-    [cycle.id]
-  );
-
-  for (const p of positions) {
-    const entry = Number(p.entry_price);
-    const volume = Number(p.volume);
-
-    const exitPrice = Number(
-      (entry * (0.95 + Math.random() * 0.1)).toFixed(2)
-    );
-
-    const pnlCents = Math.floor(
-      (exitPrice - entry) * volume * 100
-    );
-
-    await client.query(
-      `
-      UPDATE bot_positions
-      SET status='CLOSED',
-          exit_price=$1,
-          pnl_cents=$2,
-          closed_at=NOW()
-      WHERE id=$3
-      `,
-      [exitPrice, pnlCents, p.id]
-    );
-  }
-}
-
-/* ======================================================
-   FINALIZE CYCLE (ROI-CAPPED PAYOUT)
-====================================================== */
-async function finalizeCycle(client, cycle) {
-  const cycleId = cycle.id;
-  const userId = cycle.user_id;
-
-  const capital = Number(cycle.capital_cents);
-  const expectedProfit = Number(cycle.expected_profit_cents);
-
-  // SAFETY
-  if (!capital || capital <= 0) return;
-
-  await client.query('BEGIN');
-
-  try {
-    // 1️⃣ Close any open positions (COSMETIC ONLY)
-    await closeOpenPositions(client, cycle);
-
-    // 2️⃣ Determine final profit
-    const finalProfit = cycle.stopped_early
-      ? 0
-      : expectedProfit;
-
-    // 3️⃣ Credit wallet (capital + profit)
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents + $1
-      WHERE user_id = $2
-        AND type = $3
-      `,
-      [
-        capital + finalProfit,
-        userId,
-        cycle.wallet_type
-      ]
-    );
-
-    // 4️⃣ Close cycle
-    await client.query(
-      `
-      UPDATE trading_cycles
-      SET status = 'COMPLETED',
-          profit_cents = $1,
-          completed_at = NOW()
-      WHERE id = $2
-      `,
-      [finalProfit, cycleId]
-    );
-
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  }
-}
-
 
 module.exports = { runTradingWorker };
