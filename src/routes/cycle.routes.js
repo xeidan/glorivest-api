@@ -185,4 +185,32 @@ router.post('/forfeit', auth, async (req, res) => {
 });
 
 
+router.get('/completed', auth, async (req, res) => {
+  try {
+    const walletId = Number(req.query.walletId);
+
+    if (!walletId) {
+      return res.status(400).json({ message: 'walletId is required' });
+    }
+
+    const cyclesRes = await pool.query(
+      `
+      SELECT *
+      FROM investment_cycles
+      WHERE wallet_id = $1
+        AND status = 'completed'
+      ORDER BY completed_at DESC
+      `,
+      [walletId]
+    );
+
+    return res.json({ cycles: cyclesRes.rows });
+
+  } catch (err) {
+    console.error('get completed cycles error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
 module.exports = router;
