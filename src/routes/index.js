@@ -10,5 +10,7 @@ router.use('/auth', require('./auth.routes'));
 router.use('/accounts', require('./account.routes'));
 router.use('/trades', require('./trade.routes'));
 router.use('/wallets', require('./wallet.routes'));
+router.use('/cycle', require('./cycle.routes'));
+
 
 module.exports = router;
