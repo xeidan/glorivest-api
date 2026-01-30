@@ -199,7 +199,8 @@ router.get('/completed', auth, async (req, res) => {
       FROM investment_cycles
       WHERE wallet_id = $1
         AND status = 'completed'
-      ORDER BY completed_at DESC
+      ORDER BY end_at DESC
+
       `,
       [walletId]
     );
