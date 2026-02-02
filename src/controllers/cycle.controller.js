@@ -1,18 +1,27 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const requireLiveAccount = require('../utils/requireLiveAccount');
 
 // --------------------------------------------------
-// START CYCLE (MULTIPLE PER WALLET SUPPORTED)
+// START CYCLE
 // --------------------------------------------------
-async function startCycle({ userId, walletId, capitalAmount, expectedProfit }) {
+async function startCycle({
+  userId,
+  walletId,
+  capitalAmount,
+  expectedProfit,
+  durationMonths
+}) {
+  if (![1, 3, 6].includes(Number(durationMonths))) {
+    throw new Error('Invalid duration');
+  }
+
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // 1️⃣ Lock wallet row
+    // 1️⃣ Lock wallet
     const walletRes = await client.query(
       `
       SELECT *
@@ -24,51 +33,56 @@ async function startCycle({ userId, walletId, capitalAmount, expectedProfit }) {
     );
 
     if (!walletRes.rows.length) {
-      throw new Error('Wallet not found or not owned by user');
+      throw new Error('Wallet not found');
     }
 
     const wallet = walletRes.rows[0];
-    requireLiveAccount(wallet);
 
     if (Number(wallet.balance_cents) < Number(capitalAmount)) {
-      throw new Error('Insufficient wallet balance');
+      throw new Error('Insufficient balance');
     }
 
-    // 2️⃣ Deduct capital from wallet
+    // 2️⃣ Deduct capital
     await client.query(
       `
+      UPDATE wallets
+      SET balance_cents = balance_cents - $1
+      WHERE id = $2
+      `,
+      [capitalAmount, walletId]
+    );
+
+    // 3️⃣ Calculate dates correctly
+    const startAt = new Date();
+    const endAt = new Date(
+      startAt.getTime() + durationMonths * 30 * 24 * 60 * 60 * 1000
+    );
+
+    // 4️⃣ Create cycle (SINGLE SOURCE OF TRUTH)
+    const cycleRes = await client.query(
+      `
       INSERT INTO cycles (
+        user_id,
         wallet_id,
         capital_amount,
         expected_profit,
         duration_months,
         start_at,
+        end_at,
         status
       )
-      VALUES ($1, $2, $3, $4, NOW(), 'active')
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+      RETURNING *
       `,
       [
+        userId,
         walletId,
         capitalAmount,
         expectedProfit,
-        durationMonths // 👈 MUST come from request body
+        durationMonths,
+        startAt,
+        endAt
       ]
-    );
-
-
-    // 3️⃣ Create independent investment cycle
-    const startAt = new Date();
-    const endAt = new Date(startAt.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-    const cycleRes = await client.query(
-      `
-      INSERT INTO investment_cycles
-        (user_id, wallet_id, capital_amount, expected_profit, start_at, end_at, status)
-      VALUES
-        ($1, $2, $3, $4, $5, $6, 'active')
-      RETURNING *
-      `,
-      [userId, walletId, capitalAmount, expectedProfit, startAt, endAt]
     );
 
     await client.query('COMMIT');
@@ -83,7 +97,7 @@ async function startCycle({ userId, walletId, capitalAmount, expectedProfit }) {
 }
 
 // --------------------------------------------------
-// STOP SINGLE CYCLE (FORFEIT)
+// STOP CYCLE (FORFEIT)
 // --------------------------------------------------
 async function stopCycle({ userId, cycleId }) {
   const client = await pool.connect();
@@ -93,11 +107,11 @@ async function stopCycle({ userId, cycleId }) {
 
     const res = await client.query(
       `
-      UPDATE investment_cycles
+      UPDATE cycles
       SET
         status = 'forfeited',
-        accrued_profit = 0,
-        updated_at = now()
+        expected_profit = 0,
+        end_at = NOW()
       WHERE id = $1
         AND user_id = $2
         AND status = 'active'
@@ -120,8 +134,6 @@ async function stopCycle({ userId, cycleId }) {
     client.release();
   }
 }
-
-
 
 module.exports = {
   startCycle,
