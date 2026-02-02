@@ -5,6 +5,11 @@ const { pool } = require('../config/database');
 // --------------------------------------------------
 // START CYCLE
 // --------------------------------------------------
+'use strict';
+
+const { pool } = require('../config/database');
+const requireLiveAccount = require('../utils/requireLiveAccount');
+
 async function startCycle({
   userId,
   walletId,
@@ -12,16 +17,11 @@ async function startCycle({
   expectedProfit,
   durationMonths
 }) {
-  if (![1, 3, 6].includes(Number(durationMonths))) {
-    throw new Error('Invalid duration');
-  }
-
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // 1️⃣ Lock wallet
     const walletRes = await client.query(
       `
       SELECT *
@@ -38,31 +38,21 @@ async function startCycle({
 
     const wallet = walletRes.rows[0];
 
+    // ❗ LIVE ONLY (REMOVE THIS IF YOU WANT DEMO CYCLES)
+    requireLiveAccount(wallet);
+
     if (Number(wallet.balance_cents) < Number(capitalAmount)) {
       throw new Error('Insufficient balance');
     }
 
-    // 2️⃣ Deduct capital
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents - $1
-      WHERE id = $2
-      `,
-      [capitalAmount, walletId]
-    );
-
-    // 3️⃣ Calculate dates correctly
     const startAt = new Date();
     const endAt = new Date(
-      startAt.getTime() + durationMonths * 30 * 24 * 60 * 60 * 1000
+      startAt.getTime() + durationMonths * 30 * 864e5
     );
 
-    // 4️⃣ Create cycle (SINGLE SOURCE OF TRUTH)
     const cycleRes = await client.query(
       `
       INSERT INTO cycles (
-        user_id,
         wallet_id,
         capital_amount,
         expected_profit,
@@ -71,11 +61,10 @@ async function startCycle({
         ends_at,
         status
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+      VALUES ($1, $2, $3, $4, $5, $6, 'active')
       RETURNING *
       `,
       [
-        userId,
         walletId,
         capitalAmount,
         expectedProfit,
@@ -83,6 +72,15 @@ async function startCycle({
         startAt,
         endAt
       ]
+    );
+
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents - $1
+      WHERE id = $2
+      `,
+      [capitalAmount, walletId]
     );
 
     await client.query('COMMIT');
@@ -95,6 +93,10 @@ async function startCycle({
     client.release();
   }
 }
+
+module.exports = { startCycle };
+
+
 
 // --------------------------------------------------
 // STOP CYCLE (FORFEIT)
