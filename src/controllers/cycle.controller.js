@@ -67,8 +67,8 @@ async function startCycle({
         capital_amount,
         expected_profit,
         duration_months,
-        start_at,
-        end_at,
+        started_at,
+        ends_at,
         status
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
