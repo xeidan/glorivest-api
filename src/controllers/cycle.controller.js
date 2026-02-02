@@ -32,7 +32,6 @@ async function startCycle({
     }
 
     const wallet = walletRes.rows[0];
-    requireLiveAccount(wallet);
 
     if (wallet.balance_cents < capitalAmount) {
       throw new Error('Insufficient balance');
