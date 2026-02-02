@@ -5,11 +5,6 @@ const { pool } = require('../config/database');
 // --------------------------------------------------
 // START CYCLE
 // --------------------------------------------------
-'use strict';
-
-const { pool } = require('../config/database');
-const requireLiveAccount = require('../utils/requireLiveAccount');
-
 async function startCycle({
   userId,
   walletId,
@@ -37,43 +32,13 @@ async function startCycle({
     }
 
     const wallet = walletRes.rows[0];
-
-    // ❗ LIVE ONLY (REMOVE THIS IF YOU WANT DEMO CYCLES)
     requireLiveAccount(wallet);
 
-    if (Number(wallet.balance_cents) < Number(capitalAmount)) {
+    if (wallet.balance_cents < capitalAmount) {
       throw new Error('Insufficient balance');
     }
 
-    const startAt = new Date();
-    const endAt = new Date(
-      startAt.getTime() + durationMonths * 30 * 864e5
-    );
-
-    const cycleRes = await client.query(
-      `
-      INSERT INTO cycles (
-        wallet_id,
-        capital_amount,
-        expected_profit,
-        duration_months,
-        started_at,
-        ends_at,
-        status
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, 'active')
-      RETURNING *
-      `,
-      [
-        walletId,
-        capitalAmount,
-        expectedProfit,
-        durationMonths,
-        startAt,
-        endAt
-      ]
-    );
-
+    // Deduct balance
     await client.query(
       `
       UPDATE wallets
@@ -83,8 +48,41 @@ async function startCycle({
       [capitalAmount, walletId]
     );
 
+    // Calculate dates
+    const startedAt = new Date();
+    const endsAt = new Date(
+      startedAt.getTime() + durationMonths * 30 * 86400000
+    );
+
+    // SINGLE SOURCE OF TRUTH
+    const { rows } = await client.query(
+      `
+      INSERT INTO cycles (
+        user_id,
+        wallet_id,
+        capital_amount,
+        expected_profit,
+        duration_months,
+        started_at,
+        ends_at,
+        status
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'active')
+      RETURNING *
+      `,
+      [
+        userId,
+        walletId,
+        capitalAmount,
+        expectedProfit,
+        durationMonths,
+        startedAt,
+        endsAt
+      ]
+    );
+
     await client.query('COMMIT');
-    return cycleRes.rows[0];
+    return rows[0];
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -93,9 +91,6 @@ async function startCycle({
     client.release();
   }
 }
-
-module.exports = { startCycle };
-
 
 
 // --------------------------------------------------
