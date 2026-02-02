@@ -8,7 +8,7 @@ const DEMO_BALANCE_CENTS = 1_000_000;
 const getWallets = async (req, res) => {
   const { rows } = await pool.query(
     `
-    SELECT id, code, type, balance_cents, status
+    SELECT id, code, type, balance_cents, status, demo_reset_at
     FROM wallets
     WHERE user_id = $1
     ORDER BY created_at ASC
