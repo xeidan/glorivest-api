@@ -35,7 +35,9 @@ const resetDemoWallet = async (req, res) => {
       `
       SELECT id
       FROM wallets
-      WHERE id=$1 AND user_id=$2 AND type='DEMO'
+      WHERE id = $1
+        AND user_id = $2
+        AND type = 'DEMO'
       LIMIT 1
       `,
       [walletId, userId]
@@ -46,26 +48,22 @@ const resetDemoWallet = async (req, res) => {
       return res.status(404).json({ message: 'Demo wallet not found' });
     }
 
-    // 2️⃣ Reset demo balance
-    await client.query(
-      `UPDATE wallets SET balance_cents=$1 WHERE id=$2`,
-      [DEMO_BALANCE_CENTS, walletId]
-    );
-
-    // 3️⃣ DELETE ALL DEMO CYCLES (THIS IS THE MISSING PIECE)
+    // 2️⃣ Reset balance + stamp reset time
     await client.query(
       `
-      DELETE FROM cycles
-      WHERE wallet_id = $1
+      UPDATE wallets
+      SET balance_cents = $1,
+          demo_reset_at = NOW()
+      WHERE id = $2
       `,
-      [walletId]
+      [DEMO_BALANCE_CENTS, walletId]
     );
 
     await client.query('COMMIT');
 
     res.json({
       balance_cents: DEMO_BALANCE_CENTS,
-      cycles_cleared: true
+      demo_reset_at: new Date().toISOString()
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -75,6 +73,7 @@ const resetDemoWallet = async (req, res) => {
     client.release();
   }
 };
+
 
 
 
