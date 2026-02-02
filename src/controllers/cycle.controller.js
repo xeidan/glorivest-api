@@ -101,27 +101,40 @@ async function stopCycle({ userId, cycleId }) {
   try {
     await client.query('BEGIN');
 
-    const res = await client.query(
+    // 1️⃣ Lock cycle + verify ownership via wallet
+    const { rows } = await client.query(
+      `
+      SELECT c.*
+      FROM cycles c
+      JOIN wallets w ON w.id = c.wallet_id
+      WHERE c.id = $1
+        AND w.user_id = $2
+        AND c.status = 'active'
+      FOR UPDATE
+      `,
+      [cycleId, userId]
+    );
+
+    if (!rows.length) {
+      throw new Error('Active cycle not found or not owned by user');
+    }
+
+    // 2️⃣ Forfeit cycle
+    const { rows: updated } = await client.query(
       `
       UPDATE cycles
       SET
         status = 'forfeited',
         expected_profit = 0,
-        end_at = NOW()
+        ends_at = NOW()
       WHERE id = $1
-        AND user_id = $2
-        AND status = 'active'
       RETURNING *
       `,
-      [cycleId, userId]
+      [cycleId]
     );
 
-    if (!res.rows.length) {
-      throw new Error('Active cycle not found');
-    }
-
     await client.query('COMMIT');
-    return res.rows[0];
+    return updated[0];
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -130,6 +143,7 @@ async function stopCycle({ userId, cycleId }) {
     client.release();
   }
 }
+
 
 module.exports = {
   startCycle,
