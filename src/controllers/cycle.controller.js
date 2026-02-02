@@ -37,12 +37,24 @@ async function startCycle({ userId, walletId, capitalAmount, expectedProfit }) {
     // 2️⃣ Deduct capital from wallet
     await client.query(
       `
-      UPDATE wallets
-      SET balance_cents = balance_cents - $1
-      WHERE id = $2
+      INSERT INTO cycles (
+        wallet_id,
+        capital_amount,
+        expected_profit,
+        duration_months,
+        start_at,
+        status
+      )
+      VALUES ($1, $2, $3, $4, NOW(), 'active')
       `,
-      [capitalAmount, walletId]
+      [
+        walletId,
+        capitalAmount,
+        expectedProfit,
+        durationMonths // 👈 MUST come from request body
+      ]
     );
+
 
     // 3️⃣ Create independent investment cycle
     const startAt = new Date();
