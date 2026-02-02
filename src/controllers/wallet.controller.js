@@ -20,6 +20,7 @@ const getWallets = async (req, res) => {
 };
 
 // RESET demo wallet
+// RESET demo wallet (FULL RESET)
 const resetDemoWallet = async (req, res) => {
   const client = await pool.connect();
 
@@ -29,9 +30,10 @@ const resetDemoWallet = async (req, res) => {
 
     await client.query('BEGIN');
 
+    // 1️⃣ Verify demo wallet
     const { rows } = await client.query(
       `
-      SELECT balance_cents
+      SELECT id
       FROM wallets
       WHERE id=$1 AND user_id=$2 AND type='DEMO'
       LIMIT 1
@@ -44,21 +46,38 @@ const resetDemoWallet = async (req, res) => {
       return res.status(404).json({ message: 'Demo wallet not found' });
     }
 
+    // 2️⃣ Reset demo balance
     await client.query(
       `UPDATE wallets SET balance_cents=$1 WHERE id=$2`,
       [DEMO_BALANCE_CENTS, walletId]
     );
 
+    // 3️⃣ DELETE ALL DEMO CYCLES (THIS IS THE MISSING PIECE)
+    await client.query(
+      `
+      DELETE FROM cycles
+      WHERE wallet_id = $1
+      `,
+      [walletId]
+    );
+
     await client.query('COMMIT');
-    res.json({ balance_cents: DEMO_BALANCE_CENTS });
+
+    res.json({
+      balance_cents: DEMO_BALANCE_CENTS,
+      cycles_cleared: true
+    });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
+    console.error('Demo reset failed:', err);
     res.status(500).json({ message: 'Server error' });
   } finally {
     client.release();
   }
 };
+
+
+
 
 /**
  * Transfer funds from REFERRAL wallet → REAL wallet
