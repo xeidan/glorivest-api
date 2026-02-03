@@ -5,6 +5,7 @@ const { pool } = require('../config/database');
 // --------------------------------------------------
 // START CYCLE
 // --------------------------------------------------
+
 async function startCycle({
   userId,
   walletId,
@@ -50,42 +51,47 @@ async function startCycle({
       capitalAmount > 0
         ? (Number(expectedProfit) / Number(capitalAmount)) * 100
         : 0;
-const { rows } = await client.query(
-  `
-  INSERT INTO cycles (
-    user_id,
-    wallet_id,
-    tier,
-    capital_cents,
-    expected_return_pct,
-    duration_months,
-    started_at,
-    ends_at,
-    status
-  )
-  VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    NOW(),
-    NOW() + make_interval(months => $6),
-    'RUNNING'
-  )
-  RETURNING *
-  `,
-  [
-    userId,
-    walletId,
-    'STANDARD',
-    capitalAmount,
-    expectedReturnPct,
-    durationMonths
-  ]
-);
 
+    // 🔒 FIXED DAYS — NO CALENDAR MONTHS
+    const DAYS_PER_MONTH = 30;
+    const totalDays = Number(durationMonths) * DAYS_PER_MONTH;
+
+    const { rows } = await client.query(
+      `
+      INSERT INTO cycles (
+        user_id,
+        wallet_id,
+        tier,
+        capital_cents,
+        expected_return_pct,
+        duration_months,
+        started_at,
+        ends_at,
+        status
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        NOW(),
+        NOW() + ($7 || ' days')::interval,
+        'RUNNING'
+      )
+      RETURNING *
+      `,
+      [
+        userId,
+        walletId,
+        'STANDARD',
+        capitalAmount,
+        expectedReturnPct,
+        durationMonths, // kept for reference
+        totalDays       // 👈 THIS is what ends_at uses
+      ]
+    );
 
     await client.query('COMMIT');
     return rows[0];
@@ -97,6 +103,7 @@ const { rows } = await client.query(
     client.release();
   }
 }
+
 
 // --------------------------------------------------
 // STOP CYCLE
