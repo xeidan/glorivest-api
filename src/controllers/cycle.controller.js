@@ -50,42 +50,42 @@ async function startCycle({
       capitalAmount > 0
         ? (Number(expectedProfit) / Number(capitalAmount)) * 100
         : 0;
+const { rows } = await client.query(
+  `
+  INSERT INTO cycles (
+    user_id,
+    wallet_id,
+    tier,
+    capital_cents,
+    expected_return_pct,
+    duration_months,
+    started_at,
+    ends_at,
+    status
+  )
+  VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    NOW(),
+    NOW() + make_interval(months => $6),
+    'RUNNING'
+  )
+  RETURNING *
+  `,
+  [
+    userId,
+    walletId,
+    'STANDARD',
+    capitalAmount,
+    expectedReturnPct,
+    durationMonths
+  ]
+);
 
-    const { rows } = await client.query(
-      `
-      INSERT INTO cycles (
-        user_id,
-        wallet_id,
-        tier,
-        capital_cents,
-        expected_return_pct,
-        duration_months,
-        started_at,
-        ends_at,
-        status
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        NOW(),
-        NOW() + ($6 * INTERVAL '1 month'),
-        'RUNNING'
-      )
-      RETURNING *
-      `,
-      [
-        userId,
-        walletId,
-        'STANDARD',
-        capitalAmount,
-        expectedReturnPct,
-        durationMonths
-      ]
-    );
 
     await client.query('COMMIT');
     return rows[0];
