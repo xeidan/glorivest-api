@@ -77,30 +77,33 @@ router.get('/current', auth, async (req, res) => {
 
 router.post('/start', auth, async (req, res) => {
   try {
-    const idempotencyKey = req.header('Idempotency-Key');
+    const {
+      walletId,
+      capitalAmount,
+      expectedProfit,
+      durationMonths
+    } = req.body;
 
-    if (!idempotencyKey) {
-      return res.status(400).json({
-        error: 'Idempotency-Key header is required'
-      });
+    if (!durationMonths || durationMonths < 1) {
+      return res.status(400).json({ message: 'Invalid duration' });
     }
 
-    const cycle = await cycleService.startCycle({
+    const cycle = await cycleController.startCycle({
       userId: req.user.id,
-      walletId: req.body.walletId,
-      capitalAmount: req.body.capitalAmount,
-      expectedProfit: req.body.expectedProfit,
-      idempotencyKey
+      walletId,
+      capitalAmount,
+      expectedProfit,
+      durationMonths
     });
 
     res.json({ cycle });
 
   } catch (err) {
-    res.status(err.statusCode || 400).json({
-      error: err.message
-    });
+    console.error('START CYCLE ERROR:', err.message);
+    res.status(400).json({ message: err.message });
   }
 });
+
 
 
 
@@ -166,11 +169,7 @@ router.post('/forfeit', auth, async (req, res) => {
   try {
     const { cycleId } = req.body;
 
-    if (!cycleId) {
-      return res.status(400).json({ error: 'cycleId required' });
-    }
-
-    const cycle = await cycleService.forfeitCycle({
+    const cycle = await cycleController.stopCycle({
       userId: req.user.id,
       cycleId
     });
@@ -178,11 +177,11 @@ router.post('/forfeit', auth, async (req, res) => {
     res.json({ cycle });
 
   } catch (err) {
-    res.status(err.statusCode || 500).json({
-      error: err.message || 'Server error'
-    });
+    console.error(err);
+    res.status(400).json({ message: err.message });
   }
 });
+
 
 
 router.get('/completed', auth, async (req, res) => {

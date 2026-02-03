@@ -1,6 +1,7 @@
 'use strict';
 
 const { pool } = require('../config/database');
+const normalizeDuration = require('../utils/normalizeDuration');
 
 // --------------------------------------------------
 // START CYCLE
@@ -10,14 +11,16 @@ async function startCycle({
   walletId,
   capitalAmount,
   expectedProfit,
-  durationMonths
+  durationMonths // frontend MUST send this name
 }) {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    const walletRes = await client.query(
+    const duration = normalizeDuration(durationMonths);
+
+    const { rows: walletRows } = await client.query(
       `
       SELECT *
       FROM wallets
@@ -27,17 +30,16 @@ async function startCycle({
       [walletId, userId]
     );
 
-    if (!walletRes.rows.length) {
+    if (!walletRows.length) {
       throw new Error('Wallet not found');
     }
 
-    const wallet = walletRes.rows[0];
+    const wallet = walletRows[0];
 
     if (wallet.balance_cents < capitalAmount) {
       throw new Error('Insufficient balance');
     }
 
-    // Deduct balance
     await client.query(
       `
       UPDATE wallets
@@ -47,13 +49,6 @@ async function startCycle({
       [capitalAmount, walletId]
     );
 
-    // Calculate dates
-    const startedAt = new Date();
-    const endsAt = new Date(
-      startedAt.getTime() + durationMonths * 30 * 86400000
-    );
-
-    // SINGLE SOURCE OF TRUTH
     const { rows } = await client.query(
       `
       INSERT INTO cycles (
@@ -66,21 +61,38 @@ async function startCycle({
         ends_at,
         status
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,'active')
-      RETURNING *
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        NOW(),
+        NOW() + ($5 || ' months')::interval,
+        'active'
+      )
+      RETURNING
+        id,
+        user_id,
+        wallet_id,
+        capital_amount,
+        expected_profit,
+        duration_months,
+        started_at,
+        ends_at,
+        status
       `,
       [
         userId,
         walletId,
         capitalAmount,
         expectedProfit,
-        durationMonths,
-        startedAt,
-        endsAt
+        duration
       ]
     );
 
     await client.query('COMMIT');
+
     return rows[0];
 
   } catch (err) {
@@ -101,10 +113,9 @@ async function stopCycle({ userId, cycleId }) {
   try {
     await client.query('BEGIN');
 
-    // 1️⃣ Lock cycle + verify ownership via wallet
     const { rows } = await client.query(
       `
-      SELECT c.*
+      SELECT c.*, w.id AS wallet_id
       FROM cycles c
       JOIN wallets w ON w.id = c.wallet_id
       WHERE c.id = $1
@@ -116,10 +127,23 @@ async function stopCycle({ userId, cycleId }) {
     );
 
     if (!rows.length) {
-      throw new Error('Active cycle not found or not owned by user');
+      throw new Error('Active cycle not found');
     }
 
-    // 2️⃣ Forfeit cycle
+    const cycle = rows[0];
+
+    // OPTIONAL: partial refund logic
+    const refund = Math.floor(cycle.capital_amount * 0.5);
+
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents + $1
+      WHERE id = $2
+      `,
+      [refund, cycle.wallet_id]
+    );
+
     const { rows: updated } = await client.query(
       `
       UPDATE cycles
@@ -143,6 +167,7 @@ async function stopCycle({ userId, cycleId }) {
     client.release();
   }
 }
+
 
 
 module.exports = {
