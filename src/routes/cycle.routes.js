@@ -120,7 +120,7 @@ router.get('/active', auth, async (req, res) => {
 
         GREATEST(
           0,
-          FLOOR(
+          CEIL(
             EXTRACT(
               EPOCH FROM (
                 (c.started_at + (c.duration_months || ' months')::interval) - NOW()
@@ -131,7 +131,7 @@ router.get('/active', auth, async (req, res) => {
 
         GREATEST(
           1,
-          FLOOR(
+          CEIL(
             EXTRACT(
               EPOCH FROM (
                 (c.started_at + (c.duration_months || ' months')::interval) - c.started_at
