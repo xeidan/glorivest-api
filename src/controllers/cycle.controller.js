@@ -106,7 +106,7 @@ async function startCycle({
 
 
 // --------------------------------------------------
-// STOP CYCLE
+// STOP CYCLE (REFUND CAPITAL)
 // --------------------------------------------------
 async function stopCycle({ userId, cycleId }) {
   const client = await pool.connect();
@@ -114,7 +114,8 @@ async function stopCycle({ userId, cycleId }) {
   try {
     await client.query('BEGIN');
 
-    const res = await client.query(
+    // 1. Lock cycle
+    const cycleRes = await client.query(
       `
       SELECT *
       FROM cycles
@@ -126,10 +127,38 @@ async function stopCycle({ userId, cycleId }) {
       [cycleId, userId]
     );
 
-    if (!res.rows.length) {
+    if (!cycleRes.rows.length) {
       throw new Error('Active cycle not found');
     }
 
+    const cycle = cycleRes.rows[0];
+
+    // 2. Lock wallet
+    const walletRes = await client.query(
+      `
+      SELECT *
+      FROM wallets
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [cycle.wallet_id]
+    );
+
+    if (!walletRes.rows.length) {
+      throw new Error('Wallet not found');
+    }
+
+    // 3. Refund capital
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents + $1
+      WHERE id = $2
+      `,
+      [cycle.capital_cents, cycle.wallet_id]
+    );
+
+    // 4. Cancel cycle
     const { rows } = await client.query(
       `
       UPDATE cycles
@@ -151,6 +180,7 @@ async function stopCycle({ userId, cycleId }) {
     client.release();
   }
 }
+
 
 module.exports = {
   startCycle,
