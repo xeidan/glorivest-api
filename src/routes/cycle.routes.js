@@ -38,20 +38,10 @@ router.get('/current', auth, async (req, res) => {
 
     const cycleRes = await pool.query(
       `
-      SELECT
-        *,
-        LEAST(
-          expected_profit,
-          expected_profit *
-          GREATEST(
-            0,
-            EXTRACT(EPOCH FROM (now() - start_at)) /
-            EXTRACT(EPOCH FROM (end_at - start_at))
-          )
-        ) AS computed_accrued_profit
-      FROM investment_cycles
+      SELECT *
+      FROM cycles
       WHERE wallet_id = $1
-        AND status = 'active'
+        AND status = 'RUNNING'
       LIMIT 1
       `,
       [walletId]
@@ -104,56 +94,67 @@ router.post('/start', auth, async (req, res) => {
 
 /**
  * GET /api/cycle/active?walletId=35
+ * 🔥 AUTHORITATIVE TIME CALCULATION (NO NULL ends_at)
  */
 router.get('/active', auth, async (req, res) => {
-  const walletId = Number(req.query.walletId);
+  try {
+    const walletId = Number(req.query.walletId);
+    if (!walletId) {
+      return res.status(400).json({ message: 'walletId is required' });
+    }
 
-  const cyclesRes = await pool.query(
-    `
-    SELECT
-  c.*,
+    const cyclesRes = await pool.query(
+      `
+      SELECT
+        c.*,
 
-  /* always derive a real end date */
-  (c.started_at + (c.duration_months || ' months')::interval) AS ends_at,
+        /* always derive a real end date */
+        (c.started_at + (c.duration_months || ' months')::interval) AS ends_at,
 
-  GREATEST(
-    0,
-    FLOOR(
-      EXTRACT(EPOCH FROM (NOW() - c.started_at)) / 86400
-    )
-  )::int AS elapsed_days,
+        GREATEST(
+          0,
+          FLOOR(
+            EXTRACT(EPOCH FROM (NOW() - c.started_at)) / 86400
+          )
+        )::int AS elapsed_days,
 
-  GREATEST(
-    0,
-    FLOOR(
-      EXTRACT(
-        EPOCH FROM (
-          (c.started_at + (c.duration_months || ' months')::interval) - NOW()
-        )
-      ) / 86400
-    )
-  )::int AS remaining_days,
+        GREATEST(
+          0,
+          FLOOR(
+            EXTRACT(
+              EPOCH FROM (
+                (c.started_at + (c.duration_months || ' months')::interval) - NOW()
+              )
+            ) / 86400
+          )
+        )::int AS remaining_days,
 
-  GREATEST(
-    1,
-    FLOOR(
-      EXTRACT(
-        EPOCH FROM (
-          (c.started_at + (c.duration_months || ' months')::interval) - c.started_at
-        )
-      ) / 86400
-    )
-  )::int AS total_days
+        GREATEST(
+          1,
+          FLOOR(
+            EXTRACT(
+              EPOCH FROM (
+                (c.started_at + (c.duration_months || ' months')::interval) - c.started_at
+              )
+            ) / 86400
+          )
+        )::int AS total_days
 
-FROM cycles c
-WHERE c.wallet_id = $1
-  AND c.status = 'RUNNING'
-ORDER BY c.started_at ASC
+      FROM cycles c
+      WHERE c.wallet_id = $1
+        AND c.status = 'RUNNING'
+      ORDER BY c.started_at ASC
+      `,
+      [walletId]
+    );
 
+    res.json({ cycles: cyclesRes.rows });
 
-  res.json({ cycles: cyclesRes.rows });
+  } catch (err) {
+    console.error('get active cycles error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
-
 
 
 /**
@@ -183,7 +184,6 @@ router.post('/forfeit', auth, async (req, res) => {
 router.get('/completed', auth, async (req, res) => {
   try {
     const walletId = Number(req.query.walletId);
-
     if (!walletId) {
       return res.status(400).json({ message: 'walletId is required' });
     }
@@ -191,10 +191,10 @@ router.get('/completed', auth, async (req, res) => {
     const cyclesRes = await pool.query(
       `
       SELECT *
-      FROM investment_cycles
+      FROM cycles
       WHERE wallet_id = $1
-        AND status = 'completed'
-      ORDER BY end_at DESC
+        AND status = 'COMPLETED'
+      ORDER BY completed_at DESC
       `,
       [walletId]
     );
