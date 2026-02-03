@@ -106,55 +106,37 @@ router.post('/start', auth, async (req, res) => {
  * GET /api/cycle/active?walletId=35
  */
 router.get('/active', auth, async (req, res) => {
-  try {
-    const walletId = Number(req.query.walletId);
+  const walletId = Number(req.query.walletId);
 
-    if (!walletId) {
-      return res.status(400).json({ message: 'walletId is required' });
-    }
+  const cyclesRes = await pool.query(
+    `
+    SELECT
+      c.*,
+      GREATEST(
+        0,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - c.started_at)) / 86400)
+      )::int AS elapsed_days,
 
-    const walletRes = await pool.query(
-      `
-      SELECT *
-      FROM wallets
-      WHERE id = $1 AND user_id = $2
-      LIMIT 1
-      `,
-      [walletId, req.user.id]
-    );
+      GREATEST(
+        0,
+        FLOOR(EXTRACT(EPOCH FROM (c.ends_at - NOW())) / 86400)
+      )::int AS remaining_days,
 
-    if (!walletRes.rows.length) {
-      return res.status(404).json({ message: 'Wallet not found' });
-    }
+      GREATEST(
+        1,
+        FLOOR(EXTRACT(EPOCH FROM (c.ends_at - c.started_at)) / 86400)
+      )::int AS total_days
+    FROM cycles c
+    WHERE c.wallet_id = $1
+      AND c.status = 'RUNNING'
+    ORDER BY c.started_at ASC
+    `,
+    [walletId]
+  );
 
-    const cyclesRes = await pool.query(
-      `
-      SELECT
-        *,
-        LEAST(
-          expected_profit,
-          expected_profit *
-          GREATEST(
-            0,
-            EXTRACT(EPOCH FROM (now() - start_at)) /
-            EXTRACT(EPOCH FROM (end_at - start_at))
-          )
-        ) AS computed_accrued_profit
-      FROM investment_cycles
-      WHERE wallet_id = $1
-        AND status = 'active'
-      ORDER BY start_at ASC
-      `,
-      [walletId]
-    );
-
-    return res.json({ cycles: cyclesRes.rows });
-
-  } catch (err) {
-    console.error('get active cycles error:', err);
-    return res.status(500).json({ error: 'Server error' });
-  }
+  res.json({ cycles: cyclesRes.rows });
 });
+
 
 
 /**
