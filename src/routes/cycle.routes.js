@@ -19,7 +19,6 @@ router.get('/current', auth, async (req, res) => {
       return res.status(400).json({ message: 'walletId is required' });
     }
 
-    // Load wallet
     const walletRes = await pool.query(
       `
       SELECT *
@@ -37,7 +36,6 @@ router.get('/current', auth, async (req, res) => {
     const account = walletRes.rows[0];
     requireLiveAccount(account);
 
-    // Fetch active cycle
     const cycleRes = await pool.query(
       `
       SELECT
@@ -70,11 +68,10 @@ router.get('/current', auth, async (req, res) => {
   }
 });
 
+
 /**
  * POST /api/cycle/start
- * body: { walletId, expectedProfit }
  */
-
 router.post('/start', auth, async (req, res) => {
   try {
     const {
@@ -88,7 +85,7 @@ router.post('/start', auth, async (req, res) => {
       return res.status(400).json({ message: 'Invalid duration' });
     }
 
-    const cycle = await cycleController.startCycle({
+    const cycle = await cycleService.startCycle({
       userId: req.user.id,
       walletId,
       capitalAmount,
@@ -105,8 +102,6 @@ router.post('/start', auth, async (req, res) => {
 });
 
 
-
-
 /**
  * GET /api/cycle/active?walletId=35
  */
@@ -118,7 +113,6 @@ router.get('/active', auth, async (req, res) => {
       return res.status(400).json({ message: 'walletId is required' });
     }
 
-    // ensure wallet belongs to user
     const walletRes = await pool.query(
       `
       SELECT *
@@ -163,13 +157,14 @@ router.get('/active', auth, async (req, res) => {
 });
 
 
-
-// POST /api/cycle/forfeit
+/**
+ * POST /api/cycle/forfeit
+ */
 router.post('/forfeit', auth, async (req, res) => {
   try {
     const { cycleId } = req.body;
 
-    const cycle = await cycleController.stopCycle({
+    const cycle = await cycleService.stopCycle({
       userId: req.user.id,
       cycleId
     });
@@ -183,7 +178,9 @@ router.post('/forfeit', auth, async (req, res) => {
 });
 
 
-
+/**
+ * GET /api/cycle/completed?walletId=35
+ */
 router.get('/completed', auth, async (req, res) => {
   try {
     const walletId = Number(req.query.walletId);
@@ -199,7 +196,6 @@ router.get('/completed', auth, async (req, res) => {
       WHERE wallet_id = $1
         AND status = 'completed'
       ORDER BY end_at DESC
-
       `,
       [walletId]
     );
@@ -211,6 +207,5 @@ router.get('/completed', auth, async (req, res) => {
     return res.status(500).json({ error: 'Server error' });
   }
 });
-
 
 module.exports = router;
