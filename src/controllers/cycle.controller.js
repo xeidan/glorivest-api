@@ -182,7 +182,72 @@ async function stopCycle({ userId, cycleId }) {
 }
 
 
+
+
+
+// --------------------------------------------------
+// SETTLE COMPLETED CYCLES
+// --------------------------------------------------
+async function settleCompletedCycles() {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Lock all expired running cycles
+    const { rows: cycles } = await client.query(
+      `
+      SELECT *
+      FROM cycles
+      WHERE status = 'RUNNING'
+        AND ends_at <= NOW()
+      FOR UPDATE
+      `
+    );
+
+    for (const cycle of cycles) {
+      // 2. Lock wallet
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = balance_cents + $1
+        WHERE id = $2
+        `,
+        [
+          cycle.capital_cents +
+            Math.floor(
+              cycle.capital_cents * (cycle.expected_return_pct / 100)
+            ),
+          cycle.wallet_id
+        ]
+      );
+
+      // 3. Mark cycle completed
+      await client.query(
+        `
+        UPDATE cycles
+        SET status = 'COMPLETED',
+            completed_at = NOW()
+        WHERE id = $1
+        `,
+        [cycle.id]
+      );
+    }
+
+    await client.query('COMMIT');
+    return cycles.length;
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+
 module.exports = {
   startCycle,
-  stopCycle
+  stopCycle,
+  settleCompletedCycles
 };
