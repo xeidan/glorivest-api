@@ -75,7 +75,7 @@ async function startCycle({
         id,
         user_id,
         wallet_id,
-        capital_amount,
+        capital,
         expected_profit,
         duration_months,
         started_at,
