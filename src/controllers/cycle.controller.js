@@ -50,46 +50,41 @@ async function startCycle({
     );
 
     const { rows } = await client.query(
-      `
-      INSERT INTO cycles (
-        user_id,
-        wallet_id,
-        capital_amount,
-        expected_profit,
-        duration_months,
-        started_at,
-        ends_at,
-        status
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        NOW(),
-        NOW() + ($5 || ' months')::interval,
-        'active'
-      )
-      RETURNING
-        id,
-        user_id,
-        wallet_id,
-        capital,
-        expected_profit,
-        duration_months,
-        started_at,
-        ends_at,
-        status
-      `,
-      [
-        userId,
-        walletId,
-        capitalAmount,
-        expectedProfit,
-        duration
-      ]
-    );
+  `
+  INSERT INTO cycles (
+    user_id,
+    wallet_id,
+    tier,
+    capital_cents,
+    expected_return_pct,
+    duration_months,
+    started_at,
+    ends_at,
+    status
+  )
+  VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    NOW(),
+    NOW() + ($6 || ' months')::interval,
+    'RUNNING'
+  )
+  RETURNING *
+  `,
+  [
+    userId,
+    walletId,
+    'STANDARD',          // minimal default
+    capitalAmount,       // already cents
+    expectedReturnPct,   // NOT profit
+    durationMonths
+  ]
+);
+
 
     await client.query('COMMIT');
 
@@ -148,7 +143,8 @@ async function stopCycle({ userId, cycleId }) {
       `
       UPDATE cycles
       SET
-        status = 'forfeited',
+        status = 'CANCELLED',
+  completed_at = NOW()
         expected_profit = 0,
         ends_at = NOW()
       WHERE id = $1
