@@ -9,7 +9,7 @@ async function startCycle({
   userId,
   walletId,
   capitalAmount,
-  expectedProfit,   // frontend sends this
+  expectedProfit,
   durationMonths
 }) {
   const client = await pool.connect();
@@ -17,7 +17,6 @@ async function startCycle({
   try {
     await client.query('BEGIN');
 
-    // Lock wallet
     const walletRes = await client.query(
       `
       SELECT *
@@ -38,7 +37,6 @@ async function startCycle({
       throw new Error('Insufficient balance');
     }
 
-    // Debit wallet
     await client.query(
       `
       UPDATE wallets
@@ -48,9 +46,6 @@ async function startCycle({
       [capitalAmount, walletId]
     );
 
-    // Convert frontend "expectedProfit" to RETURN %
-    // expectedProfit is in cents
-    // return % = profit / capital * 100
     const expectedReturnPct =
       capitalAmount > 0
         ? (Number(expectedProfit) / Number(capitalAmount)) * 100
@@ -77,7 +72,7 @@ async function startCycle({
         $5,
         $6,
         NOW(),
-        NOW() + ($6 || ' months')::interval,
+        NOW() + ($6 * INTERVAL '1 month'),
         'RUNNING'
       )
       RETURNING *
@@ -85,7 +80,7 @@ async function startCycle({
       [
         userId,
         walletId,
-        'STANDARD',          // minimal default tier
+        'STANDARD',
         capitalAmount,
         expectedReturnPct,
         durationMonths
@@ -104,7 +99,7 @@ async function startCycle({
 }
 
 // --------------------------------------------------
-// STOP CYCLE (FORFEIT)
+// STOP CYCLE
 // --------------------------------------------------
 async function stopCycle({ userId, cycleId }) {
   const client = await pool.connect();
@@ -112,43 +107,27 @@ async function stopCycle({ userId, cycleId }) {
   try {
     await client.query('BEGIN');
 
-    const cycleRes = await client.query(
+    const res = await client.query(
       `
-      SELECT c.*, w.id AS wallet_id
-      FROM cycles c
-      JOIN wallets w ON w.id = c.wallet_id
-      WHERE c.id = $1
-        AND c.user_id = $2
-        AND c.status = 'RUNNING'
+      SELECT *
+      FROM cycles
+      WHERE id = $1
+        AND user_id = $2
+        AND status = 'RUNNING'
       FOR UPDATE
       `,
       [cycleId, userId]
     );
 
-    if (!cycleRes.rows.length) {
+    if (!res.rows.length) {
       throw new Error('Active cycle not found');
     }
-
-    const cycle = cycleRes.rows[0];
-
-    // OPTIONAL: partial refund (50%)
-    const refund = Math.floor(cycle.capital_cents * 0.5);
-
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents + $1
-      WHERE id = $2
-      `,
-      [refund, cycle.wallet_id]
-    );
 
     const { rows } = await client.query(
       `
       UPDATE cycles
-      SET
-        status = 'CANCELLED',
-        completed_at = NOW()
+      SET status = 'CANCELLED',
+          completed_at = NOW()
       WHERE id = $1
       RETURNING *
       `,
