@@ -106,44 +106,22 @@ router.get('/active', auth, async (req, res) => {
     const cyclesRes = await pool.query(
       `
       SELECT
-        c.*,
+  c.*,
 
-        /* always derive a real end date */
-        (c.started_at + (c.duration_months || ' months')::interval) AS ends_at,
+  FLOOR(EXTRACT(EPOCH FROM (NOW() - c.started_at)) / 86400)::int
+    AS elapsed_days,
 
-        GREATEST(
-          0,
-          FLOOR(
-            EXTRACT(EPOCH FROM (NOW() - c.started_at)) / 86400
-          )
-        )::int AS elapsed_days,
+  CEIL(EXTRACT(EPOCH FROM (c.ends_at - NOW())) / 86400)::int
+    AS remaining_days,
 
-        GREATEST(
-          0,
-          CEIL(
-            EXTRACT(
-              EPOCH FROM (
-                (c.started_at + (c.duration_months || ' months')::interval) - NOW()
-              )
-            ) / 86400
-          )
-        )::int AS remaining_days,
+  CEIL(EXTRACT(EPOCH FROM (c.ends_at - c.started_at)) / 86400)::int
+    AS total_days
 
-        GREATEST(
-          1,
-          CEIL(
-            EXTRACT(
-              EPOCH FROM (
-                (c.started_at + (c.duration_months || ' months')::interval) - c.started_at
-              )
-            ) / 86400
-          )
-        )::int AS total_days
+FROM cycles c
+WHERE c.wallet_id = $1
+  AND c.status = 'RUNNING'
+ORDER BY c.started_at ASC;
 
-      FROM cycles c
-      WHERE c.wallet_id = $1
-        AND c.status = 'RUNNING'
-      ORDER BY c.started_at ASC
       `,
       [walletId]
     );
