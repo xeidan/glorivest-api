@@ -215,6 +215,7 @@ async function stopCycle({ userId, cycleId }) {
 // --------------------------------------------------
 async function settleCompletedCycles() {
   const client = await pool.connect();
+console.log('[CRON] settleCompletedCycles fired');
 
   try {
     await client.query('BEGIN');
