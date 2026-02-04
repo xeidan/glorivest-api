@@ -213,44 +213,47 @@ async function stopCycle({ userId, cycleId }) {
 // --------------------------------------------------
 // SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT)
 // --------------------------------------------------
+// --------------------------------------------------
+// SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT)
+// --------------------------------------------------
 async function settleCompletedCycles() {
   const client = await pool.connect();
-console.log('[CRON] settleCompletedCycles fired');
 
   try {
     await client.query('BEGIN');
 
     /**
-     * 1. Select + lock ONLY cycles that are eligible
-     *    and immediately mark them as COMPLETING
-     *    so they cannot be re-processed.
+     * 1. Lock ONLY eligible cycles
+     *    - RUNNING
+     *    - expired
+     *    - SKIP LOCKED guarantees idempotency
      */
     const { rows: cycles } = await client.query(
       `
-      UPDATE cycles
-      SET status = 'COMPLETING'
-      WHERE id IN (
-        SELECT id
-        FROM cycles
-        WHERE status = 'RUNNING'
-          AND ends_at <= NOW()
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING *
+      SELECT *
+      FROM cycles
+      WHERE status = 'RUNNING'
+        AND ends_at <= NOW()
+      FOR UPDATE SKIP LOCKED
       `
     );
 
     for (const cycle of cycles) {
       /**
-       * 2. Resolve wallet type AUTHORITATIVELY
+       * 2. Lock wallet + determine type (AUTHORITATIVE)
        */
-      const walletTypeRes = await client.query(
-        `SELECT type, balance_cents FROM wallets WHERE id = $1 FOR UPDATE`,
+      const walletRes = await client.query(
+        `
+        SELECT id, type, balance_cents
+        FROM wallets
+        WHERE id = $1
+        FOR UPDATE
+        `,
         [cycle.wallet_id]
       );
 
-      if (!walletTypeRes.rows.length) {
-        // wallet missing → safely cancel
+      if (!walletRes.rows.length) {
+        // Wallet missing → cancel cycle safely
         await client.query(
           `
           UPDATE cycles
@@ -263,15 +266,16 @@ console.log('[CRON] settleCompletedCycles fired');
         continue;
       }
 
-      const wallet = walletTypeRes.rows[0];
+      const wallet = walletRes.rows[0];
       const walletType = String(wallet.type).toUpperCase();
       const isDemo = walletType === 'DEMO';
 
       /**
-       * 3. Calculate profit ONCE
+       * 3. Calculate profit ONCE (single source of truth)
        */
       const profitCents = Math.floor(
-        cycle.capital_cents * (Number(cycle.expected_return_pct) / 100)
+        cycle.capital_cents *
+        (Number(cycle.expected_return_pct) / 100)
       );
 
       const payoutCents = cycle.capital_cents + profitCents;
@@ -288,7 +292,7 @@ console.log('[CRON] settleCompletedCycles fired');
           SET balance_cents = $1
           WHERE id = $2
           `,
-          [newBalance, cycle.wallet_id]
+          [newBalance, wallet.id]
         );
 
         await client.query(
@@ -299,7 +303,7 @@ console.log('[CRON] settleCompletedCycles fired');
             ($1, $2, 'CREDIT', 'CYCLE_COMPLETED_PAYOUT', $3, $4)
           `,
           [
-            cycle.wallet_id,
+            wallet.id,
             cycle.id,
             payoutCents,
             newBalance
@@ -308,7 +312,7 @@ console.log('[CRON] settleCompletedCycles fired');
       }
 
       /**
-       * 5. Finalize cycle (single source of truth)
+       * 5. Finalize cycle (VALID STATUS ONLY)
        */
       await client.query(
         `
@@ -332,6 +336,7 @@ console.log('[CRON] settleCompletedCycles fired');
     client.release();
   }
 }
+
 
 
 

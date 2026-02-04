@@ -14,4 +14,3 @@ app.listen(PORT, () => {
   console.log('🔥 Glorivest Backend Started');
   console.log(`Server running on port ${PORT}`);
 });
-x
