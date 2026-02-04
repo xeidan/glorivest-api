@@ -296,19 +296,18 @@ async function settleCompletedCycles() {
         );
 
         await client.query(
-          `
-          INSERT INTO wallet_ledger
-            (wallet_id, cycle_id, type, reason, amount_cents, balance_after_cents)
-          VALUES
-            ($1, $2, 'CREDIT', 'CYCLE_COMPLETED_PAYOUT', $3, $4)
-          `,
-          [
-            wallet.id,
-            cycle.id,
-            payoutCents,
-            newBalance
-          ]
-        );
+  `
+  INSERT INTO wallet_ledger
+    (wallet_id, cycle_id, reason, amount_cents)
+  VALUES
+    ($1, $2, 'CYCLE_COMPLETED_PAYOUT', $3)
+  `,
+  [
+    wallet.id,
+    cycle.id,
+    payoutCents
+  ]
+);
       }
 
       /**
