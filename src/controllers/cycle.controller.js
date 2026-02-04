@@ -219,49 +219,66 @@ async function settleCompletedCycles() {
   try {
     await client.query('BEGIN');
 
+    /**
+     * 1. Select + lock ONLY cycles that are eligible
+     *    and immediately mark them as COMPLETING
+     *    so they cannot be re-processed.
+     */
     const { rows: cycles } = await client.query(
       `
-      SELECT *
-      FROM cycles
-      WHERE status = 'RUNNING'
-        AND ends_at <= NOW()
-      FOR UPDATE SKIP LOCKED
+      UPDATE cycles
+      SET status = 'COMPLETING'
+      WHERE id IN (
+        SELECT id
+        FROM cycles
+        WHERE status = 'RUNNING'
+          AND ends_at <= NOW()
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING *
       `
     );
 
     for (const cycle of cycles) {
+      /**
+       * 2. Resolve wallet type AUTHORITATIVELY
+       */
       const walletTypeRes = await client.query(
-        `SELECT type FROM wallets WHERE id = $1`,
+        `SELECT type, balance_cents FROM wallets WHERE id = $1 FOR UPDATE`,
         [cycle.wallet_id]
       );
 
+      if (!walletTypeRes.rows.length) {
+        // wallet missing → safely cancel
+        await client.query(
+          `
+          UPDATE cycles
+          SET status = 'CANCELLED',
+              completed_at = NOW()
+          WHERE id = $1
+          `,
+          [cycle.id]
+        );
+        continue;
+      }
 
-const walletType =
-  String(walletTypeRes.rows[0]?.type || '').toUpperCase();
+      const wallet = walletTypeRes.rows[0];
+      const walletType = String(wallet.type).toUpperCase();
+      const isDemo = walletType === 'DEMO';
 
-const isDemo = walletType === 'DEMO';
-
-
-      // ✅ DEFINE PROFIT ONCE, OUTSIDE
+      /**
+       * 3. Calculate profit ONCE
+       */
       const profitCents = Math.floor(
-        cycle.capital_cents * (cycle.expected_return_pct / 100)
+        cycle.capital_cents * (Number(cycle.expected_return_pct) / 100)
       );
 
+      const payoutCents = cycle.capital_cents + profitCents;
+
+      /**
+       * 4. Credit LIVE wallets only
+       */
       if (!isDemo) {
-        const walletRes = await client.query(
-          `
-          SELECT *
-          FROM wallets
-          WHERE id = $1
-          FOR UPDATE
-          `,
-          [cycle.wallet_id]
-        );
-
-        if (!walletRes.rows.length) continue;
-
-        const wallet = walletRes.rows[0];
-        const payoutCents = cycle.capital_cents + profitCents;
         const newBalance = wallet.balance_cents + payoutCents;
 
         await client.query(
@@ -270,7 +287,7 @@ const isDemo = walletType === 'DEMO';
           SET balance_cents = $1
           WHERE id = $2
           `,
-          [newBalance, wallet.id]
+          [newBalance, cycle.wallet_id]
         );
 
         await client.query(
@@ -280,11 +297,18 @@ const isDemo = walletType === 'DEMO';
           VALUES
             ($1, $2, 'CREDIT', 'CYCLE_COMPLETED_PAYOUT', $3, $4)
           `,
-          [wallet.id, cycle.id, payoutCents, newBalance]
+          [
+            cycle.wallet_id,
+            cycle.id,
+            payoutCents,
+            newBalance
+          ]
         );
       }
 
-      // ✅ PROFIT IS NOW ALWAYS DEFINED
+      /**
+       * 5. Finalize cycle (single source of truth)
+       */
       await client.query(
         `
         UPDATE cycles
@@ -307,6 +331,7 @@ const isDemo = walletType === 'DEMO';
     client.release();
   }
 }
+
 
 
 
