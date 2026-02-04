@@ -235,7 +235,12 @@ async function settleCompletedCycles() {
         [cycle.wallet_id]
       );
 
-      const isDemo = walletTypeRes.rows[0]?.type === 'DEMO';
+
+const walletType =
+  String(walletTypeRes.rows[0]?.type || '').toUpperCase();
+
+const isDemo = walletType === 'DEMO';
+
 
       // ✅ DEFINE PROFIT ONCE, OUTSIDE
       const profitCents = Math.floor(
