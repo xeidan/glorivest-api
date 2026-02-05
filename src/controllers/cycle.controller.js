@@ -211,10 +211,7 @@ async function stopCycle({ userId, cycleId }) {
 
 
 // --------------------------------------------------
-// SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT)
-// --------------------------------------------------
-// --------------------------------------------------
-// SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT)
+// SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT, SAFE)
 // --------------------------------------------------
 async function settleCompletedCycles() {
   const client = await pool.connect();
@@ -222,12 +219,7 @@ async function settleCompletedCycles() {
   try {
     await client.query('BEGIN');
 
-    /**
-     * 1. Lock ONLY eligible cycles
-     *    - RUNNING
-     *    - expired
-     *    - SKIP LOCKED guarantees idempotency
-     */
+    // 1. Lock eligible cycles
     const { rows: cycles } = await client.query(
       `
       SELECT *
@@ -240,57 +232,109 @@ async function settleCompletedCycles() {
 
     for (const cycle of cycles) {
 
-  const profitCents = Math.floor(
-    cycle.capital_cents * (Number(cycle.expected_return_pct) / 100)
-  );
+      // 🔐 IDENTITY CHECK — HAS THIS CYCLE BEEN PAID?
+      const alreadyPaidRes = await client.query(
+        `
+        SELECT 1
+        FROM wallet_ledger
+        WHERE cycle_id = $1
+          AND reason = 'CYCLE_COMPLETED_PAYOUT'
+        LIMIT 1
+        `,
+        [cycle.id]
+      );
 
-  // 1️⃣ Finalize cycle FIRST (idempotent guard)
-  const { rowCount } = await client.query(
-    `
-    UPDATE cycles
-    SET status = 'COMPLETED',
-        completed_at = NOW(),
-        realized_profit_cents = $2
-    WHERE id = $1
-    `,
-    [cycle.id, profitCents]
-  );
+      if (alreadyPaidRes.rows.length) {
+        // ✅ Already paid → just finalize cycle
+        await client.query(
+          `
+          UPDATE cycles
+          SET status = 'COMPLETED',
+              completed_at = NOW()
+          WHERE id = $1
+          `,
+          [cycle.id]
+        );
+        continue;
+      }
 
-  // If already completed → skip safely
-  if (rowCount === 0) continue;
+      // 2. Lock wallet + resolve type
+      const walletRes = await client.query(
+        `
+        SELECT id, type, balance_cents
+        FROM wallets
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [cycle.wallet_id]
+      );
 
-  // 2️⃣ Resolve wallet
-  const walletRes = await client.query(
-    `SELECT id, type, balance_cents FROM wallets WHERE id = $1 FOR UPDATE`,
-    [cycle.wallet_id]
-  );
+      if (!walletRes.rows.length) {
+        // Wallet missing → cancel cycle safely
+        await client.query(
+          `
+          UPDATE cycles
+          SET status = 'CANCELLED',
+              completed_at = NOW()
+          WHERE id = $1
+          `,
+          [cycle.id]
+        );
+        continue;
+      }
 
-  if (!walletRes.rows.length) continue;
+      const wallet = walletRes.rows[0];
+      const isDemo = String(wallet.type).toUpperCase() === 'DEMO';
 
-  const wallet = walletRes.rows[0];
-  if (wallet.type === 'DEMO') continue;
+      // 3. Calculate profit ONCE
+      const profitCents = Math.floor(
+        Number(cycle.capital_cents) *
+        (Number(cycle.expected_return_pct) / 100)
+      );
 
-  const payoutCents = cycle.capital_cents + profitCents;
-  const newBalance = wallet.balance_cents + payoutCents;
+      const payoutCents = Number(cycle.capital_cents) + profitCents;
 
-  // 3️⃣ Credit wallet
-  await client.query(
-    `UPDATE wallets SET balance_cents = $1 WHERE id = $2`,
-    [newBalance, wallet.id]
-  );
+      // 4. Credit LIVE wallets only
+      if (!isDemo) {
+        const newBalance = Number(wallet.balance_cents) + payoutCents;
 
-  // 4️⃣ Ledger
-  await client.query(
-    `
-    INSERT INTO wallet_ledger
-      (wallet_id, cycle_id, reason, amount_cents)
-    VALUES
-      ($1, $2, 'CYCLE_COMPLETED_PAYOUT', $3)
-    `,
-    [wallet.id, cycle.id, payoutCents]
-  );
-}
+        await client.query(
+          `
+          UPDATE wallets
+          SET balance_cents = $1
+          WHERE id = $2
+          `,
+          [newBalance, wallet.id]
+        );
 
+        await client.query(
+          `
+          INSERT INTO wallet_ledger
+            (wallet_id, cycle_id, amount_cents, reason, balance_after_cents)
+          VALUES
+            ($1, $2, $3, 'CYCLE_COMPLETED_PAYOUT', $4)
+          `,
+          [
+            wallet.id,
+            cycle.id,
+            payoutCents,
+            newBalance
+          ]
+        );
+      }
+
+      // 5. Finalize cycle (single source of truth)
+      await client.query(
+        `
+        UPDATE cycles
+        SET status = 'COMPLETED',
+            completed_at = NOW(),
+            realized_profit_cents = $2
+        WHERE id = $1
+        `,
+        [cycle.id, profitCents]
+      );
+    }
 
     await client.query('COMMIT');
     return cycles.length;
@@ -302,10 +346,6 @@ async function settleCompletedCycles() {
     client.release();
   }
 }
-
-
-
-
 
 
 
