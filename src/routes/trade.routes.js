@@ -23,6 +23,5 @@ router.get('/history', requireAuth, trade.getTradeHistory);
 // PROFITS
 // ===============================
 router.get('/profits', requireAuth, trade.getTradeProfits);
-router.post('/transfer-profits', requireAuth, trade.transferTradeProfits);
 
 module.exports = router;
