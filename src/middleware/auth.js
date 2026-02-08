@@ -3,32 +3,40 @@
 const jwt = require('jsonwebtoken');
 
 module.exports = function requireAuth(req, res, next) {
-  // ✅ logging is allowed ONLY here
-  // console.log('[AUTH HEADERS]', req.headers);
+  const header = req.headers.authorization;
 
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  // 1️⃣ Header must exist
+  if (!header) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
-  const token = authHeader.split(' ')[1];
+  // 2️⃣ Must be Bearer token
+  const [scheme, token] = header.split(' ');
+
+  if (scheme !== 'Bearer' || !token) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
 
   try {
+    // 3️⃣ Verify JWT
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    req.user = {
-      id: Number(decoded.id),
-      email: decoded.email
-    };
-
-    if (!Number.isInteger(req.user.id)) {
-      throw new Error('Invalid user id in token');
+    // 4️⃣ Validate payload shape strictly
+    const userId = Number(decoded.id);
+    if (!Number.isInteger(userId)) {
+      throw new Error('Invalid token payload');
     }
+
+    // 5️⃣ Attach trusted user context
+    req.user = {
+      id: userId,
+      email: decoded.email || null
+    };
 
     next();
   } catch (err) {
-    console.error('auth middleware error:', err);
+    // 🔍 This log is intentional and useful
+    console.error('auth middleware error:', err.message);
     return res.status(401).json({ message: 'Unauthorized' });
   }
 };
