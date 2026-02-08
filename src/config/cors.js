@@ -7,7 +7,8 @@ const allowedOrigins = [
   'https://glorivest.com',
   'https://www.glorivest.com',
   'http://localhost:3000',
-  'http://127.0.0.1:5503'
+  'http://127.0.0.1:5503',
+  'http://localhost:5503'
 ];
 
 const corsOptions = {
