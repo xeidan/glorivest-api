@@ -36,20 +36,20 @@ async function transferProfits(req, res) {
       0
     );
 
-    // 2. Lock main wallet
+    // 2. Lock REAL wallet (FIXED)
     const walletRes = await client.query(
       `
       SELECT id, balance_cents
       FROM wallets
       WHERE user_id = $1
-        AND type = 'MAIN'
+        AND type = 'REAL'
       FOR UPDATE
       `,
       [userId]
     );
 
     if (!walletRes.rows.length) {
-      throw new Error('Main wallet not found');
+      throw new Error('REAL wallet not found');
     }
 
     const wallet = walletRes.rows[0];
@@ -65,7 +65,7 @@ async function transferProfits(req, res) {
       [newBalance, wallet.id]
     );
 
-    // 4. Ledger entry (single consolidated record)
+    // 4. Ledger entry
     await client.query(
       `
       INSERT INTO wallet_ledger
@@ -76,7 +76,7 @@ async function transferProfits(req, res) {
       [wallet.id, totalProfit, newBalance]
     );
 
-    // 5. Zero out profits (idempotent)
+    // 5. Zero out profits
     await client.query(
       `
       UPDATE cycles
@@ -96,7 +96,7 @@ async function transferProfits(req, res) {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
-    return res.status(500).json({ error: 'Transfer failed' });
+    return res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
