@@ -11,6 +11,6 @@ router.use('/accounts', require('./account.routes'));
 router.use('/trades', require('./trade.routes'));
 router.use('/wallets', require('./wallet.routes'));
 router.use('/cycle', require('./cycle.routes'));
-
+router.use('/transfer', require('./transfer.routes'));
 
 module.exports = router;
