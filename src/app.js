@@ -17,19 +17,16 @@ app.use(cors({
   origin: [
     'http://127.0.0.1:5503',
     'http://localhost:5503',
-    // add production frontend here when ready
   ],
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
     'Authorization',
     'Idempotency-Key'
-  ],
-  credentials: false
+  ]
 }));
 
-// Handle preflight explicitly (important)
-app.options('*', cors());
 
 /* ======================================================
    MIDDLEWARE
