@@ -27,7 +27,6 @@ router.post('/change-password', requireAuth, authCtrl.changePassword);
 router.post('/update-email/request', requireAuth, authCtrl.requestEmailUpdate);
 router.post('/update-email/confirm', requireAuth, authCtrl.confirmEmailUpdate);
 router.post('/delete-account', requireAuth, authCtrl.deleteAccount);
-router.post('/transfer-profits', requireAuth, transferProfits);
 
 
 module.exports = router;
