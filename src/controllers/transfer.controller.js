@@ -67,14 +67,15 @@ async function transferProfits(req, res) {
 
     // 4. Ledger entry
     await client.query(
-      `
-      INSERT INTO wallet_ledger
-        (wallet_id, type, reason, amount_cents, balance_after_cents)
-      VALUES
-        ($1, 'CREDIT', 'PROFIT_TRANSFER', $2, $3)
-      `,
-      [wallet.id, totalProfit, newBalance]
-    );
+  `
+  INSERT INTO wallet_ledger
+    (wallet_id, amount_cents, reason)
+  VALUES
+    ($1, $2, 'PROFIT_TRANSFER')
+  `,
+  [wallet.id, totalProfit]
+);
+
 
     // 5. Zero out profits
     await client.query(
