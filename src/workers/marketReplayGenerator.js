@@ -1,4 +1,5 @@
 'use strict';
+console.log('🔥 marketReplayGenerator loaded');
 
 const { pool } = require('../config/database');
 const { getPrice } = require('../services/priceFeed/getPrice');
@@ -26,6 +27,8 @@ function shouldCreatePosition() {
 }
 
 async function runMarketReplay() {
+    console.log('▶ marketReplayGenerator tick');
+
   const client = await pool.connect();
 
   try {
@@ -44,7 +47,7 @@ async function runMarketReplay() {
       const side = pickSide();
 
       const openedAt = new Date();
-      const entryPrice = await getCurrentPrice(symbol);
+      const entryPrice = await getPrice(symbol);
 
       // simple delay simulation (30–120 mins)
       const delayMinutes = 30 + Math.floor(Math.random() * 90);
@@ -52,7 +55,7 @@ async function runMarketReplay() {
         openedAt.getTime() + delayMinutes * 60 * 1000
       );
 
-      const exitPrice = await getCurrentPrice(symbol);
+      const exitPrice  = await getPrice(symbol);
 
       await client.query(
         `
