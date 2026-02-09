@@ -3,43 +3,13 @@
 console.log('🔥 marketReplayGenerator loaded');
 
 const { pool } = require('../config/database');
-const { getPrice } = require('../services/priceFeed/getPrice');
 
-// =====================================
-// CONFIG
-// =====================================
-
-const ASSETS = [
-  'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT',
-  'XAUUSD','XAGUSD',
-  'AAPL','TSLA','MSFT','NVDA',
-  'EURUSD','GBPUSD','USDJPY','AUDUSD',
-  'USDCAD','USDCHF','NZDUSD','EURJPY'
-];
-
-const FALLBACK_SYMBOL = 'BTCUSDT';
 const MAX_POSITIONS_PER_DAY = 7;
-const RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4h
 
-// =====================================
-// HELPERS
-// =====================================
-
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function pickSide() {
-  return Math.random() < 0.5 ? 'LONG' : 'SHORT';
-}
-
-function shouldCreatePosition() {
-  return Math.random() < 0.7; // ~6–7/day
-}
-
-// =====================================
-// CORE
-// =====================================
+// This table MUST be populated by frontend WS snapshots
+// symbol | price | recorded_at
+// e.g. BTCUSDT | 51234.12 | now()
 
 async function runMarketReplay() {
   console.log('▶ marketReplayGenerator tick');
@@ -57,12 +27,10 @@ async function runMarketReplay() {
 
     for (const cycle of cycles) {
 
-      // -------------------------------
-      // DAILY CAP (HARD)
-      // -------------------------------
+      // daily cap
       const { rows: [{ count }] } = await client.query(
         `
-        SELECT COUNT(*)::int AS count
+        SELECT COUNT(*)::int
         FROM positions
         WHERE cycle_id = $1
           AND source = 'SIMULATION'
@@ -72,46 +40,30 @@ async function runMarketReplay() {
       );
 
       if (count >= MAX_POSITIONS_PER_DAY) continue;
-      if (!shouldCreatePosition()) continue;
 
-      let symbol = pick(ASSETS);
-      const side = pickSide();
+      // pick a random recent market snapshot
+      const { rows: prices } = await client.query(`
+        SELECT symbol, price
+        FROM market_prices
+        WHERE recorded_at >= NOW() - INTERVAL '1 hour'
+        ORDER BY RANDOM()
+        LIMIT 1
+      `);
+
+      if (!prices.length) continue;
+
+      const { symbol, price } = prices[0];
+      const side = Math.random() < 0.5 ? 'LONG' : 'SHORT';
 
       const openedAt = new Date();
-
       const delayMinutes = 30 + Math.floor(Math.random() * 90);
-      const closedAt = new Date(
-        openedAt.getTime() + delayMinutes * 60 * 1000
-      );
+      const closedAt = new Date(openedAt.getTime() + delayMinutes * 60 * 1000);
 
-      let entryPrice;
-      let exitPrice;
+      // small synthetic move (±0.2–0.8%)
+      const movePct = (Math.random() * 0.006 + 0.002);
+      const direction = side === 'LONG' ? 1 : -1;
+      const exitPrice = price * (1 + direction * movePct);
 
-      // -------------------------------
-      // PRICE FETCH (FAULT-TOLERANT)
-      // -------------------------------
-      try {
-        entryPrice = await getPrice(symbol);
-        exitPrice  = await getPrice(symbol);
-      } catch (err) {
-        console.error(`⚠️ replay price failed for ${symbol}: ${err.message}`);
-
-        // fallback to BTCUSDT
-        try {
-          symbol = FALLBACK_SYMBOL;
-          entryPrice = await getPrice(symbol);
-          exitPrice  = await getPrice(symbol);
-        } catch (fallbackErr) {
-          console.error(
-            `❌ fallback price failed for ${FALLBACK_SYMBOL}: ${fallbackErr.message}`
-          );
-          continue; // only skip if even BTC fails
-        }
-      }
-
-      // -------------------------------
-      // INSERT (CLOSED ONLY)
-      // -------------------------------
       await client.query(
         `
         INSERT INTO positions (
@@ -140,8 +92,8 @@ async function runMarketReplay() {
           cycle.id,
           symbol,
           side,
-          entryPrice,
-          exitPrice,
+          price,
+          Number(exitPrice.toFixed(5)),
           openedAt,
           closedAt
         ]
@@ -149,22 +101,13 @@ async function runMarketReplay() {
     }
 
   } catch (err) {
-    console.error('❌ marketReplayGenerator fatal error:', err);
+    console.error('❌ marketReplayGenerator error:', err);
   } finally {
     client.release();
   }
 }
 
-// =====================================
-// SCHEDULING
-// =====================================
-
-// periodic run
 setInterval(runMarketReplay, RUN_INTERVAL_MS);
-
-// boot run (no waiting)
-runMarketReplay().catch(err =>
-  console.error('❌ initial marketReplayGenerator run failed:', err)
-);
+runMarketReplay().catch(console.error);
 
 module.exports = { runMarketReplay };
