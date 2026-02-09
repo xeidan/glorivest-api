@@ -1,7 +1,7 @@
 'use strict';
 
 const { settleCompletedCycles } =
-  require('../controllers/cycle.controller');
+  require('../src/controllers/cycle.controller.js');
 
 (async () => {
   try {
