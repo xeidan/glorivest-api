@@ -9,10 +9,17 @@ async function runCycleSimulation({ cycle, wallet }) {
   try {
     await client.query('BEGIN');
 
-    const result = simulateStrategy({
-      capitalCents: wallet.balance_cents,
-      config: cycle.strategy_config
-    });
+    const PRESETS =
+  require('./presets');
+
+const strategyConfig =
+  cycle.strategy_config || PRESETS.BALANCED;
+
+const result = simulateStrategy({
+  capitalCents: wallet.balance_cents,
+  config: strategyConfig
+});
+
 
     for (const p of result.positions) {
       const { rows } = await client.query(
