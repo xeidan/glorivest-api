@@ -14,4 +14,7 @@ router.use('/cycle', require('./cycle.routes'));
 router.use('/transfer', require('./transfer.routes'));
 router.use('/positions', require('./positions.routes'));
 
+// MARKET SNAPSHOT (THIS WAS MISSING THE PREFIX)
+router.use('/market-snapshot', require('./marketSnapshot.routes'));
+
 module.exports = router;
