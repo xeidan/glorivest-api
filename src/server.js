@@ -1,6 +1,7 @@
 'use strict';
 
 require('dotenv').config();
+require('./workers');
 
 const app = require('./app');
 
