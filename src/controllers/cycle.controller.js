@@ -284,12 +284,7 @@ async function settleCompletedCycles() {
 
       const wallet = wallets[0];
 
-      // 🔥 SAME CLIENT PASSED IN
-      await runCycleSimulation({
-        client,
-        cycle,
-        wallet
-      });
+
 
       await client.query(
         `

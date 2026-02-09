@@ -3,6 +3,11 @@
 // ===============================
 // OPTIONAL WORKERS
 // ===============================
+if (process.env.ENABLE_MARKET_REPLAY === 'true') {
+  require('./marketReplayGenerator');
+}
+
+if (process.env.ENABLE_WORKER !== 'true') return;
 
 if (process.env.ENABLE_TRON === 'true') {
   require('./tronPoller');
