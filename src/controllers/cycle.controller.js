@@ -1,6 +1,8 @@
 'use strict';
 
 const { pool } = require('../config/database');
+const { runCycleSimulation } =
+  require('../services/strategyEngine/applyStrategy');
 
 // --------------------------------------------------
 // START CYCLE
@@ -232,20 +234,20 @@ async function settleCompletedCycles() {
 
     for (const cycle of cycles) {
 
-      // 🔐 IDENTITY CHECK — HAS THIS CYCLE BEEN PAID?
-      const alreadyPaidRes = await client.query(
+      // 2. Idempotency guard — has this cycle already been simulated?
+      const alreadySimulated = await client.query(
         `
         SELECT 1
         FROM wallet_ledger
         WHERE cycle_id = $1
-          AND reason = 'CYCLE_COMPLETED_PAYOUT'
+          AND reason = 'POSITION_PNL'
         LIMIT 1
         `,
         [cycle.id]
       );
 
-      if (alreadyPaidRes.rows.length) {
-        // ✅ Already paid → just finalize cycle
+      if (alreadySimulated.rows.length) {
+        // Already processed → just finalize cycle
         await client.query(
           `
           UPDATE cycles
@@ -258,10 +260,10 @@ async function settleCompletedCycles() {
         continue;
       }
 
-      // 2. Lock wallet + resolve type
+      // 3. Lock wallet
       const walletRes = await client.query(
         `
-        SELECT id, type, balance_cents
+        SELECT *
         FROM wallets
         WHERE id = $1
         FOR UPDATE
@@ -284,55 +286,25 @@ async function settleCompletedCycles() {
       }
 
       const wallet = walletRes.rows[0];
-      const isDemo = String(wallet.type).toUpperCase() === 'DEMO';
 
-      // 3. Calculate profit ONCE
-      const profitCents = Math.floor(
-        Number(cycle.capital_cents) *
-        (Number(cycle.expected_return_pct) / 100)
-      );
+      // 4. Run strategy simulation
+      //    → creates positions
+      //    → writes POSITION_PNL ledger entries
+      //    → updates wallet balance if LIVE
+      await runCycleSimulation({
+        cycle,
+        wallet
+      });
 
-      const payoutCents = Number(cycle.capital_cents) + profitCents;
-
-      // 4. Credit LIVE wallets only
-      if (!isDemo) {
-        const newBalance = Number(wallet.balance_cents) + payoutCents;
-
-        await client.query(
-          `
-          UPDATE wallets
-          SET balance_cents = $1
-          WHERE id = $2
-          `,
-          [newBalance, wallet.id]
-        );
-
-        await client.query(
-          `
-          INSERT INTO wallet_ledger
-            (wallet_id, cycle_id, amount_cents, reason, balance_after_cents)
-          VALUES
-            ($1, $2, $3, 'CYCLE_COMPLETED_PAYOUT', $4)
-          `,
-          [
-            wallet.id,
-            cycle.id,
-            payoutCents,
-            newBalance
-          ]
-        );
-      }
-
-      // 5. Finalize cycle (single source of truth)
+      // 5. Finalize cycle
       await client.query(
         `
         UPDATE cycles
         SET status = 'COMPLETED',
-            completed_at = NOW(),
-            realized_profit_cents = $2
+            completed_at = NOW()
         WHERE id = $1
         `,
-        [cycle.id, profitCents]
+        [cycle.id]
       );
     }
 
@@ -346,6 +318,7 @@ async function settleCompletedCycles() {
     client.release();
   }
 }
+
 
 
 
