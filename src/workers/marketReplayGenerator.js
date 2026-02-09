@@ -1,17 +1,28 @@
 'use strict';
+
 console.log('🔥 marketReplayGenerator loaded');
 
 const { pool } = require('../config/database');
 const { getPrice } = require('../services/priceFeed/getPrice');
 
+// ===============================
+// CONFIG
+// ===============================
 
 const ASSETS = [
   'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT',
-  'XAUUSDT','XAGUSDT',
+  'XAUUSD','XAGUSD',
   'AAPL','TSLA','MSFT','NVDA',
   'EURUSD','GBPUSD','USDJPY','AUDUSD',
   'USDCAD','USDCHF','NZDUSD','EURJPY'
 ];
+
+const MAX_POSITIONS_PER_DAY = 7;
+const RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+// ===============================
+// HELPERS
+// ===============================
 
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -21,42 +32,73 @@ function pickSide() {
   return Math.random() < 0.5 ? 'LONG' : 'SHORT';
 }
 
-// guard so we don’t spam positions
 function shouldCreatePosition() {
-  return Math.random() < 0.7; // ~6–7/day with 4h interval
+  return Math.random() < 0.7; // ~6–7/day
 }
 
+// ===============================
+// CORE
+// ===============================
+
 async function runMarketReplay() {
-    console.log('▶ marketReplayGenerator tick');
+  console.log('▶ marketReplayGenerator tick');
 
   const client = await pool.connect();
 
   try {
     const { rows: cycles } = await client.query(`
-      SELECT c.id, c.user_id, c.wallet_id
-      FROM cycles c
-      WHERE c.status = 'RUNNING'
+      SELECT id, user_id, wallet_id
+      FROM cycles
+      WHERE status = 'RUNNING'
     `);
 
     if (!cycles.length) return;
 
     for (const cycle of cycles) {
+
+      // -------------------------------
+      // DAILY CAP GUARD
+      // -------------------------------
+      const { rows: [{ count }] } = await client.query(
+        `
+        SELECT COUNT(*)::int AS count
+        FROM positions
+        WHERE cycle_id = $1
+          AND source = 'SIMULATION'
+          AND opened_at >= date_trunc('day', NOW())
+        `,
+        [cycle.id]
+      );
+
+      if (count >= MAX_POSITIONS_PER_DAY) continue;
       if (!shouldCreatePosition()) continue;
 
       const symbol = pick(ASSETS);
       const side = pickSide();
 
       const openedAt = new Date();
-      const entryPrice = await getPrice(symbol);
 
-      // simple delay simulation (30–120 mins)
+      // simulate holding time (30–120 min)
       const delayMinutes = 30 + Math.floor(Math.random() * 90);
-      const closedAt = new Date(
-        openedAt.getTime() + delayMinutes * 60 * 1000
-      );
+      const closedAt = new Date(openedAt.getTime() + delayMinutes * 60 * 1000);
 
-      const exitPrice  = await getPrice(symbol);
+      let entryPrice;
+      let exitPrice;
 
+      // -------------------------------
+      // PRICE FETCH (NON-FATAL)
+      // -------------------------------
+      try {
+        entryPrice = await getPrice(symbol);
+        exitPrice  = await getPrice(symbol);
+      } catch (err) {
+        console.error(`⚠️ replay price failed for ${symbol}: ${err.message}`);
+        continue; // skip this attempt only
+      }
+
+      // -------------------------------
+      // INSERT (CLOSED ONLY)
+      // -------------------------------
       await client.query(
         `
         INSERT INTO positions (
@@ -75,8 +117,8 @@ async function runMarketReplay() {
         )
         VALUES (
           $1,$2,$3,$4,$5,
-          $6,$7,$8,
-          'CLOSED',$9,$10,'SIMULATION'
+          1,$6,$7,
+          'CLOSED',$8,$9,'SIMULATION'
         )
         `,
         [
@@ -85,7 +127,6 @@ async function runMarketReplay() {
           cycle.id,
           symbol,
           side,
-          1,                // size is cosmetic
           entryPrice,
           exitPrice,
           openedAt,
@@ -95,16 +136,22 @@ async function runMarketReplay() {
     }
 
   } catch (err) {
-    console.error('marketReplayGenerator error:', err);
+    console.error('❌ marketReplayGenerator fatal error:', err);
   } finally {
     client.release();
   }
 }
 
-// run every 4 hours
-setInterval(runMarketReplay, 4 * 60 * 60 * 1000);
+// ===============================
+// SCHEDULING
+// ===============================
 
-// optional boot run
-runMarketReplay().catch(console.error);
+// run every 4 hours
+setInterval(runMarketReplay, RUN_INTERVAL_MS);
+
+// boot run (no waiting)
+runMarketReplay().catch(err =>
+  console.error('❌ initial marketReplayGenerator run failed:', err)
+);
 
 module.exports = { runMarketReplay };
