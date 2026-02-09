@@ -228,7 +228,8 @@ async function settleCompletedCycles() {
       FROM cycles
       WHERE status = 'RUNNING'
         AND ends_at <= NOW()
-      FOR UPDATE SKIP LOCKED
+      FOR UPDATE
+
       `
     );
 
