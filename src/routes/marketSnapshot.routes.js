@@ -5,6 +5,9 @@ const router = express.Router();
 
 const controller = require('../controllers/marketSnapshot.controller');
 
+console.log('SNAPSHOT CONTROLLER KEYS:', Object.keys(controller));
+
+
 if (!controller || typeof controller.recordMarketSnapshot !== 'function') {
   throw new Error('recordMarketSnapshot controller not loaded');
 }
