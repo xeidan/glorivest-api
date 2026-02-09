@@ -13,9 +13,5 @@ router.use('/wallets', require('./wallet.routes'));
 router.use('/cycle', require('./cycle.routes'));
 router.use('/transfer', require('./transfer.routes'));
 router.use('/positions', require('./positions.routes'));
-const marketSnapshotRoutes = require('./marketSnapshot.routes');
-
-router.use('/api', marketSnapshotRoutes);
-
 
 module.exports = router;

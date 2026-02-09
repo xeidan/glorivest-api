@@ -40,6 +40,13 @@ app.use(morgan('dev'));
 ====================================================== */
 app.use('/api', routes);
 
+// MARKET SNAPSHOTS (explicit mount)
+app.use(
+  '/api/market-snapshot',
+  require('./routes/marketSnapshot.routes')
+);
+
+
 /* ======================================================
    404 FALLBACK
 ====================================================== */

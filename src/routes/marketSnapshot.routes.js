@@ -2,16 +2,8 @@
 
 const express = require('express');
 const router = express.Router();
+const { recordMarketSnapshot } = require('../controllers/marketSnapshot.controller');
 
-const controller = require('../controllers/marketSnapshot.controller');
-
-console.log('SNAPSHOT CONTROLLER KEYS:', Object.keys(controller));
-
-
-if (!controller || typeof controller.recordMarketSnapshot !== 'function') {
-  throw new Error('recordMarketSnapshot controller not loaded');
-}
-
-router.post('/market-snapshot', controller.recordMarketSnapshot);
+router.post('/', recordMarketSnapshot);
 
 module.exports = router;
