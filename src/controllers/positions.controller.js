@@ -2,71 +2,60 @@
 
 const { pool } = require('../config/database');
 
-async function listPositions(req, res) {
-    const userId = req.user.id;
+async function getUserPositions(req, res) {
+  const userId = req.user.id;
 
-    const {
-        status,        // open | closed
-        wallet,        // REAL | DEMO | REFERRAL
-        limit = 50,
-        offset = 0
-    } = req.query;
+  const page = Math.max(Number(req.query.page || 1), 1);
+  const pageSize = Math.min(Number(req.query.page_size || 10), 50);
+  const offset = (page - 1) * pageSize;
 
-    const values = [userId];
-    let where = `p.user_id = $1`;
-    let i = 2;
+  const client = await pool.connect();
 
-    if (status) {
-        where += ` AND p.status = $${i++}`;
-        values.push(status.toUpperCase());
-    }
+  try {
+    const { rows } = await client.query(
+      `
+      SELECT
+        p.id,
+        p.symbol,
+        p.side,
+        p.size,
+        p.entry_price,
+        p.exit_price,
+        p.pnl_cents,
+        p.status,
+        p.opened_at,
+        p.closed_at
+      FROM positions p
+      WHERE p.user_id = $1
+      ORDER BY
+        CASE WHEN p.status = 'OPEN' THEN 0 ELSE 1 END,
+        p.opened_at DESC
+      LIMIT $2 OFFSET $3
+      `,
+      [userId, pageSize, offset]
+    );
 
-    if (wallet) {
-        where += ` AND w.type = $${i++}`;
-        values.push(wallet.toUpperCase());
-    }
+    const { rows: countRows } = await client.query(
+      `SELECT COUNT(*) FROM positions WHERE user_id = $1`,
+      [userId]
+    );
 
-    const sql = `
-        SELECT
-            p.id,
-            p.symbol,
-            p.side,
-            p.size,
-            p.entry_price,
-            p.exit_price,
-            p.pnl_cents,
-            p.status,
-            p.opened_at,
-            p.closed_at,
-            w.type AS wallet_type
-        FROM positions p
-        JOIN wallets w ON w.id = p.wallet_id
-        WHERE ${where}
-        ORDER BY
-            CASE WHEN p.status = 'OPEN' THEN 0 ELSE 1 END,
-            p.opened_at DESC
-        LIMIT $${i++}
-        OFFSET $${i}
-    `;
+    const total = Number(countRows[0].count);
+    const pages = Math.max(Math.ceil(total / pageSize), 1);
 
-    values.push(Number(limit), Number(offset));
+    res.json({
+      data: rows,
+      page,
+      pages,
+      total
+    });
 
-    try {
-        const { rows } = await pool.query(sql, values);
-
-        res.json({
-            success: true,
-            data: rows,
-            meta: {
-                limit: Number(limit),
-                offset: Number(offset),
-                returned: rows.length
-            }
-        });
-    } catch (err) {
-        console.error('listPositions error', err);
-        res.status(500).json({ success: false });
-    }
+  } catch (err) {
+    console.error('positions error', err);
+    res.status(500).json({ message: 'Failed to load positions' });
+  } finally {
+    client.release();
+  }
 }
 
-module.exports = { listPositions };
+module.exports = { getUserPositions };

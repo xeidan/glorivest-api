@@ -215,13 +215,13 @@ async function stopCycle({ userId, cycleId }) {
 // --------------------------------------------------
 // SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT, SAFE)
 // --------------------------------------------------
+
 async function settleCompletedCycles() {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // 1. Lock eligible cycles
     const { rows: cycles } = await client.query(
       `
       SELECT *
@@ -229,14 +229,13 @@ async function settleCompletedCycles() {
       WHERE status = 'RUNNING'
         AND ends_at <= NOW()
       FOR UPDATE
-
       `
     );
 
     for (const cycle of cycles) {
 
-      // 2. Idempotency guard — has this cycle already been simulated?
-      const alreadySimulated = await client.query(
+      // Idempotency guard
+      const { rows: already } = await client.query(
         `
         SELECT 1
         FROM wallet_ledger
@@ -247,8 +246,7 @@ async function settleCompletedCycles() {
         [cycle.id]
       );
 
-      if (alreadySimulated.rows.length) {
-        // Already processed → just finalize cycle
+      if (already.length) {
         await client.query(
           `
           UPDATE cycles
@@ -261,8 +259,7 @@ async function settleCompletedCycles() {
         continue;
       }
 
-      // 3. Lock wallet
-      const walletRes = await client.query(
+      const { rows: wallets } = await client.query(
         `
         SELECT *
         FROM wallets
@@ -272,8 +269,7 @@ async function settleCompletedCycles() {
         [cycle.wallet_id]
       );
 
-      if (!walletRes.rows.length) {
-        // Wallet missing → cancel cycle safely
+      if (!wallets.length) {
         await client.query(
           `
           UPDATE cycles
@@ -286,18 +282,15 @@ async function settleCompletedCycles() {
         continue;
       }
 
-      const wallet = walletRes.rows[0];
+      const wallet = wallets[0];
 
-      // 4. Run strategy simulation
-      //    → creates positions
-      //    → writes POSITION_PNL ledger entries
-      //    → updates wallet balance if LIVE
+      // 🔥 SAME CLIENT PASSED IN
       await runCycleSimulation({
+        client,
         cycle,
         wallet
       });
 
-      // 5. Finalize cycle
       await client.query(
         `
         UPDATE cycles
@@ -319,8 +312,6 @@ async function settleCompletedCycles() {
     client.release();
   }
 }
-
-
 
 
 

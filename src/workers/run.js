@@ -1,38 +1,30 @@
-// 'use strict';
+'use strict';
 
-// require('dotenv').config();
-// require('./index'); // cron + pollers
+if (process.env.ENABLE_WORKER !== 'true') {
+  console.log('[worker] cycle worker disabled');
+  process.exit(0);
+}
 
-// const { runTradingWorker } = require('./trading.worker');
+const { settleCompletedCycles } =
+  require('../controllers/cycle.controller');
 
+async function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
-// const cron = require('node-cron');
-// const { settleCompletedCycles } = require('../controllers/cycle.controller');
+(async () => {
+  console.log('[worker] cycle worker started');
 
-// console.log('🔥 Cycle cron enabled');
-// console.log('[WORKER] started');
+  while (true) {
+    try {
+      const count = await settleCompletedCycles();
+      if (count > 0) {
+        console.log(`[worker] settled ${count} cycle(s)`);
+      }
+    } catch (e) {
+      console.error('[worker] error', e);
+    }
 
-// cron.schedule('*/1 * * * *', async () => {
-//   try {
-//     const count = await settleCompletedCycles();
-//     if (count > 0) {
-//       console.log(`[CYCLE] Settled ${count} completed cycles`);
-//     }
-//   } catch (e) {
-//     console.error('Cycle settlement failed:', e);
-//   }
-// });
-
-
-// console.log('[WORKER] started');
-
-// setInterval(async () => {
-//   try {
-//     await runTradingWorker();
-//   } catch (e) {
-//     console.error('[WORKER] loop error:', e);
-//   }
-// }, 30_000);
-
-// // keep process alive
-// setInterval(() => {}, 60_000);
+    await sleep(60_000);
+  }
+})();
