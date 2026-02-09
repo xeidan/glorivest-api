@@ -3,10 +3,12 @@
 const express = require('express');
 const router = express.Router();
 
-const {
-  recordMarketSnapshot
-} = require('../controllers/marketSnapshot.controller');
+const controller = require('../controllers/marketSnapshot.controller');
 
-router.post('/market-snapshot', recordMarketSnapshot);
+if (!controller || typeof controller.recordMarketSnapshot !== 'function') {
+  throw new Error('recordMarketSnapshot controller not loaded');
+}
+
+router.post('/market-snapshot', controller.recordMarketSnapshot);
 
 module.exports = router;

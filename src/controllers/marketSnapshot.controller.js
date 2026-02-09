@@ -2,7 +2,7 @@
 
 const { pool } = require('../config/database');
 
-const MIN_INTERVAL_MS = 5000; // 5 seconds per symbol
+const MIN_INTERVAL_MS = 5000;
 
 async function recordMarketSnapshot(req, res) {
   try {
@@ -31,10 +31,7 @@ async function recordMarketSnapshot(req, res) {
     }
 
     await pool.query(
-      `
-      INSERT INTO market_prices (symbol, price)
-      VALUES ($1, $2)
-      `,
+      `INSERT INTO market_prices (symbol, price) VALUES ($1,$2)`,
       [symbol, price]
     );
 
@@ -45,4 +42,6 @@ async function recordMarketSnapshot(req, res) {
   }
 }
 
-module.exports = { recordMarketSnapshot };
+module.exports = {
+  recordMarketSnapshot
+};
