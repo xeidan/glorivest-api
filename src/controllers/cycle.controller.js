@@ -1,8 +1,6 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const { runCycleSimulation } =
-  require('../services/strategyEngine/applyStrategy');
 
 // --------------------------------------------------
 // START CYCLE
