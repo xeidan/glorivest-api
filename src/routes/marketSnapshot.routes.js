@@ -2,11 +2,11 @@
 
 const express = require('express');
 const router = express.Router();
-const requireAuth = require('../middleware/auth');
+
 const {
   recordMarketSnapshot
 } = require('../controllers/marketSnapshot.controller');
 
-router.post('/', requireAuth, recordMarketSnapshot);
+router.post('/market-snapshot', recordMarketSnapshot);
 
 module.exports = router;
