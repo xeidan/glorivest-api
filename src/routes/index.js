@@ -1,4 +1,5 @@
 'use strict';
+console.log('✅ routes/index.js loaded');
 
 const express = require('express');
 const router = express.Router();
