@@ -1,32 +1,31 @@
 'use strict';
 
-const fetch = require('node-fetch');
 const { pool } = require('../config/database');
 
 const MIN_INTERVAL_MS = 5000;
 
 /* ===============================
-   LIVE PRICE FETCHERS
+   LIVE PRICE (BINANCE ONLY)
 ================================ */
 
 async function fetchLivePrice(symbol) {
-  // CRYPTO (Binance)
-  if (symbol.endsWith('USDT')) {
-    const res = await fetch(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
-    );
-    if (!res.ok) throw new Error('Binance price fetch failed');
-    const data = await res.json();
-    return Number(data.price);
+  // Node 18+ has global fetch — DO NOT use node-fetch
+  const res = await fetch(
+    `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
+  );
+
+  if (!res.ok) {
+    throw new Error(`Binance fetch failed for ${symbol}`);
   }
 
-  // FX / METALS (fallback – you can replace provider later)
-  const res = await fetch(
-    `https://api.exchangerate.host/latest?base=${symbol.slice(0,3)}&symbols=${symbol.slice(3)}`
-  );
-  if (!res.ok) throw new Error('FX price fetch failed');
   const data = await res.json();
-  return Number(data.rates[symbol.slice(3)]);
+  const price = Number(data.price);
+
+  if (!Number.isFinite(price)) {
+    throw new Error(`Invalid price from Binance for ${symbol}`);
+  }
+
+  return price;
 }
 
 /* ===============================
@@ -39,6 +38,13 @@ async function recordMarketSnapshot(req, res) {
 
     if (!symbol) {
       return res.status(400).json({ message: 'Symbol required' });
+    }
+
+    // 🚫 TEMPORARILY BLOCK NON-BINANCE SYMBOLS
+    if (!symbol.endsWith('USDT')) {
+      return res.status(400).json({
+        message: 'Only Binance USDT pairs supported for now'
+      });
     }
 
     // throttle
@@ -60,12 +66,8 @@ async function recordMarketSnapshot(req, res) {
       }
     }
 
-    // 🔥 FETCH REAL PRICE
+    // 🔥 REAL PRICE
     const price = await fetchLivePrice(symbol);
-
-    if (!Number.isFinite(price)) {
-      throw new Error('Invalid live price');
-    }
 
     await pool.query(
       `INSERT INTO market_prices (symbol, price) VALUES ($1,$2)`,
@@ -75,11 +77,9 @@ async function recordMarketSnapshot(req, res) {
     return res.json({ ok: true, symbol, price });
 
   } catch (err) {
-    console.error('❌ recordMarketSnapshot error:', err.message);
-    return res.status(500).json({ message: 'Snapshot failed' });
+    console.error('❌ snapshot error:', err.message);
+    return res.status(500).json({ message: err.message });
   }
 }
 
-module.exports = {
-  recordMarketSnapshot
-};
+module.exports = { recordMarketSnapshot };
