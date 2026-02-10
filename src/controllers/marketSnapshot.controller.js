@@ -1,17 +1,47 @@
 'use strict';
 
+const fetch = require('node-fetch');
 const { pool } = require('../config/database');
 
 const MIN_INTERVAL_MS = 5000;
 
+/* ===============================
+   LIVE PRICE FETCHERS
+================================ */
+
+async function fetchLivePrice(symbol) {
+  // CRYPTO (Binance)
+  if (symbol.endsWith('USDT')) {
+    const res = await fetch(
+      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
+    );
+    if (!res.ok) throw new Error('Binance price fetch failed');
+    const data = await res.json();
+    return Number(data.price);
+  }
+
+  // FX / METALS (fallback – you can replace provider later)
+  const res = await fetch(
+    `https://api.exchangerate.host/latest?base=${symbol.slice(0,3)}&symbols=${symbol.slice(3)}`
+  );
+  if (!res.ok) throw new Error('FX price fetch failed');
+  const data = await res.json();
+  return Number(data.rates[symbol.slice(3)]);
+}
+
+/* ===============================
+   SNAPSHOT CONTROLLER
+================================ */
+
 async function recordMarketSnapshot(req, res) {
   try {
-    const { symbol, price } = req.body;
+    const { symbol } = req.body;
 
-    if (!symbol || typeof price !== 'number') {
-      return res.status(400).json({ message: 'Invalid payload' });
+    if (!symbol) {
+      return res.status(400).json({ message: 'Symbol required' });
     }
 
+    // throttle
     const { rows } = await pool.query(
       `
       SELECT recorded_at
@@ -30,15 +60,23 @@ async function recordMarketSnapshot(req, res) {
       }
     }
 
+    // 🔥 FETCH REAL PRICE
+    const price = await fetchLivePrice(symbol);
+
+    if (!Number.isFinite(price)) {
+      throw new Error('Invalid live price');
+    }
+
     await pool.query(
       `INSERT INTO market_prices (symbol, price) VALUES ($1,$2)`,
       [symbol, price]
     );
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, symbol, price });
+
   } catch (err) {
-    console.error('❌ recordMarketSnapshot error:', err);
-    return res.status(500).json({ message: 'Internal error' });
+    console.error('❌ recordMarketSnapshot error:', err.message);
+    return res.status(500).json({ message: 'Snapshot failed' });
   }
 }
 

@@ -2,22 +2,23 @@
 
 const axios = require('axios');
 
-const API_URL = 'https://glorivest-api-a16f75b6b330.herokuapp.com/api/market-snapshot';
+const API_URL =
+  'https://glorivest-api-a16f75b6b330.herokuapp.com/api/market-snapshot';
 
-const SNAPSHOTS = [
-  { symbol: 'BTCUSDT', price: 50650 },
-  { symbol: 'ETHUSDT', price: 2890 },
-  { symbol: 'XAUUSD', price: 5065 },
-  { symbol: 'EURUSD', price: 1.0812 }
+const SYMBOLS = [
+  'BTCUSDT',
+  'ETHUSDT',
+  'XAUUSD',
+  'EURUSD'
 ];
 
 async function run() {
-  for (const s of SNAPSHOTS) {
+  for (const symbol of SYMBOLS) {
     try {
-      await axios.post(API_URL, s);
-      console.log('pushed', s.symbol);
+      await axios.post(API_URL, { symbol });
+      console.log('pushed', symbol);
     } catch (e) {
-      console.error('fail', s.symbol, e.message);
+      console.error('fail', symbol, e.response?.data || e.message);
     }
   }
 }
