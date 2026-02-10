@@ -2,52 +2,42 @@
 
 const { pool } = require('../config/database');
 
-const MIN_INTERVAL_MS = 5000;
-
-/* ===============================
-   LIVE PRICE (BINANCE ONLY)
-================================ */
-
-async function fetchLivePrice(symbol) {
-  // Node 18+ has global fetch — DO NOT use node-fetch
-  const res = await fetch(
-    `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
-  );
-
-  if (!res.ok) {
-    throw new Error(`Binance fetch failed for ${symbol}`);
-  }
-
-  const data = await res.json();
-  const price = Number(data.price);
-
-  if (!Number.isFinite(price)) {
-    throw new Error(`Invalid price from Binance for ${symbol}`);
-  }
-
-  return price;
-}
-
-/* ===============================
-   SNAPSHOT CONTROLLER
-================================ */
+const MIN_INTERVAL_MS = 5_000;          // anti-spam
+const MAX_PRICE_AGE_MS = 60_000;        // reject stale data
+const MAX_REASONABLE_PRICES = {
+  BTCUSDT: [20000, 200000],
+  ETHUSDT: [500, 20000],
+  XAUUSD:  [1000, 10000],
+  EURUSD:  [0.5, 2]
+};
 
 async function recordMarketSnapshot(req, res) {
   try {
-    const { symbol } = req.body;
+    const { symbol, price, source = 'external' } = req.body;
 
-    if (!symbol) {
-      return res.status(400).json({ message: 'Symbol required' });
+    /* ---------------- VALIDATION ---------------- */
+
+    if (!symbol || typeof symbol !== 'string') {
+      return res.status(400).json({ message: 'Invalid or missing symbol' });
     }
 
-    // 🚫 TEMPORARILY BLOCK NON-BINANCE SYMBOLS
-    if (!symbol.endsWith('USDT')) {
+    if (typeof price !== 'number' || !Number.isFinite(price)) {
+      return res.status(400).json({ message: 'Invalid price' });
+    }
+
+    if (!MAX_REASONABLE_PRICES[symbol]) {
+      return res.status(400).json({ message: `Unsupported symbol ${symbol}` });
+    }
+
+    const [min, max] = MAX_REASONABLE_PRICES[symbol];
+    if (price < min || price > max) {
       return res.status(400).json({
-        message: 'Only Binance USDT pairs supported for now'
+        message: `Price ${price} outside sane range for ${symbol}`
       });
     }
 
-    // throttle
+    /* ---------------- RATE LIMIT ---------------- */
+
     const { rows } = await pool.query(
       `
       SELECT recorded_at
@@ -60,25 +50,27 @@ async function recordMarketSnapshot(req, res) {
     );
 
     if (rows.length) {
-      const last = new Date(rows[0].recorded_at).getTime();
-      if (Date.now() - last < MIN_INTERVAL_MS) {
+      const lastTs = new Date(rows[0].recorded_at).getTime();
+      if (Date.now() - lastTs < MIN_INTERVAL_MS) {
         return res.json({ ok: true, skipped: true });
       }
     }
 
-    // 🔥 REAL PRICE
-    const price = await fetchLivePrice(symbol);
+    /* ---------------- INSERT ---------------- */
 
     await pool.query(
-      `INSERT INTO market_prices (symbol, price) VALUES ($1,$2)`,
-      [symbol, price]
+      `
+      INSERT INTO market_prices (symbol, price, source)
+      VALUES ($1, $2, $3)
+      `,
+      [symbol, price, source]
     );
 
-    return res.json({ ok: true, symbol, price });
+    return res.json({ ok: true });
 
   } catch (err) {
-    console.error('❌ snapshot error:', err.message);
-    return res.status(500).json({ message: err.message });
+    console.error('❌ recordMarketSnapshot error:', err);
+    return res.status(500).json({ message: 'Snapshot failed' });
   }
 }
 
