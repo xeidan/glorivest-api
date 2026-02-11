@@ -43,7 +43,6 @@ async function generateTradesForCycle(cycle) {
   if (!cycle.user_id) throw new Error('Cycle user_id missing');
   if (!cycle.wallet_id) throw new Error('Cycle wallet_id missing');
   if (!cycle.duration_days) throw new Error('Cycle duration_days missing');
-  if (!cycle.principal_amount) throw new Error('Cycle principal_amount missing');
 
   const duration = Number(cycle.duration_days);
   const principal = Number(cycle.capital_amount);
@@ -114,7 +113,7 @@ async function generateTradesForCycle(cycle) {
 
       balance += pnl;
 
-      const openedAt = new Date(Date.now() + i * 3600000);
+      const openedAt = start_at + (i / totalTrades) * duration_span
       const closedAt = new Date(openedAt.getTime() + 3600000);
 
       trades.push({
