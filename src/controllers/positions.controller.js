@@ -21,10 +21,24 @@ async function getUserPositions(req, res) {
         p.size,
         p.entry_price,
         p.exit_price,
-        p.pnl_cents,
+
+        -- Calculate PnL dynamically
+        CASE
+          WHEN p.exit_price IS NOT NULL THEN
+            CASE
+              WHEN p.side = 'BUY'
+                THEN (p.exit_price - p.entry_price) * p.size
+              WHEN p.side = 'SELL'
+                THEN (p.entry_price - p.exit_price) * p.size
+              ELSE 0
+            END
+          ELSE NULL
+        END AS pnl,
+
         p.status,
         p.opened_at,
         p.closed_at
+
       FROM positions p
       WHERE p.user_id = $1
       ORDER BY
