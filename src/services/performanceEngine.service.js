@@ -93,16 +93,17 @@ async function generateTradesForCycle(cycle) {
     balance += pnl;
 
     trades.push({
-      user_id: cycle.user_id,
-      cycle_id: cycle.id,
-      symbol,
-      side,
-      size,
-      entry_price: entry,
-      exit_price: exit,
-      status: 'CLOSED',
-      pnl
-    });
+  user_id: cycle.user_id,
+  wallet_id: cycle.wallet_id,
+  cycle_id: cycle.id,
+  symbol,
+  side,
+  size,
+  entry_price: entry,
+  exit_price: exit,
+  status: 'CLOSED'
+});
+
   }
 
   const totalGenerated = trades.reduce((a, t) => a + t.pnl, 0);
