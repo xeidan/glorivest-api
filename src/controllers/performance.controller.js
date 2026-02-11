@@ -104,4 +104,5 @@ async function getUserPositions(req, res) {
   }
 }
 
-module.exports = { getUserPositions };
+module.exports = { getPerformanceSummary };
+
