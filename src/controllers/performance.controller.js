@@ -3,7 +3,7 @@
 const { pool } = require('../config/database');
 const { generateTradesForCycle } = require('../services/performanceEngine.service');
 
-async function getUserPositions(req, res) {
+async function getPerformanceSummary(req, res) {
   const userId = req.user.id;
 
   const page = Math.max(Number(req.query.page || 1), 1);
@@ -105,4 +105,3 @@ async function getUserPositions(req, res) {
 }
 
 module.exports = { getPerformanceSummary };
-
