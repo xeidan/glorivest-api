@@ -17,6 +17,8 @@ app.use(cors({
   origin: [
     'http://127.0.0.1:5503',
     'http://localhost:5503',
+    'https://www.glorivest.com',
+    'https://glorivest.com'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
