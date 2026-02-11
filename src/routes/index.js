@@ -5,7 +5,7 @@ console.log('✅ routes/index.js loaded');
 const express = require('express');
 const router = express.Router();
 
-const authMiddleware = require('../middleware/auth.middleware');
+const authMiddleware = require('../middleware/auth')
 const { getPerformanceSummary } = require('../controllers/performance.controller');
 
 // AUTH
