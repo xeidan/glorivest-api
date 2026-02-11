@@ -102,4 +102,100 @@ async function getUserPositions(req, res) {
   }
 }
 
-module.exports = { getUserPositions };
+
+async function getPositionsAnalytics(req, res) {
+  const userId = req.user.id;
+
+  const client = await pool.connect();
+
+  try {
+
+    const tradesQuery = `
+      WITH trades AS (
+        SELECT
+          opened_at,
+          CASE
+            WHEN side IN ('LONG','BUY')
+              THEN (exit_price - entry_price) * size
+            WHEN side IN ('SHORT','SELL')
+              THEN (entry_price - exit_price) * size
+            ELSE 0
+          END AS pnl
+        FROM positions
+        WHERE user_id = $1
+      )
+      SELECT * FROM trades
+      ORDER BY opened_at ASC
+    `;
+
+    const tradesRes = await client.query(tradesQuery, [userId]);
+    const trades = tradesRes.rows;
+
+    if (!trades.length) {
+      return res.json({
+        summary: null,
+        equity_curve: []
+      });
+    }
+
+    let totalTrades = trades.length;
+    let wins = 0;
+    let totalPnl = 0;
+    let best = -Infinity;
+    let worst = Infinity;
+
+    let equity = 0;
+    let peak = 0;
+    let maxDrawdown = 0;
+
+    const equityCurve = [];
+
+    for (let i = 0; i < trades.length; i++) {
+      const pnl = Number(trades[i].pnl);
+
+      totalPnl += pnl;
+      equity += pnl;
+
+      if (pnl > 0) wins++;
+      if (pnl > best) best = pnl;
+      if (pnl < worst) worst = pnl;
+
+      if (equity > peak) peak = equity;
+
+      const drawdown = equity - peak;
+      if (drawdown < maxDrawdown) {
+        maxDrawdown = drawdown;
+      }
+
+      equityCurve.push({
+        opened_at: trades[i].opened_at,
+        equity
+      });
+    }
+
+    const summary = {
+      total_trades: totalTrades,
+      win_rate: Number(((wins / totalTrades) * 100).toFixed(2)),
+      total_pnl: Number(totalPnl.toFixed(2)),
+      avg_pnl: Number((totalPnl / totalTrades).toFixed(2)),
+      best_trade: Number(best.toFixed(2)),
+      worst_trade: Number(worst.toFixed(2)),
+      max_drawdown: Number(maxDrawdown.toFixed(2))
+    };
+
+    res.json({
+      summary,
+      equity_curve: equityCurve
+    });
+
+  } catch (err) {
+    console.error('analytics error:', err);
+    res.status(500).json({ message: 'Failed to load analytics' });
+  } finally {
+    client.release();
+  }
+}
+
+
+module.exports = { getUserPositions, getPositionsAnalytics };
+
