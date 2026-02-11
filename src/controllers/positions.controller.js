@@ -26,14 +26,15 @@ async function getUserPositions(req, res) {
         CASE
           WHEN p.exit_price IS NOT NULL THEN
             CASE
-              WHEN p.side = 'BUY'
+              WHEN p.side IN ('BUY', 'LONG')
                 THEN (p.exit_price - p.entry_price) * p.size
-              WHEN p.side = 'SELL'
+              WHEN p.side IN ('SELL', 'SHORT')
                 THEN (p.entry_price - p.exit_price) * p.size
               ELSE 0
             END
           ELSE NULL
         END AS pnl,
+
 
         p.status,
         p.opened_at,
