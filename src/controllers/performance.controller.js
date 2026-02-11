@@ -21,7 +21,6 @@ async function getPerformanceSummary(req, res) {
       FROM investment_cycles
       WHERE user_id = $1
         AND status = 'active'
-      ORDER BY created_at DESC
       LIMIT 1
       `,
       [userId]
