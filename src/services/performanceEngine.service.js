@@ -49,7 +49,6 @@ async function generateTradesForCycle(cycle) {
   ]);
 
   let balance = Number(cycle.principal_amount);
-  const targetProfit = Number(cycle.expected_profit);
 
   const trades = [];
 
@@ -92,58 +91,74 @@ async function generateTradesForCycle(cycle) {
 
     balance += pnl;
 
+    const openedAt = new Date();
+    const closedAt = new Date(openedAt.getTime() + 60 * 60 * 1000);
+
     trades.push({
-  user_id: cycle.user_id,
-  wallet_id: cycle.wallet_id,
-  cycle_id: cycle.id,
-  symbol,
-  side,
-  size,
-  entry_price: entry,
-  exit_price: exit,
-  status: 'CLOSED'
-});
-
+      user_id: cycle.user_id,
+      wallet_id: cycle.wallet_id,
+      cycle_id: cycle.id,
+      symbol,
+      side,
+      size,
+      entry_price: entry,
+      exit_price: exit,
+      status: 'CLOSED',
+      opened_at: openedAt,
+      closed_at: closedAt,
+      source: 'SIMULATION'
+    });
   }
 
-  const totalGenerated = trades.reduce((a, t) => a + t.pnl, 0);
-  const diff = targetProfit - totalGenerated;
-
-  if (trades.length) {
-    trades[trades.length - 1].exit_price +=
-      diff / trades[trades.length - 1].size;
-  }
+  if (!trades.length) return;
 
   const values = [];
   const params = [];
 
   trades.forEach((t, i) => {
-    const idx = i * 8;
+    const idx = i * 12;
+
     values.push(
-      `($${idx+1},$${idx+2},$${idx+3},$${idx+4},$${idx+5},$${idx+6},$${idx+7},$${idx+8})`
+      `($${idx+1},$${idx+2},$${idx+3},$${idx+4},$${idx+5},$${idx+6},$${idx+7},$${idx+8},$${idx+9},$${idx+10},$${idx+11},$${idx+12})`
     );
+
     params.push(
-      t.user_id,
       t.cycle_id,
       t.symbol,
       t.side,
       t.size,
       t.entry_price,
       t.exit_price,
-      t.status
+      t.status,
+      t.opened_at,
+      t.closed_at,
+      t.user_id,
+      t.wallet_id,
+      t.source
     );
   });
 
-  if (values.length) {
-    await pool.query(
-      `
-      INSERT INTO positions
-      (user_id, cycle_id, symbol, side, size, entry_price, exit_price, status)
-      VALUES ${values.join(',')}
-      `,
-      params
-    );
-  }
+  await pool.query(
+    `
+    INSERT INTO positions
+    (
+      cycle_id,
+      symbol,
+      side,
+      size,
+      entry_price,
+      exit_price,
+      status,
+      opened_at,
+      closed_at,
+      user_id,
+      wallet_id,
+      source
+    )
+    VALUES ${values.join(',')}
+    `,
+    params
+  );
 }
 
 module.exports = { generateTradesForCycle };
