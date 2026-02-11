@@ -13,7 +13,7 @@ function shuffle(arr) {
 }
 
 function tradesPerDay(duration) {
-  if (duration === 30) return Math.floor(randomBetween(6, 8));
+  if (duration === 30) return 7;
   if (duration === 90) return 4;
   if (duration === 180) return 3;
   return 3;
@@ -37,32 +37,34 @@ async function fetchLatestPrice(client, symbol) {
 
 async function generateTradesForCycle(cycle) {
 
-  // ---------- HARD VALIDATION ----------
-  if (!cycle) throw new Error('Cycle not provided');
+  if (!cycle) throw new Error('Cycle missing');
   if (!cycle.id) throw new Error('Cycle id missing');
   if (!cycle.user_id) throw new Error('Cycle user_id missing');
   if (!cycle.wallet_id) throw new Error('Cycle wallet_id missing');
   if (!cycle.duration_days) throw new Error('Cycle duration_days missing');
+  if (!cycle.capital_amount) throw new Error('Cycle capital_amount missing');
+  if (!cycle.start_at) throw new Error('Cycle start_at missing');
 
   const duration = Number(cycle.duration_days);
   const principal = Number(cycle.capital_amount);
+  const cycleStart = new Date(cycle.start_at);
+  const cycleEnd = new Date(cycle.end_at);
 
-
-  if (!Number.isFinite(duration) || duration <= 0) {
-    throw new Error('Invalid duration_days');
-  }
-
-  if (!Number.isFinite(principal) || principal <= 0) {
-    throw new Error('Invalid principal_amount');
-  }
+  const totalTrades = tradesPerDay(duration) * duration;
+  if (totalTrades <= 0) return;
 
   const client = await pool.connect();
 
   try {
 
-    const totalTrades = tradesPerDay(duration) * duration;
+    const existing = await client.query(
+      `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
+      [cycle.id]
+    );
 
-    if (totalTrades <= 0) return;
+    if (Number(existing.rows[0].count) > 0) {
+      return; // already generated
+    }
 
     const winCount = Math.floor(totalTrades * 0.7);
     const lossCount = totalTrades - winCount;
@@ -73,6 +75,9 @@ async function generateTradesForCycle(cycle) {
     ]);
 
     let balance = principal;
+
+    const cycleSpanMs = cycleEnd.getTime() - cycleStart.getTime();
+    const intervalMs = Math.floor(cycleSpanMs / totalTrades);
 
     const trades = [];
 
@@ -113,7 +118,7 @@ async function generateTradesForCycle(cycle) {
 
       balance += pnl;
 
-      const openedAt = start_at + (i / totalTrades) * duration_span
+      const openedAt = new Date(cycleStart.getTime() + (intervalMs * i));
       const closedAt = new Date(openedAt.getTime() + 3600000);
 
       trades.push({
