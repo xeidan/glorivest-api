@@ -46,7 +46,8 @@ async function generateTradesForCycle(cycle) {
   if (!cycle.principal_amount) throw new Error('Cycle principal_amount missing');
 
   const duration = Number(cycle.duration_days);
-  const principal = Number(cycle.principal_amount);
+  const principal = Number(cycle.capital_amount);
+
 
   if (!Number.isFinite(duration) || duration <= 0) {
     throw new Error('Invalid duration_days');
