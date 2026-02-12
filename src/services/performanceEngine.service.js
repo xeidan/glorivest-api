@@ -37,14 +37,6 @@ async function fetchLatestPrice(client, symbol) {
 
 async function generateTradesForCycle(cycle) {
 
-  if (!cycle) throw new Error('Cycle missing');
-  if (!cycle.id) throw new Error('Cycle id missing');
-  if (!cycle.user_id) throw new Error('Cycle user_id missing');
-  if (!cycle.wallet_id) throw new Error('Cycle wallet_id missing');
-  if (!cycle.duration_days) throw new Error('Cycle duration_days missing');
-  if (!cycle.capital_amount) throw new Error('Cycle capital_amount missing');
-  if (!cycle.start_at) throw new Error('Cycle start_at missing');
-
   const duration = Number(cycle.duration_days);
   const principal = Number(cycle.capital_amount);
   const cycleStart = new Date(cycle.start_at);
@@ -57,31 +49,59 @@ async function generateTradesForCycle(cycle) {
 
   try {
 
-    const existing = await client.query(
+    const existingRes = await client.query(
       `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
       [cycle.id]
     );
 
-    if (Number(existing.rows[0].count) > 0) {
-      return; // already generated
-    }
-
-    const winCount = Math.floor(totalTrades * 0.7);
-    const lossCount = totalTrades - winCount;
-
-    const outcomes = shuffle([
-      ...Array(winCount).fill('win'),
-      ...Array(lossCount).fill('loss')
-    ]);
-
-    let balance = principal;
+    const existingCount = Number(existingRes.rows[0].count);
 
     const cycleSpanMs = cycleEnd.getTime() - cycleStart.getTime();
     const intervalMs = Math.floor(cycleSpanMs / totalTrades);
 
+    const now = new Date();
+
+    if (now <= cycleStart) return;
+    if (cycle.status !== 'active') return;
+
+    const elapsedMs = now.getTime() - cycleStart.getTime();
+    const shouldExist = Math.floor(elapsedMs / intervalMs);
+
+    const maxTrades = Math.min(shouldExist, totalTrades);
+
+    const tradesToCreate = maxTrades - existingCount;
+
+    if (tradesToCreate <= 0) return;
+
+    let balance = principal;
+
+    // Recalculate balance from existing trades
+    const existingTrades = await client.query(
+      `
+      SELECT
+        side,
+        size,
+        entry_price,
+        exit_price
+      FROM positions
+      WHERE cycle_id = $1
+      ORDER BY opened_at ASC
+      `,
+      [cycle.id]
+    );
+
+    for (const t of existingTrades.rows) {
+      const pnl =
+        t.side === 'LONG'
+          ? (t.exit_price - t.entry_price) * t.size
+          : (t.entry_price - t.exit_price) * t.size;
+
+      balance += Number(pnl);
+    }
+
     const trades = [];
 
-    for (let i = 0; i < totalTrades; i++) {
+    for (let i = existingCount; i < maxTrades; i++) {
 
       const symbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
       const entry = await fetchLatestPrice(client, symbol);
@@ -92,21 +112,21 @@ async function generateTradesForCycle(cycle) {
       const riskAmount = balance * 0.02;
       const size = riskAmount / entry;
 
-      const outcome = outcomes[i];
+      const isWin = Math.random() < 0.7;
 
       const movePct =
-        outcome === 'win'
+        isWin
           ? randomBetween(0.003, 0.008)
           : randomBetween(0.002, 0.006);
 
       let exit;
 
       if (side === 'LONG') {
-        exit = outcome === 'win'
+        exit = isWin
           ? entry * (1 + movePct)
           : entry * (1 - movePct);
       } else {
-        exit = outcome === 'win'
+        exit = isWin
           ? entry * (1 - movePct)
           : entry * (1 + movePct);
       }
@@ -191,5 +211,6 @@ async function generateTradesForCycle(cycle) {
     client.release();
   }
 }
+
 
 module.exports = { generateTradesForCycle };

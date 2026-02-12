@@ -29,27 +29,6 @@ async function getUserPositions(req, res) {
     if (cycleRes.rowCount) {
       const cycle = cycleRes.rows[0];
 
-      // Hard idempotency guard
-      const existingTrades = await client.query(
-        `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
-        [cycle.id]
-      );
-
-      const tradeCount = Number(existingTrades.rows[0].count);
-
-      if (tradeCount === 0 && !cycle.trades_generated) {
-        await generateTradesForCycle(cycle);
-
-        await client.query(
-          `
-          UPDATE investment_cycles
-          SET trades_generated = true
-          WHERE id = $1
-          `,
-          [cycle.id]
-        );
-      }
-    }
 
     // 2️⃣ Return paginated positions
     const { rows } = await client.query(
