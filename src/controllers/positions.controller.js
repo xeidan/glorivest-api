@@ -1,7 +1,6 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const { generateTradesForCycle } = require('../services/performanceEngine.service');
 
 async function getUserPositions(req, res) {
   const userId = req.user.id;
@@ -13,24 +12,7 @@ async function getUserPositions(req, res) {
   const client = await pool.connect();
 
   try {
-    // 1️⃣ Get active cycle
-    const cycleRes = await client.query(
-      `
-      SELECT *
-      FROM investment_cycles
-      WHERE user_id = $1
-        AND status = 'active'
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [userId]
-    );
 
-    if (cycleRes.rowCount) {
-      const cycle = cycleRes.rows[0];
-
-
-    // 2️⃣ Return paginated positions
     const { rows } = await client.query(
       `
       SELECT
@@ -83,31 +65,30 @@ async function getUserPositions(req, res) {
 
 
 async function getPositionsAnalytics(req, res) {
-  const userId = req.user.id;
 
+  const userId = req.user.id;
   const client = await pool.connect();
 
   try {
 
-    const tradesQuery = `
-      WITH trades AS (
-        SELECT
-          opened_at,
-          CASE
-            WHEN side IN ('LONG','BUY')
-              THEN (exit_price - entry_price) * size
-            WHEN side IN ('SHORT','SELL')
-              THEN (entry_price - exit_price) * size
-            ELSE 0
-          END AS pnl
-        FROM positions
-        WHERE user_id = $1
-      )
-      SELECT * FROM trades
+    const tradesRes = await client.query(
+      `
+      SELECT
+        opened_at,
+        CASE
+          WHEN side IN ('LONG','BUY')
+            THEN (exit_price - entry_price) * size
+          WHEN side IN ('SHORT','SELL')
+            THEN (entry_price - exit_price) * size
+          ELSE 0
+        END AS pnl
+      FROM positions
+      WHERE user_id = $1
       ORDER BY opened_at ASC
-    `;
+      `,
+      [userId]
+    );
 
-    const tradesRes = await client.query(tradesQuery, [userId]);
     const trades = tradesRes.rows;
 
     if (!trades.length) {
@@ -124,58 +105,53 @@ async function getPositionsAnalytics(req, res) {
     let worst = Infinity;
 
     let equity = 0;
-let peak = 0;
-let maxDrawdown = 0;
+    let peak = 0;
+    let maxDrawdown = 0;
 
-const equityCurve = [];
+    const equityCurve = [];
 
-for (let i = 0; i < trades.length; i++) {
-  const pnl = Number(trades[i].pnl);
+    for (const trade of trades) {
 
-  totalPnl += pnl;
-  equity += pnl;
+      const pnl = Number(trade.pnl);
 
-  if (pnl > 0) wins++;
-  if (pnl > best) best = pnl;
-  if (pnl < worst) worst = pnl;
+      totalPnl += pnl;
+      equity += pnl;
 
-  if (equity > peak) {
-    peak = equity;
-  }
+      if (pnl > 0) wins++;
+      if (pnl > best) best = pnl;
+      if (pnl < worst) worst = pnl;
 
-  const drawdown = peak - equity; // POSITIVE magnitude
+      if (equity > peak) peak = equity;
 
-  if (drawdown > maxDrawdown) {
-    maxDrawdown = drawdown;
-  }
+      const drawdown = peak - equity;
+      if (drawdown > maxDrawdown) maxDrawdown = drawdown;
 
-  equityCurve.push({
-    opened_at: trades[i].opened_at,
-    equity,
-    drawdown
-  });
-}
+      equityCurve.push({
+        opened_at: trade.opened_at,
+        equity,
+        drawdown
+      });
+    }
 
-const maxDrawdownPct = peak > 0
-  ? (maxDrawdown / peak) * 100
-  : 0;
+    const maxDrawdownPct = peak > 0
+      ? (maxDrawdown / peak) * 100
+      : 0;
 
-const summary = {
-  total_trades: totalTrades,
-  win_rate: Number(((wins / totalTrades) * 100).toFixed(2)),
-  total_pnl: Number(totalPnl.toFixed(2)),
-  avg_pnl: Number((totalPnl / totalTrades).toFixed(2)),
-  best_trade: Number(best.toFixed(2)),
-  worst_trade: Number(worst.toFixed(2)),
-  max_drawdown: Number(maxDrawdown.toFixed(2)),
-  max_drawdown_pct: Number(maxDrawdownPct.toFixed(2))
-};
+    const summary = {
+      total_trades: totalTrades,
+      win_rate: Number(((wins / totalTrades) * 100).toFixed(2)),
+      total_pnl: Number(totalPnl.toFixed(2)),
+      avg_pnl: Number((totalPnl / totalTrades).toFixed(2)),
+      best_trade: Number(best.toFixed(2)),
+      worst_trade: Number(worst.toFixed(2)),
+      max_drawdown: Number(maxDrawdown.toFixed(2)),
+      max_drawdown_pct: Number(maxDrawdownPct.toFixed(2))
+    };
 
-res.json({
-  summary,
-  equity_curve: equityCurve
-});
-
+    res.json({
+      summary,
+      equity_curve: equityCurve
+    });
 
   } catch (err) {
     console.error('analytics error:', err);
@@ -185,6 +161,4 @@ res.json({
   }
 }
 
-
 module.exports = { getUserPositions, getPositionsAnalytics };
-

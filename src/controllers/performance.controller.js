@@ -1,9 +1,9 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const { generateTradesForCycle } = require('../services/performanceEngine.service');
 
 async function getPerformanceSummary(req, res) {
+
   const userId = req.user.id;
 
   const page = Math.max(Number(req.query.page || 1), 1);
@@ -14,24 +14,6 @@ async function getPerformanceSummary(req, res) {
 
   try {
 
-    // 1️⃣ Get latest active cycle
-    const cycleRes = await client.query(
-      `
-      SELECT *
-      FROM investment_cycles
-      WHERE user_id = $1
-        AND status = 'active'
-      LIMIT 1
-      `,
-      [userId]
-    );
-
-    if (cycleRes.rowCount) {
-      const cycle = cycleRes.rows[0];
-
-      
-
-    // 2️⃣ Return paginated positions
     const { rows } = await client.query(
       `
       SELECT
@@ -75,8 +57,8 @@ async function getPerformanceSummary(req, res) {
     });
 
   } catch (err) {
-    console.error('positions error', err);
-    res.status(500).json({ message: 'Failed to load positions' });
+    console.error('performance error', err);
+    res.status(500).json({ message: 'Failed to load performance' });
   } finally {
     client.release();
   }
