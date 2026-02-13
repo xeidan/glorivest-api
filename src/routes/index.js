@@ -19,9 +19,6 @@ router.use('/cycle', require('./cycle.routes'));
 router.use('/transfer', require('./transfer.routes'));
 router.use('/performance', require('./performance.routes'));
 
-// Optional summary endpoint
-router.get('/performance/summary', authMiddleware, getPerformanceSummary);
 
-router.use('/market-snapshot', require('./marketSnapshot.routes'));
 
 module.exports = router;

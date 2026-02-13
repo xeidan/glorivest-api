@@ -3,7 +3,7 @@
 const { pool } = require('../config/database');
 
 /**
- * Paginated performance list (formerly positions list)
+ * Paginated performance list
  */
 async function getUserPerformance(req, res) {
 
@@ -20,25 +20,25 @@ async function getUserPerformance(req, res) {
     const { rows } = await client.query(
       `
       SELECT
-        p.id,
-        p.symbol,
-        p.side,
-        p.size,
-        p.entry_price,
-        p.exit_price,
+        id,
+        symbol,
+        side,
+        size,
+        entry_price,
+        exit_price,
         CASE
-          WHEN p.side IN ('LONG','BUY')
-            THEN (p.exit_price - p.entry_price) * p.size
-          WHEN p.side IN ('SHORT','SELL')
-            THEN (p.entry_price - p.exit_price) * p.size
+          WHEN side IN ('LONG','BUY')
+            THEN (exit_price - entry_price) * size
+          WHEN side IN ('SHORT','SELL')
+            THEN (entry_price - exit_price) * size
           ELSE 0
         END AS pnl,
-        p.status,
-        p.opened_at,
-        p.closed_at
-      FROM positions p
-      WHERE p.user_id = $1
-      ORDER BY p.opened_at DESC
+        status,
+        opened_at,
+        closed_at
+      FROM positions
+      WHERE user_id = $1
+      ORDER BY opened_at DESC
       LIMIT $2 OFFSET $3
       `,
       [userId, pageSize, offset]
@@ -69,7 +69,6 @@ async function getUserPerformance(req, res) {
 
 /**
  * Performance analytics
- * SINGLE SOURCE OF TRUTH: positions table
  */
 async function getUserPerformanceAnalytics(req, res) {
 
