@@ -51,24 +51,74 @@ async function generateTradesForCycle(cycle) {
 
   try {
 
-    // Stop if not active
     if (cycle.status !== 'active') return;
 
     const now = new Date();
 
-    // Stop if time exceeded
+    // -------------------------
+    // COMPLETE IF TIME EXPIRED
+    // -------------------------
     if (now >= cycleEnd) {
+
+      // Recalculate real profit from positions
+      const profitRes = await client.query(
+        `
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN side = 'LONG'
+              THEN (exit_price - entry_price) * size
+            WHEN side = 'SHORT'
+              THEN (entry_price - exit_price) * size
+            ELSE 0
+          END
+        ),0) AS total_profit
+        FROM positions
+        WHERE cycle_id = $1
+        `,
+        [cycle.id]
+      );
+
+      let totalProfit = Number(profitRes.rows[0].total_profit);
+
+      // Cap at expected profit if defined
+      if (expectedProfit > 0 && totalProfit > expectedProfit) {
+        totalProfit = expectedProfit;
+      }
+
+      // Convert to cents
+      const profitCents = Math.round(totalProfit * 100);
+
+      // Credit wallet once
+      if (!cycle.settled && profitCents > 0) {
+        await client.query(
+          `
+          UPDATE wallets
+          SET balance_cents = balance_cents + $1,
+              updated_at = NOW()
+          WHERE id = $2
+          `,
+          [profitCents, cycle.wallet_id]
+        );
+      }
+
       await client.query(
         `
         UPDATE investment_cycles
         SET status = 'completed',
+            accrued_profit = $1,
+            settled = true,
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $2
         `,
-        [cycle.id]
+        [totalProfit, cycle.id]
       );
+
       return;
     }
+
+    // -------------------------
+    // NORMAL TRADE GENERATION
+    // -------------------------
 
     const existingRes = await client.query(
       `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
@@ -77,17 +127,7 @@ async function generateTradesForCycle(cycle) {
 
     const existingCount = Number(existingRes.rows[0].count);
 
-    // Stop if max trades reached
     if (existingCount >= totalTrades) {
-      await client.query(
-        `
-        UPDATE investment_cycles
-        SET status = 'completed',
-            updated_at = NOW()
-        WHERE id = $1
-        `,
-        [cycle.id]
-      );
       return;
     }
 
@@ -105,7 +145,6 @@ async function generateTradesForCycle(cycle) {
 
     let balance = principal;
 
-    // Recalculate balance from existing trades
     const existingTrades = await client.query(
       `
       SELECT side, size, entry_price, exit_price
@@ -139,23 +178,14 @@ async function generateTradesForCycle(cycle) {
       const size = riskAmount / entry;
 
       const isWin = Math.random() < 0.7;
+      const movePct = isWin
+        ? randomBetween(0.003, 0.008)
+        : randomBetween(0.002, 0.006);
 
-      const movePct =
-        isWin
-          ? randomBetween(0.003, 0.008)
-          : randomBetween(0.002, 0.006);
-
-      let exit;
-
-      if (side === 'LONG') {
-        exit = isWin
-          ? entry * (1 + movePct)
-          : entry * (1 - movePct);
-      } else {
-        exit = isWin
-          ? entry * (1 - movePct)
-          : entry * (1 + movePct);
-      }
+      const exit =
+        side === 'LONG'
+          ? (isWin ? entry * (1 + movePct) : entry * (1 - movePct))
+          : (isWin ? entry * (1 - movePct) : entry * (1 + movePct));
 
       const pnl =
         side === 'LONG'
@@ -190,7 +220,6 @@ async function generateTradesForCycle(cycle) {
 
     trades.forEach((t, i) => {
       const base = i * 12;
-
       values.push(
         `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12})`
       );
@@ -233,81 +262,11 @@ async function generateTradesForCycle(cycle) {
       params
     );
 
-    // Recalculate total profit
-    // 1️⃣ Get profit in naira
-const profitRes = await client.query(
-  `
-  SELECT accrued_profit
-  FROM investment_cycles
-  WHERE id = $1
-  `,
-  [cycle.id]
-);
-
-const profit = Number(profitRes.rows[0].accrued_profit);
-
-// 2️⃣ Convert to cents (IMPORTANT)
-const profitCents = Math.round(profit * 100);
-
-if (profitCents > 0) {
-  // 3️⃣ Credit wallet in cents
-  await client.query(
-    `
-    UPDATE wallets
-    SET balance_cents = balance_cents + $1,
-        updated_at = NOW()
-    WHERE id = $2
-    `,
-    [profitCents, cycle.wallet_id]
-  );
-}
-
-// 4️⃣ Mark cycle settled
-await client.query(
-  `
-  UPDATE investment_cycles
-  SET settled = true,
-      updated_at = NOW()
-  WHERE id = $1
-  `,
-  [cycle.id]
-);
-
-
-    let totalProfit = Number(profitRes.rows[0].total_profit);
-
-    // Cap profit at expected profit
-    if (expectedProfit > 0 && totalProfit >= expectedProfit) {
-      totalProfit = expectedProfit;
-
-      await client.query(
-        `
-        UPDATE investment_cycles
-        SET status = 'completed',
-            accrued_profit = $1,
-            updated_at = NOW()
-        WHERE id = $2
-        `,
-        [totalProfit, cycle.id]
-      );
-
-      return;
-    }
-
-    await client.query(
-      `
-      UPDATE investment_cycles
-      SET accrued_profit = $1,
-          updated_at = NOW()
-      WHERE id = $2
-      `,
-      [totalProfit, cycle.id]
-    );
-
   } finally {
     client.release();
   }
 }
+
 
 
 
