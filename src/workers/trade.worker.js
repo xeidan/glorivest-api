@@ -6,16 +6,14 @@ const { generateTradesForCycle } = require('../services/performanceEngine.servic
 const INTERVAL = Number(process.env.TRADE_WORKER_INTERVAL_MS || 60000);
 
 async function runOnce() {
-
   const client = await pool.connect();
 
   try {
-
     const res = await client.query(
       `
       SELECT *
-      FROM investment_cycles
-      WHERE status = 'active'
+      FROM cycles
+      WHERE status = 'RUNNING'
       `
     );
 
@@ -29,6 +27,7 @@ async function runOnce() {
     client.release();
   }
 }
+
 
 async function start() {
   console.log('🚀 Trade Worker Started');

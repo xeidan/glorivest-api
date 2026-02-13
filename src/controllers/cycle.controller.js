@@ -232,57 +232,36 @@ async function settleCompletedCycles() {
 
     for (const cycle of cycles) {
 
-      // Idempotency guard
-      const { rows: already } = await client.query(
+      const { rows } = await client.query(
         `
-        SELECT 1
-        FROM wallet_ledger
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN side = 'LONG'
+              THEN (exit_price - entry_price) * size
+            WHEN side = 'SHORT'
+              THEN (entry_price - exit_price) * size
+            ELSE 0
+          END
+        ),0) AS total_profit
+        FROM positions
         WHERE cycle_id = $1
-          AND reason = 'POSITION_PNL'
-        LIMIT 1
         `,
         [cycle.id]
       );
 
-      if (already.length) {
-        await client.query(
-          `
-          UPDATE cycles
-          SET status = 'COMPLETED',
-              completed_at = NOW()
-          WHERE id = $1
-          `,
-          [cycle.id]
-        );
-        continue;
-      }
+      const totalProfit = Number(rows[0].total_profit);
+      const totalReturnCents =
+        cycle.capital_cents + Math.round(totalProfit * 100);
 
-      const { rows: wallets } = await client.query(
+      await client.query(
         `
-        SELECT *
-        FROM wallets
-        WHERE id = $1
-        FOR UPDATE
+        UPDATE wallets
+        SET balance_cents = balance_cents + $1,
+            updated_at = NOW()
+        WHERE id = $2
         `,
-        [cycle.wallet_id]
+        [totalReturnCents, cycle.wallet_id]
       );
-
-      if (!wallets.length) {
-        await client.query(
-          `
-          UPDATE cycles
-          SET status = 'CANCELLED',
-              completed_at = NOW()
-          WHERE id = $1
-          `,
-          [cycle.id]
-        );
-        continue;
-      }
-
-      const wallet = wallets[0];
-
-
 
       await client.query(
         `
@@ -305,6 +284,8 @@ async function settleCompletedCycles() {
     client.release();
   }
 }
+
+
 
 
 

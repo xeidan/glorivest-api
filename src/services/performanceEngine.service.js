@@ -37,106 +37,40 @@ async function fetchLatestPrice(client, symbol) {
 
 async function generateTradesForCycle(cycle) {
 
-  const duration = Number(cycle.duration_days);
-  const principal = Number(cycle.capital_amount);
-  const expectedProfit = Number(cycle.expected_profit || 0);
+  if (cycle.status !== 'RUNNING') return;
 
-  const cycleStart = new Date(cycle.start_at);
-  const cycleEnd = new Date(cycle.end_at);
+  const principal = Number(cycle.capital_cents) / 100;
+  const cycleStart = new Date(cycle.started_at);
+  const cycleEnd = new Date(cycle.ends_at);
 
-  const totalTrades = tradesPerDay(duration) * duration;
+  const durationDays = Number(cycle.duration_months) * 30;
+  const totalTrades = tradesPerDay(durationDays) * durationDays;
+
   if (totalTrades <= 0) return;
+
+  const now = new Date();
+
+  // STOP if expired
+  if (now >= cycleEnd) return;
 
   const client = await pool.connect();
 
   try {
 
-    if (cycle.status !== 'active') return;
-
-    const now = new Date();
-
-    // -------------------------
-    // COMPLETE IF TIME EXPIRED
-    // -------------------------
-    if (now >= cycleEnd) {
-
-      // Recalculate real profit from positions
-      const profitRes = await client.query(
-        `
-        SELECT COALESCE(SUM(
-          CASE
-            WHEN side = 'LONG'
-              THEN (exit_price - entry_price) * size
-            WHEN side = 'SHORT'
-              THEN (entry_price - exit_price) * size
-            ELSE 0
-          END
-        ),0) AS total_profit
-        FROM positions
-        WHERE cycle_id = $1
-        `,
-        [cycle.id]
-      );
-
-      let totalProfit = Number(profitRes.rows[0].total_profit);
-
-      // Cap at expected profit if defined
-      if (expectedProfit > 0 && totalProfit > expectedProfit) {
-        totalProfit = expectedProfit;
-      }
-
-      // Convert to cents
-      const profitCents = Math.round(totalProfit * 100);
-
-      // Credit wallet once
-      if (!cycle.settled && profitCents > 0) {
-        await client.query(
-          `
-          UPDATE wallets
-          SET balance_cents = balance_cents + $1,
-              updated_at = NOW()
-          WHERE id = $2
-          `,
-          [profitCents, cycle.wallet_id]
-        );
-      }
-
-      await client.query(
-        `
-        UPDATE investment_cycles
-        SET status = 'completed',
-            accrued_profit = $1,
-            settled = true,
-            updated_at = NOW()
-        WHERE id = $2
-        `,
-        [totalProfit, cycle.id]
-      );
-
-      return;
-    }
-
-    // -------------------------
-    // NORMAL TRADE GENERATION
-    // -------------------------
-
-    const existingRes = await client.query(
+    const { rows } = await client.query(
       `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
       [cycle.id]
     );
 
-    const existingCount = Number(existingRes.rows[0].count);
-
-    if (existingCount >= totalTrades) {
-      return;
-    }
-
-    const cycleSpanMs = cycleEnd.getTime() - cycleStart.getTime();
-    const intervalMs = Math.floor(cycleSpanMs / totalTrades);
+    const existingCount = Number(rows[0].count);
+    if (existingCount >= totalTrades) return;
 
     if (now <= cycleStart) return;
 
-    const elapsedMs = now.getTime() - cycleStart.getTime();
+    const cycleSpanMs = cycleEnd - cycleStart;
+    const intervalMs = Math.floor(cycleSpanMs / totalTrades);
+
+    const elapsedMs = now - cycleStart;
     const shouldExist = Math.floor(elapsedMs / intervalMs);
     const maxTrades = Math.min(shouldExist, totalTrades);
     const tradesToCreate = maxTrades - existingCount;
@@ -186,13 +120,6 @@ async function generateTradesForCycle(cycle) {
         side === 'LONG'
           ? (isWin ? entry * (1 + movePct) : entry * (1 - movePct))
           : (isWin ? entry * (1 - movePct) : entry * (1 + movePct));
-
-      const pnl =
-        side === 'LONG'
-          ? (exit - entry) * size
-          : (entry - exit) * size;
-
-      balance += pnl;
 
       const openedAt = new Date(cycleStart.getTime() + (intervalMs * i));
       const closedAt = new Date(openedAt.getTime() + 3600000);
@@ -266,6 +193,7 @@ async function generateTradesForCycle(cycle) {
     client.release();
   }
 }
+
 
 
 
