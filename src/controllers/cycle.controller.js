@@ -214,31 +214,33 @@ async function stopCycle({ userId, cycleId }) {
 // SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT, SAFE)
 // --------------------------------------------------
 async function settleCompletedCycles() {
+
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
+    // Lock expired running cycles
     const { rows: cycles } = await client.query(
       `
       SELECT *
-      FROM investment_cycles
-      WHERE status = 'completed'
-        AND settled = false
+      FROM cycles
+      WHERE status = 'RUNNING'
+        AND ends_at <= NOW()
       FOR UPDATE
       `
     );
 
     for (const cycle of cycles) {
 
-      // Recalculate profit from positions (single source of truth)
+      // Calculate REAL PnL from positions
       const { rows } = await client.query(
         `
         SELECT COALESCE(SUM(
           CASE
-            WHEN side = 'LONG'
+            WHEN side IN ('LONG','BUY')
               THEN (exit_price - entry_price) * size
-            WHEN side = 'SHORT'
+            WHEN side IN ('SHORT','SELL')
               THEN (entry_price - exit_price) * size
             ELSE 0
           END
@@ -251,12 +253,10 @@ async function settleCompletedCycles() {
 
       const totalProfit = Number(rows[0].total_profit);
 
-      const totalReturn =
-        Number(cycle.capital_amount) + totalProfit;
-
       const totalReturnCents =
-        Math.round(totalReturn * 100);
+        cycle.capital_cents + Math.round(totalProfit * 100);
 
+      // Credit wallet
       await client.query(
         `
         UPDATE wallets
@@ -267,11 +267,12 @@ async function settleCompletedCycles() {
         [totalReturnCents, cycle.wallet_id]
       );
 
+      // Mark cycle completed
       await client.query(
         `
-        UPDATE investment_cycles
-        SET settled = true,
-            updated_at = NOW()
+        UPDATE cycles
+        SET status = 'COMPLETED',
+            completed_at = NOW()
         WHERE id = $1
         `,
         [cycle.id]
@@ -288,6 +289,7 @@ async function settleCompletedCycles() {
     client.release();
   }
 }
+
 
 
 

@@ -5,7 +5,7 @@ const { pool } = require('../config/database');
 /**
  * Settle cycles that have ended.
  * Single source of truth: positions table.
- * No accrued_profit column.
+
  */
 async function settleCompletedCycles() {
 
