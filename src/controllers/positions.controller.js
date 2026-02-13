@@ -71,6 +71,29 @@ async function getPositionsAnalytics(req, res) {
 
   try {
 
+    // 1️⃣ Get active cycle
+    const cycleRes = await client.query(
+      `
+      SELECT id, accrued_profit
+      FROM investment_cycles
+      WHERE user_id = $1
+        AND status = 'active'
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (!cycleRes.rowCount) {
+      return res.json({
+        summary: null,
+        equity_curve: []
+      });
+    }
+
+    const cycle = cycleRes.rows[0];
+
+    // 2️⃣ Fetch trades for analytics metrics only
     const tradesRes = await client.query(
       `
       SELECT
@@ -83,24 +106,31 @@ async function getPositionsAnalytics(req, res) {
           ELSE 0
         END AS pnl
       FROM positions
-      WHERE user_id = $1
+      WHERE cycle_id = $1
       ORDER BY opened_at ASC
       `,
-      [userId]
+      [cycle.id]
     );
 
     const trades = tradesRes.rows;
 
     if (!trades.length) {
       return res.json({
-        summary: null,
+        summary: {
+          total_trades: 0,
+          win_rate: 0,
+          total_pnl: Number(cycle.accrued_profit),
+          avg_pnl: 0,
+          best_trade: 0,
+          worst_trade: 0,
+          max_drawdown: 0,
+          max_drawdown_pct: 0
+        },
         equity_curve: []
       });
     }
 
-    let totalTrades = trades.length;
     let wins = 0;
-    let totalPnl = 0;
     let best = -Infinity;
     let worst = Infinity;
 
@@ -114,7 +144,6 @@ async function getPositionsAnalytics(req, res) {
 
       const pnl = Number(trade.pnl);
 
-      totalPnl += pnl;
       equity += pnl;
 
       if (pnl > 0) wins++;
@@ -133,6 +162,7 @@ async function getPositionsAnalytics(req, res) {
       });
     }
 
+    const totalTrades = trades.length;
     const maxDrawdownPct = peak > 0
       ? (maxDrawdown / peak) * 100
       : 0;
@@ -140,8 +170,10 @@ async function getPositionsAnalytics(req, res) {
     const summary = {
       total_trades: totalTrades,
       win_rate: Number(((wins / totalTrades) * 100).toFixed(2)),
-      total_pnl: Number(totalPnl.toFixed(2)),
-      avg_pnl: Number((totalPnl / totalTrades).toFixed(2)),
+      total_pnl: Number(cycle.accrued_profit), // ✅ authoritative
+      avg_pnl: totalTrades > 0
+        ? Number((cycle.accrued_profit / totalTrades).toFixed(2))
+        : 0,
       best_trade: Number(best.toFixed(2)),
       worst_trade: Number(worst.toFixed(2)),
       max_drawdown: Number(maxDrawdown.toFixed(2)),
@@ -160,5 +192,6 @@ async function getPositionsAnalytics(req, res) {
     client.release();
   }
 }
+
 
 module.exports = { getUserPositions, getPositionsAnalytics };
