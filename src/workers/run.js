@@ -18,13 +18,13 @@ async function sleep(ms) {
 
   console.log('[worker] main worker started');
 
-  // Start trade worker
   if (process.env.ENABLE_TRADE_WORKER === 'true') {
     tradeWorker.start();
   }
 
   while (true) {
     try {
+
       const settled = await settleCompletedCycles();
 
       if (settled > 0) {

@@ -5,11 +5,11 @@ const router = express.Router();
 const requireAuth = require('../middleware/auth');
 
 const {
-  getUserPositions,
-  getPositionsAnalytics
+  getUserPerformance,
+  getUserPerformanceAnalytics
 } = require('../controllers/performance.controller');
 
-router.get('/', requireAuth, getUserPositions);
-router.get('/analytics', requireAuth, getPositionsAnalytics);
+router.get('/', requireAuth, getUserPerformance);
+router.get('/analytics', requireAuth, getUserPerformanceAnalytics);
 
 module.exports = router;

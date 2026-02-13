@@ -3,12 +3,10 @@
 const { pool } = require('../config/database');
 
 /**
- * ---------------------------------------
- * GET PAGINATED PERFORMANCE HISTORY
- * GET /api/performance
- * ---------------------------------------
+ * Paginated performance list (formerly positions list)
  */
 async function getUserPerformance(req, res) {
+
   const userId = req.user.id;
 
   const page = Math.max(Number(req.query.page || 1), 1);
@@ -18,6 +16,7 @@ async function getUserPerformance(req, res) {
   const client = await pool.connect();
 
   try {
+
     const { rows } = await client.query(
       `
       SELECT
@@ -28,9 +27,9 @@ async function getUserPerformance(req, res) {
         p.entry_price,
         p.exit_price,
         CASE
-          WHEN p.side IN ('BUY','LONG')
+          WHEN p.side IN ('LONG','BUY')
             THEN (p.exit_price - p.entry_price) * p.size
-          WHEN p.side IN ('SELL','SHORT')
+          WHEN p.side IN ('SHORT','SELL')
             THEN (p.entry_price - p.exit_price) * p.size
           ELSE 0
         END AS pnl,
@@ -61,27 +60,25 @@ async function getUserPerformance(req, res) {
     });
 
   } catch (err) {
-    console.error('performance history error:', err);
-    res.status(500).json({ message: 'Failed to load performance history' });
+    console.error('performance error', err);
+    res.status(500).json({ message: 'Failed to load performance' });
   } finally {
     client.release();
   }
 }
 
-
 /**
- * ---------------------------------------
- * GET PERFORMANCE ANALYTICS (EQUITY CURVE)
- * GET /api/performance/analytics
- * ---------------------------------------
+ * Performance analytics
+ * SINGLE SOURCE OF TRUTH: positions table
  */
 async function getUserPerformanceAnalytics(req, res) {
+
   const userId = req.user.id;
   const client = await pool.connect();
 
   try {
 
-    const tradesRes = await client.query(
+    const { rows: trades } = await client.query(
       `
       SELECT
         opened_at,
@@ -98,8 +95,6 @@ async function getUserPerformanceAnalytics(req, res) {
       `,
       [userId]
     );
-
-    const trades = tradesRes.rows;
 
     if (!trades.length) {
       return res.json({
@@ -120,6 +115,7 @@ async function getUserPerformanceAnalytics(req, res) {
     for (const trade of trades) {
 
       const pnl = Number(trade.pnl);
+
       equity += pnl;
 
       if (pnl > 0) wins++;
@@ -140,81 +136,32 @@ async function getUserPerformanceAnalytics(req, res) {
 
     const totalTrades = trades.length;
     const totalPnl = equity;
-    const maxDrawdownPct = peak > 0
-      ? (maxDrawdown / peak) * 100
-      : 0;
-
-    const summary = {
-      total_trades: totalTrades,
-      win_rate: Number(((wins / totalTrades) * 100).toFixed(2)),
-      total_pnl: Number(totalPnl.toFixed(2)),
-      avg_pnl: Number((totalPnl / totalTrades).toFixed(2)),
-      best_trade: Number(best.toFixed(2)),
-      worst_trade: Number(worst.toFixed(2)),
-      max_drawdown: Number(maxDrawdown.toFixed(2)),
-      max_drawdown_pct: Number(maxDrawdownPct.toFixed(2))
-    };
+    const maxDrawdownPct =
+      peak > 0 ? (maxDrawdown / peak) * 100 : 0;
 
     res.json({
-      summary,
+      summary: {
+        total_trades: totalTrades,
+        win_rate: Number(((wins / totalTrades) * 100).toFixed(2)),
+        total_pnl: Number(totalPnl.toFixed(2)),
+        avg_pnl: Number((totalPnl / totalTrades).toFixed(2)),
+        best_trade: Number(best.toFixed(2)),
+        worst_trade: Number(worst.toFixed(2)),
+        max_drawdown: Number(maxDrawdown.toFixed(2)),
+        max_drawdown_pct: Number(maxDrawdownPct.toFixed(2))
+      },
       equity_curve: equityCurve
     });
 
   } catch (err) {
-    console.error('performance analytics error:', err);
+    console.error('analytics error', err);
     res.status(500).json({ message: 'Failed to load analytics' });
   } finally {
     client.release();
   }
 }
 
-
-/**
- * ---------------------------------------
- * LIGHTWEIGHT PERFORMANCE SUMMARY
- * GET /api/performance/summary
- * ---------------------------------------
- */
-async function getPerformanceSummary(req, res) {
-  const userId = req.user.id;
-  const client = await pool.connect();
-
-  try {
-
-    const { rows } = await client.query(
-      `
-      SELECT COALESCE(SUM(
-        CASE
-          WHEN side IN ('LONG','BUY')
-            THEN (exit_price - entry_price) * size
-          WHEN side IN ('SHORT','SELL')
-            THEN (entry_price - exit_price) * size
-          ELSE 0
-        END
-      ),0) AS total_pnl,
-      COUNT(*) AS total_trades
-      FROM positions
-      WHERE user_id = $1
-      `,
-      [userId]
-    );
-
-    res.json({
-      total_pnl: Number(rows[0].total_pnl),
-      total_trades: Number(rows[0].total_trades)
-    });
-
-  } catch (err) {
-    console.error('performance summary error:', err);
-    res.status(500).json({ message: 'Failed to load summary' });
-  } finally {
-    client.release();
-  }
-}
-
-
 module.exports = {
   getUserPerformance,
-  getUserPerformanceAnalytics,
-  getPerformanceSummary
+  getUserPerformanceAnalytics
 };
