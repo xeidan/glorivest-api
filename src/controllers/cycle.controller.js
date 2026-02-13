@@ -213,7 +213,6 @@ async function stopCycle({ userId, cycleId }) {
 // --------------------------------------------------
 // SETTLE COMPLETED CYCLES (CRON, IDEMPOTENT, SAFE)
 // --------------------------------------------------
-
 async function settleCompletedCycles() {
   const client = await pool.connect();
 
@@ -223,15 +222,16 @@ async function settleCompletedCycles() {
     const { rows: cycles } = await client.query(
       `
       SELECT *
-      FROM cycles
-      WHERE status = 'RUNNING'
-        AND ends_at <= NOW()
+      FROM investment_cycles
+      WHERE status = 'completed'
+        AND settled = false
       FOR UPDATE
       `
     );
 
     for (const cycle of cycles) {
 
+      // Recalculate profit from positions (single source of truth)
       const { rows } = await client.query(
         `
         SELECT COALESCE(SUM(
@@ -250,8 +250,12 @@ async function settleCompletedCycles() {
       );
 
       const totalProfit = Number(rows[0].total_profit);
+
+      const totalReturn =
+        Number(cycle.capital_amount) + totalProfit;
+
       const totalReturnCents =
-        cycle.capital_cents + Math.round(totalProfit * 100);
+        Math.round(totalReturn * 100);
 
       await client.query(
         `
@@ -265,9 +269,9 @@ async function settleCompletedCycles() {
 
       await client.query(
         `
-        UPDATE cycles
-        SET status = 'COMPLETED',
-            completed_at = NOW()
+        UPDATE investment_cycles
+        SET settled = true,
+            updated_at = NOW()
         WHERE id = $1
         `,
         [cycle.id]
@@ -284,6 +288,7 @@ async function settleCompletedCycles() {
     client.release();
   }
 }
+
 
 
 
