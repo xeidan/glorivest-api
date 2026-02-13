@@ -234,23 +234,45 @@ async function generateTradesForCycle(cycle) {
     );
 
     // Recalculate total profit
-    const profitRes = await client.query(
-      `
-      SELECT
-        COALESCE(SUM(
-          CASE
-            WHEN side = 'LONG'
-              THEN (exit_price - entry_price) * size
-            WHEN side = 'SHORT'
-              THEN (entry_price - exit_price) * size
-            ELSE 0
-          END
-        ), 0) AS total_profit
-      FROM positions
-      WHERE cycle_id = $1
-      `,
-      [cycle.id]
-    );
+    // 1️⃣ Get profit in naira
+const profitRes = await client.query(
+  `
+  SELECT accrued_profit
+  FROM investment_cycles
+  WHERE id = $1
+  `,
+  [cycle.id]
+);
+
+const profit = Number(profitRes.rows[0].accrued_profit);
+
+// 2️⃣ Convert to cents (IMPORTANT)
+const profitCents = Math.round(profit * 100);
+
+if (profitCents > 0) {
+  // 3️⃣ Credit wallet in cents
+  await client.query(
+    `
+    UPDATE wallets
+    SET balance_cents = balance_cents + $1,
+        updated_at = NOW()
+    WHERE id = $2
+    `,
+    [profitCents, cycle.wallet_id]
+  );
+}
+
+// 4️⃣ Mark cycle settled
+await client.query(
+  `
+  UPDATE investment_cycles
+  SET settled = true,
+      updated_at = NOW()
+  WHERE id = $1
+  `,
+  [cycle.id]
+);
+
 
     let totalProfit = Number(profitRes.rows[0].total_profit);
 
