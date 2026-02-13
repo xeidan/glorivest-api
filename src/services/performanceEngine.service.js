@@ -207,6 +207,38 @@ async function generateTradesForCycle(cycle) {
       params
     );
 
+    // Update accrued_profit
+const profitRes = await client.query(
+  `
+  SELECT
+    COALESCE(SUM(
+      CASE
+        WHEN side = 'LONG'
+          THEN (exit_price - entry_price) * size
+        WHEN side = 'SHORT'
+          THEN (entry_price - exit_price) * size
+        ELSE 0
+      END
+    ), 0) AS total_profit
+  FROM positions
+  WHERE cycle_id = $1
+  `,
+  [cycle.id]
+);
+
+const totalProfit = Number(profitRes.rows[0].total_profit);
+
+await client.query(
+  `
+  UPDATE investment_cycles
+  SET accrued_profit = $1,
+      updated_at = NOW()
+  WHERE id = $2
+  `,
+  [totalProfit, cycle.id]
+);
+
+
   } finally {
     client.release();
   }
