@@ -39,6 +39,8 @@ async function generateTradesForCycle(cycle) {
 
   const duration = Number(cycle.duration_days);
   const principal = Number(cycle.capital_amount);
+  const expectedProfit = Number(cycle.expected_profit || 0);
+
   const cycleStart = new Date(cycle.start_at);
   const cycleEnd = new Date(cycle.end_at);
 
@@ -49,6 +51,25 @@ async function generateTradesForCycle(cycle) {
 
   try {
 
+    // Stop if not active
+    if (cycle.status !== 'active') return;
+
+    const now = new Date();
+
+    // Stop if time exceeded
+    if (now >= cycleEnd) {
+      await client.query(
+        `
+        UPDATE investment_cycles
+        SET status = 'completed',
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [cycle.id]
+      );
+      return;
+    }
+
     const existingRes = await client.query(
       `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
       [cycle.id]
@@ -56,19 +77,28 @@ async function generateTradesForCycle(cycle) {
 
     const existingCount = Number(existingRes.rows[0].count);
 
+    // Stop if max trades reached
+    if (existingCount >= totalTrades) {
+      await client.query(
+        `
+        UPDATE investment_cycles
+        SET status = 'completed',
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [cycle.id]
+      );
+      return;
+    }
+
     const cycleSpanMs = cycleEnd.getTime() - cycleStart.getTime();
     const intervalMs = Math.floor(cycleSpanMs / totalTrades);
 
-    const now = new Date();
-
     if (now <= cycleStart) return;
-    if (cycle.status !== 'active') return;
 
     const elapsedMs = now.getTime() - cycleStart.getTime();
     const shouldExist = Math.floor(elapsedMs / intervalMs);
-
     const maxTrades = Math.min(shouldExist, totalTrades);
-
     const tradesToCreate = maxTrades - existingCount;
 
     if (tradesToCreate <= 0) return;
@@ -78,11 +108,7 @@ async function generateTradesForCycle(cycle) {
     // Recalculate balance from existing trades
     const existingTrades = await client.query(
       `
-      SELECT
-        side,
-        size,
-        entry_price,
-        exit_price
+      SELECT side, size, entry_price, exit_price
       FROM positions
       WHERE cycle_id = $1
       ORDER BY opened_at ASC
@@ -207,42 +233,60 @@ async function generateTradesForCycle(cycle) {
       params
     );
 
-    // Update accrued_profit
-const profitRes = await client.query(
-  `
-  SELECT
-    COALESCE(SUM(
-      CASE
-        WHEN side = 'LONG'
-          THEN (exit_price - entry_price) * size
-        WHEN side = 'SHORT'
-          THEN (entry_price - exit_price) * size
-        ELSE 0
-      END
-    ), 0) AS total_profit
-  FROM positions
-  WHERE cycle_id = $1
-  `,
-  [cycle.id]
-);
+    // Recalculate total profit
+    const profitRes = await client.query(
+      `
+      SELECT
+        COALESCE(SUM(
+          CASE
+            WHEN side = 'LONG'
+              THEN (exit_price - entry_price) * size
+            WHEN side = 'SHORT'
+              THEN (entry_price - exit_price) * size
+            ELSE 0
+          END
+        ), 0) AS total_profit
+      FROM positions
+      WHERE cycle_id = $1
+      `,
+      [cycle.id]
+    );
 
-const totalProfit = Number(profitRes.rows[0].total_profit);
+    let totalProfit = Number(profitRes.rows[0].total_profit);
 
-await client.query(
-  `
-  UPDATE investment_cycles
-  SET accrued_profit = $1,
-      updated_at = NOW()
-  WHERE id = $2
-  `,
-  [totalProfit, cycle.id]
-);
+    // Cap profit at expected profit
+    if (expectedProfit > 0 && totalProfit >= expectedProfit) {
+      totalProfit = expectedProfit;
 
+      await client.query(
+        `
+        UPDATE investment_cycles
+        SET status = 'completed',
+            accrued_profit = $1,
+            updated_at = NOW()
+        WHERE id = $2
+        `,
+        [totalProfit, cycle.id]
+      );
+
+      return;
+    }
+
+    await client.query(
+      `
+      UPDATE investment_cycles
+      SET accrued_profit = $1,
+          updated_at = NOW()
+      WHERE id = $2
+      `,
+      [totalProfit, cycle.id]
+    );
 
   } finally {
     client.release();
   }
 }
+
 
 
 module.exports = { generateTradesForCycle };
