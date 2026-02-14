@@ -8,17 +8,6 @@ function randomBetween(min, max) {
   return Math.random() * (max - min) + min;
 }
 
-function shuffle(arr) {
-  return arr.sort(() => Math.random() - 0.5);
-}
-
-function tradesPerDay(duration) {
-  if (duration === 30) return 7;
-  if (duration === 90) return 4;
-  if (duration === 180) return 3;
-  return 3;
-}
-
 async function fetchLatestPrice(client, symbol) {
   const res = await client.query(
     `
@@ -62,11 +51,8 @@ async function generateTradesForCycle(cycle) {
     }
 
     const lockedCycle = cycleLock.rows[0];
-
-    const principal = Number(lockedCycle.capital_cents) / 100;
-    const cycleStart = new Date(lockedCycle.started_at);
-    const cycleEnd = new Date(lockedCycle.ends_at);
     const now = new Date();
+    const cycleEnd = new Date(lockedCycle.ends_at);
 
     // Stop if expired
     if (now >= cycleEnd) {
@@ -74,59 +60,26 @@ async function generateTradesForCycle(cycle) {
       return;
     }
 
-    // ✅ Authoritative duration from timestamps
-    const durationDays = Math.max(
-      1,
-      Math.ceil((cycleEnd - cycleStart) / 86400000)
-    );
-
-    if (![30, 90, 180].includes(durationDays)) {
-      await client.query('COMMIT');
-      return;
-    }
-
-    const totalTrades = tradesPerDay(durationDays) * durationDays;
-    if (totalTrades <= 0) {
-      await client.query('COMMIT');
-      return;
-    }
-
-    // Existing trade count
-    const countRes = await client.query(
-      `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
+    // ✅ HARD CAP: Max 7 trades per calendar day
+    const todayRes = await client.query(
+      `
+      SELECT COUNT(*)
+      FROM positions
+      WHERE cycle_id = $1
+        AND DATE(opened_at) = CURRENT_DATE
+      `,
       [lockedCycle.id]
     );
 
-    const existingCount = Number(countRes.rows[0].count);
-    if (existingCount >= totalTrades) {
+    const tradesToday = Number(todayRes.rows[0].count);
+
+    if (tradesToday >= 7) {
       await client.query('COMMIT');
       return;
     }
 
-    if (now <= cycleStart) {
-      await client.query('COMMIT');
-      return;
-    }
-
-    const cycleSpanMs = cycleEnd - cycleStart;
-    const intervalMs = Math.floor(cycleSpanMs / totalTrades);
-
-    if (intervalMs <= 0) {
-      await client.query('COMMIT');
-      return;
-    }
-
-    const elapsedMs = now - cycleStart;
-    const shouldExist = Math.floor(elapsedMs / intervalMs);
-    const maxTrades = Math.min(shouldExist, totalTrades);
-    const tradesToCreate = maxTrades - existingCount;
-
-    if (tradesToCreate <= 0) {
-      await client.query('COMMIT');
-      return;
-    }
-
-    // 🔁 Recalculate balance from CLOSED trades only
+    // 🔁 Recalculate balance from CLOSED trades
+    const principal = Number(lockedCycle.capital_cents) / 100;
     let balance = principal;
 
     const existingTrades = await client.query(
@@ -135,7 +88,6 @@ async function generateTradesForCycle(cycle) {
       FROM positions
       WHERE cycle_id = $1
         AND status = 'CLOSED'
-      ORDER BY opened_at ASC
       `,
       [lockedCycle.id]
     );
@@ -154,81 +106,35 @@ async function generateTradesForCycle(cycle) {
       return;
     }
 
-    const trades = [];
+    // 🎯 Create ONE trade per worker tick
+    const symbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+    const entry = await fetchLatestPrice(client, symbol);
 
-    for (let i = existingCount; i < maxTrades; i++) {
-
-      const symbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
-      const entry = await fetchLatestPrice(client, symbol);
-      if (!entry) continue;
-
-      const side = Math.random() > 0.5 ? 'LONG' : 'SHORT';
-
-      const riskAmount = balance * 0.02;
-      const size = riskAmount / entry;
-
-      if (size <= 0) continue;
-
-      const isWin = Math.random() < 0.7; // 70% fixed win rate
-
-      const movePct = isWin
-        ? randomBetween(0.003, 0.008)
-        : randomBetween(0.002, 0.006);
-
-      const exit =
-        side === 'LONG'
-          ? (isWin ? entry * (1 + movePct) : entry * (1 - movePct))
-          : (isWin ? entry * (1 - movePct) : entry * (1 + movePct));
-
-      const openedAt = new Date(cycleStart.getTime() + (intervalMs * i));
-      const closedAt = new Date(openedAt.getTime() + 3600000);
-
-      trades.push({
-        cycle_id: lockedCycle.id,
-        symbol,
-        side,
-        size,
-        entry_price: entry,
-        exit_price: exit,
-        status: 'CLOSED',
-        opened_at: openedAt,
-        closed_at: closedAt,
-        user_id: lockedCycle.user_id,
-        wallet_id: lockedCycle.wallet_id,
-        source: 'SIMULATION'
-      });
-    }
-
-    if (!trades.length) {
+    if (!entry) {
       await client.query('COMMIT');
       return;
     }
 
-    const values = [];
-    const params = [];
+    const side = Math.random() > 0.5 ? 'LONG' : 'SHORT';
 
-    trades.forEach((t, i) => {
-      const base = i * 12;
+    // 🔽 Reduced risk (0.2%)
+    const riskAmount = balance * 0.002;
+    const size = riskAmount / entry;
 
-      values.push(
-        `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12})`
-      );
+    if (size <= 0) {
+      await client.query('COMMIT');
+      return;
+    }
 
-      params.push(
-        t.cycle_id,
-        t.symbol,
-        t.side,
-        t.size,
-        t.entry_price,
-        t.exit_price,
-        t.status,
-        t.opened_at,
-        t.closed_at,
-        t.user_id,
-        t.wallet_id,
-        t.source
-      );
-    });
+    const isWin = Math.random() < 0.7;
+
+    // 🔽 Small move size
+    const movePct = randomBetween(0.0005, 0.0015);
+
+    const exit =
+      side === 'LONG'
+        ? (isWin ? entry * (1 + movePct) : entry * (1 - movePct))
+        : (isWin ? entry * (1 - movePct) : entry * (1 + movePct));
 
     await client.query(
       `
@@ -247,9 +153,19 @@ async function generateTradesForCycle(cycle) {
         wallet_id,
         source
       )
-      VALUES ${values.join(',')}
+      VALUES
+      ($1,$2,$3,$4,$5,$6,'CLOSED',NOW(),NOW(),$7,$8,'SIMULATION')
       `,
-      params
+      [
+        lockedCycle.id,
+        symbol,
+        side,
+        size,
+        entry,
+        exit,
+        lockedCycle.user_id,
+        lockedCycle.wallet_id
+      ]
     );
 
     await client.query('COMMIT');
@@ -261,10 +177,5 @@ async function generateTradesForCycle(cycle) {
     client.release();
   }
 }
-
-
-
-
-
 
 module.exports = { generateTradesForCycle };
