@@ -2,16 +2,42 @@
 'use strict';
 
 const express = require('express');
+const { pool } = require('../config/database');
+const auth = require('../middleware/auth.middleware');
+
 const router = express.Router();
 
-const leaderboardController = require('../controllers/leaderboard.controller');
+router.get('/', auth, async (req, res) => {
+  try {
+    // First: check if anyone has referral earnings
+    const earningsRes = await pool.query(`
+      SELECT email, referral_earnings_cents
+      FROM users
+      WHERE referral_earnings_cents > 0
+      ORDER BY referral_earnings_cents DESC
+      LIMIT 10
+    `);
 
-// DEBUG GUARD (important)
-if (!leaderboardController || typeof leaderboardController.getLeaderboard !== 'function') {
-  throw new Error('leaderboard.controller.getLeaderboard is undefined');
-}
+    if (earningsRes.rowCount > 0) {
+      return res.json(earningsRes.rows);
+    }
 
-router.get('/', leaderboardController.getLeaderboard);
+    // Fallback: latest 10 signups
+    const signupRes = await pool.query(`
+      SELECT email, 0 AS referral_earnings_cents
+      FROM users
+      ORDER BY created_at DESC
+      LIMIT 10
+    `);
+
+    return res.json(signupRes.rows);
+
+  } catch (err) {
+    console.error('Leaderboard error:', err);
+    res.status(500).json({ error: 'Leaderboard failed' });
+  }
+});
 
 module.exports = router;
+
 
