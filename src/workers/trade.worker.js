@@ -9,13 +9,13 @@ async function runOnce() {
   const client = await pool.connect();
 
   try {
-    const res = await client.query(
-      `
-      SELECT *
-      FROM cycles
-      WHERE status = 'RUNNING'
-      `
-    );
+   const res = await client.query(`
+  SELECT *
+  FROM cycles
+  WHERE status = 'RUNNING'
+  FOR UPDATE
+`);
+
 
     for (const cycle of res.rows) {
       await generateTradesForCycle(cycle);

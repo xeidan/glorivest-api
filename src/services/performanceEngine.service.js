@@ -39,44 +39,94 @@ async function generateTradesForCycle(cycle) {
 
   if (cycle.status !== 'RUNNING') return;
 
-  const principal = Number(cycle.capital_cents) / 100;
-  const cycleStart = new Date(cycle.started_at);
-  const cycleEnd = new Date(cycle.ends_at);
-
-  const durationDays = Number(cycle.duration_months) * 30;
-  const totalTrades = tradesPerDay(durationDays) * durationDays;
-
-  if (totalTrades <= 0) return;
-
-  const now = new Date();
-
-  // STOP if expired
-  if (now >= cycleEnd) return;
-
   const client = await pool.connect();
 
   try {
+    await client.query('BEGIN');
 
-    const { rows } = await client.query(
-      `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
+    // 🔒 Lock cycle row
+    const cycleLock = await client.query(
+      `
+      SELECT *
+      FROM cycles
+      WHERE id = $1
+        AND status = 'RUNNING'
+      FOR UPDATE
+      `,
       [cycle.id]
     );
 
-    const existingCount = Number(rows[0].count);
-    if (existingCount >= totalTrades) return;
+    if (!cycleLock.rowCount) {
+      await client.query('ROLLBACK');
+      return;
+    }
 
-    if (now <= cycleStart) return;
+    const lockedCycle = cycleLock.rows[0];
+
+    const principal = Number(lockedCycle.capital_cents) / 100;
+    const cycleStart = new Date(lockedCycle.started_at);
+    const cycleEnd = new Date(lockedCycle.ends_at);
+    const now = new Date();
+
+    // Stop if expired
+    if (now >= cycleEnd) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    // ✅ Authoritative duration from timestamps
+    const durationDays = Math.max(
+      1,
+      Math.ceil((cycleEnd - cycleStart) / 86400000)
+    );
+
+    if (![30, 90, 180].includes(durationDays)) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    const totalTrades = tradesPerDay(durationDays) * durationDays;
+    if (totalTrades <= 0) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    // Existing trade count
+    const countRes = await client.query(
+      `SELECT COUNT(*) FROM positions WHERE cycle_id = $1`,
+      [lockedCycle.id]
+    );
+
+    const existingCount = Number(countRes.rows[0].count);
+    if (existingCount >= totalTrades) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    if (now <= cycleStart) {
+      await client.query('COMMIT');
+      return;
+    }
 
     const cycleSpanMs = cycleEnd - cycleStart;
     const intervalMs = Math.floor(cycleSpanMs / totalTrades);
+
+    if (intervalMs <= 0) {
+      await client.query('COMMIT');
+      return;
+    }
 
     const elapsedMs = now - cycleStart;
     const shouldExist = Math.floor(elapsedMs / intervalMs);
     const maxTrades = Math.min(shouldExist, totalTrades);
     const tradesToCreate = maxTrades - existingCount;
 
-    if (tradesToCreate <= 0) return;
+    if (tradesToCreate <= 0) {
+      await client.query('COMMIT');
+      return;
+    }
 
+    // 🔁 Recalculate balance from CLOSED trades only
     let balance = principal;
 
     const existingTrades = await client.query(
@@ -84,9 +134,10 @@ async function generateTradesForCycle(cycle) {
       SELECT side, size, entry_price, exit_price
       FROM positions
       WHERE cycle_id = $1
+        AND status = 'CLOSED'
       ORDER BY opened_at ASC
       `,
-      [cycle.id]
+      [lockedCycle.id]
     );
 
     for (const t of existingTrades.rows) {
@@ -96,6 +147,11 @@ async function generateTradesForCycle(cycle) {
           : (t.entry_price - t.exit_price) * t.size;
 
       balance += Number(pnl);
+    }
+
+    if (balance <= 0) {
+      await client.query('COMMIT');
+      return;
     }
 
     const trades = [];
@@ -111,7 +167,10 @@ async function generateTradesForCycle(cycle) {
       const riskAmount = balance * 0.02;
       const size = riskAmount / entry;
 
-      const isWin = Math.random() < 0.7;
+      if (size <= 0) continue;
+
+      const isWin = Math.random() < 0.7; // 70% fixed win rate
+
       const movePct = isWin
         ? randomBetween(0.003, 0.008)
         : randomBetween(0.002, 0.006);
@@ -125,7 +184,7 @@ async function generateTradesForCycle(cycle) {
       const closedAt = new Date(openedAt.getTime() + 3600000);
 
       trades.push({
-        cycle_id: cycle.id,
+        cycle_id: lockedCycle.id,
         symbol,
         side,
         size,
@@ -134,19 +193,23 @@ async function generateTradesForCycle(cycle) {
         status: 'CLOSED',
         opened_at: openedAt,
         closed_at: closedAt,
-        user_id: cycle.user_id,
-        wallet_id: cycle.wallet_id,
+        user_id: lockedCycle.user_id,
+        wallet_id: lockedCycle.wallet_id,
         source: 'SIMULATION'
       });
     }
 
-    if (!trades.length) return;
+    if (!trades.length) {
+      await client.query('COMMIT');
+      return;
+    }
 
     const values = [];
     const params = [];
 
     trades.forEach((t, i) => {
       const base = i * 12;
+
       values.push(
         `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12})`
       );
@@ -189,10 +252,16 @@ async function generateTradesForCycle(cycle) {
       params
     );
 
+    await client.query('COMMIT');
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
   } finally {
     client.release();
   }
 }
+
 
 
 

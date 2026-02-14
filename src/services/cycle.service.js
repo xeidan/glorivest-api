@@ -14,7 +14,7 @@ async function settleCompletedCycles() {
       SELECT *
       FROM cycles
       WHERE status = 'RUNNING'
-        AND end_at <= NOW()
+        AND ends_at <= NOW()
       FOR UPDATE
       `
     );
