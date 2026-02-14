@@ -1,20 +1,19 @@
-// src/routes/leaderboard.routes.js
 'use strict';
 
 const express = require('express');
 const { pool } = require('../config/database');
-const auth = require('../middleware/auth.middleware');
+const auth = require('../middleware/auth');
 
 const router = express.Router();
 
 router.get('/', auth, async (req, res) => {
   try {
-    // First: check if anyone has referral earnings
+    // 1️⃣ Try earnings leaderboard
     const earningsRes = await pool.query(`
-      SELECT email, referral_earnings_cents
+      SELECT email,
+             COALESCE(referral_earnings_cents, 0) AS referral_earnings_cents
       FROM users
-      WHERE referral_earnings_cents > 0
-      ORDER BY referral_earnings_cents DESC
+      ORDER BY referral_earnings_cents DESC NULLS LAST
       LIMIT 10
     `);
 
@@ -22,22 +21,19 @@ router.get('/', auth, async (req, res) => {
       return res.json(earningsRes.rows);
     }
 
-    // Fallback: latest 10 signups
-    const signupRes = await pool.query(`
+    // 2️⃣ Fallback: simple latest users (NO created_at dependency)
+    const fallback = await pool.query(`
       SELECT email, 0 AS referral_earnings_cents
       FROM users
-      ORDER BY created_at DESC
       LIMIT 10
     `);
 
-    return res.json(signupRes.rows);
+    return res.json(fallback.rows);
 
   } catch (err) {
     console.error('Leaderboard error:', err);
-    res.status(500).json({ error: 'Leaderboard failed' });
+    return res.status(500).json({ error: 'Leaderboard failed' });
   }
 });
 
 module.exports = router;
-
-
