@@ -2,11 +2,6 @@
 
 const { pool } = require('../config/database');
 
-/**
- * Settle cycles that have ended.
- * Single source of truth: positions table.
-
- */
 async function settleCompletedCycles() {
 
   const client = await pool.connect();
@@ -14,7 +9,6 @@ async function settleCompletedCycles() {
   try {
     await client.query('BEGIN');
 
-    // Lock running cycles that have expired
     const { rows: cycles } = await client.query(
       `
       SELECT *
@@ -27,30 +21,33 @@ async function settleCompletedCycles() {
 
     for (const cycle of cycles) {
 
-      // Calculate REAL PnL from positions
-      const { rows } = await client.query(
+      // 1️⃣ Calculate real PnL from CLOSED trades only
+      const pnlRes = await client.query(
         `
         SELECT COALESCE(SUM(
           CASE
-            WHEN side IN ('LONG','BUY')
+            WHEN side = 'LONG'
               THEN (exit_price - entry_price) * size
-            WHEN side IN ('SHORT','SELL')
+            WHEN side = 'SHORT'
               THEN (entry_price - exit_price) * size
             ELSE 0
           END
-        ),0) AS total_profit
+        ),0) AS total_pnl
         FROM positions
         WHERE cycle_id = $1
+          AND status = 'CLOSED'
         `,
         [cycle.id]
       );
 
-      const totalProfit = Number(rows[0].total_profit);
+      const totalPnl = Number(pnlRes.rows[0].total_pnl);
+
+      const pnlCents = Math.round(totalPnl * 100);
 
       const totalReturnCents =
-        cycle.capital_cents + Math.round(totalProfit * 100);
+        cycle.capital_cents + pnlCents;
 
-      // Lock wallet
+      // 2️⃣ Credit wallet
       await client.query(
         `
         UPDATE wallets
@@ -61,15 +58,26 @@ async function settleCompletedCycles() {
         [totalReturnCents, cycle.wallet_id]
       );
 
-      // Complete cycle
+      // 3️⃣ Store realized profit + mark completed
       await client.query(
         `
         UPDATE cycles
         SET status = 'COMPLETED',
-            completed_at = NOW()
-        WHERE id = $1
+            completed_at = NOW(),
+            realized_profit_cents = $1
+        WHERE id = $2
         `,
-        [cycle.id]
+        [pnlCents, cycle.id]
+      );
+
+      // 4️⃣ Ledger entry
+      await client.query(
+        `
+        INSERT INTO wallet_ledger
+          (wallet_id, amount_cents, reason, cycle_id)
+        VALUES ($1, $2, 'CYCLE_SETTLEMENT', $3)
+        `,
+        [cycle.wallet_id, totalReturnCents, cycle.id]
       );
     }
 

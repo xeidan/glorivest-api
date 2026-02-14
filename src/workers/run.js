@@ -6,7 +6,7 @@ if (process.env.ENABLE_WORKER !== 'true') {
 }
 
 const { settleCompletedCycles } =
-  require('../services/cycle.service');  // ✅ HERE
+  require('../services/cycle.service');
 
 const tradeWorker = require('./trade.worker');
 

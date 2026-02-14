@@ -160,7 +160,77 @@ async function getUserPerformanceAnalytics(req, res) {
   }
 }
 
+async function getPerformanceSummary(req, res) {
+
+  const userId = req.user.id;
+  const client = await pool.connect();
+
+  try {
+
+    const cycleRes = await client.query(
+      `
+      SELECT *
+      FROM cycles
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (!cycleRes.rowCount) {
+      return res.json({ summary: null });
+    }
+
+    const cycle = cycleRes.rows[0];
+
+    let totalPnl;
+
+    if (cycle.status === 'COMPLETED') {
+
+      totalPnl = cycle.realized_profit_cents / 100;
+
+    } else {
+
+      const pnlRes = await client.query(
+        `
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN side = 'LONG'
+              THEN (exit_price - entry_price) * size
+            WHEN side = 'SHORT'
+              THEN (entry_price - exit_price) * size
+            ELSE 0
+          END
+        ),0) AS total_pnl
+        FROM positions
+        WHERE cycle_id = $1
+          AND status = 'CLOSED'
+        `,
+        [cycle.id]
+      );
+
+      totalPnl = Number(pnlRes.rows[0].total_pnl);
+    }
+
+    res.json({
+      cycle_id: cycle.id,
+      status: cycle.status,
+      capital: cycle.capital_cents / 100,
+      total_pnl: Number(totalPnl.toFixed(2))
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Failed to load performance summary' });
+  } finally {
+    client.release();
+  }
+}
+
+
 module.exports = {
   getUserPerformance,
-  getUserPerformanceAnalytics
+  getUserPerformanceAnalytics,
+  getPerformanceSummary
 };
