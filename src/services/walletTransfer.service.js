@@ -16,66 +16,93 @@ async function transferToMainWallet({
       throw new Error('Invalid transfer amount');
     }
 
-    // Lock user row
-    const userRes = await client.query(
-      `SELECT id,
-              COALESCE(referral_earnings_cents, 0) AS referral_earnings_cents
-       FROM users
-       WHERE id = $1
-       FOR UPDATE`,
-      [userId]
-    );
-
-    if (!userRes.rowCount) {
-      throw new Error('User not found');
-    }
-
-    const user = userRes.rows[0];
-
-    // Deduct referral balance if source is REFERRAL
-    if (source === 'REFERRAL') {
-      if (Number(user.referral_earnings_cents) < amountCents) {
-        throw new Error('Insufficient referral balance');
-      }
-
-      await client.query(
-        `UPDATE users
-         SET referral_earnings_cents = referral_earnings_cents - $1
-         WHERE id = $2`,
-        [amountCents, userId]
-      );
-    }
-
     // Lock REAL wallet
-    const walletRes = await client.query(
-      `SELECT id, balance_cents
-       FROM wallets
-       WHERE user_id = $1
-         AND type = 'REAL'
-       FOR UPDATE`,
+    const realRes = await client.query(
+      `
+      SELECT id
+      FROM wallets
+      WHERE user_id = $1
+        AND type = 'REAL'
+      FOR UPDATE
+      `,
       [userId]
     );
 
-    if (!walletRes.rowCount) {
+    if (!realRes.rowCount) {
       throw new Error('Main wallet not found');
     }
 
-    const wallet = walletRes.rows[0];
+    const realWalletId = realRes.rows[0].id;
 
-    // Credit wallet
+    if (source === 'REFERRAL') {
+
+      // Lock REFERRAL wallet
+      const referralRes = await client.query(
+        `
+        SELECT id, balance_cents
+        FROM wallets
+        WHERE user_id = $1
+          AND type = 'REFERRAL'
+        FOR UPDATE
+        `,
+        [userId]
+      );
+
+      if (!referralRes.rowCount) {
+        throw new Error('Referral wallet not found');
+      }
+
+      const referralWallet = referralRes.rows[0];
+
+      if (Number(referralWallet.balance_cents) < amountCents) {
+        throw new Error('Insufficient referral balance');
+      }
+
+      // Debit REFERRAL wallet
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = balance_cents - $1
+        WHERE id = $2
+        `,
+        [amountCents, referralWallet.id]
+      );
+
+      await client.query(
+        `
+        INSERT INTO wallet_ledger
+          (wallet_id, amount_cents, reason)
+        VALUES
+          ($1, $2, 'REFERRAL_DEBIT')
+        `,
+        [referralWallet.id, -amountCents]
+      );
+    }
+
+    // Credit REAL wallet
     await client.query(
-      `UPDATE wallets
-       SET balance_cents = balance_cents + $1
-       WHERE id = $2`,
-      [amountCents, wallet.id]
+      `
+      UPDATE wallets
+      SET balance_cents = balance_cents + $1
+      WHERE id = $2
+      `,
+      [amountCents, realWalletId]
     );
 
-    // Ledger entry
     await client.query(
-      `INSERT INTO wallet_ledger
-       (user_id, wallet_id, amount_cents, type, source, created_at)
-       VALUES ($1, $2, $3, 'CREDIT', $4, NOW())`,
-      [userId, wallet.id, amountCents, source]
+      `
+      INSERT INTO wallet_ledger
+        (wallet_id, amount_cents, reason)
+      VALUES
+        ($1, $2, $3)
+      `,
+      [
+        realWalletId,
+        amountCents,
+        source === 'REFERRAL'
+          ? 'REFERRAL_TRANSFER'
+          : 'BOT_TRANSFER'
+      ]
     );
 
     await client.query('COMMIT');

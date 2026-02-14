@@ -8,14 +8,15 @@ const rewardReferral = async (client, depositId) => {
   const { rows } = await client.query(
     `
     SELECT
-      d.id AS deposit_id,
+      d.id,
       d.amount_cents,
       d.user_id,
       d.status,
-      u.referred_by -- referral_code (TEXT)
+      u.referred_by
     FROM deposits d
     JOIN users u ON u.id = d.user_id
     WHERE d.id = $1
+    FOR UPDATE
     `,
     [depositId]
   );
@@ -27,31 +28,20 @@ const rewardReferral = async (client, depositId) => {
   if (deposit.status !== 'SUCCESS') return;
   if (!deposit.referred_by) return;
 
-  const { rows: refRows } = await client.query(
-    `
-    SELECT id
-    FROM users
-    WHERE referral_code = $1
-    LIMIT 1
-    `,
-    [deposit.referred_by]
-  );
+  const referrerUserId = deposit.referred_by;
 
-  if (!refRows.length) return;
-
-  const referrerUserId = refRows[0].id;
-
-  const { rowCount } = await client.query(
+  // Prevent double reward
+  const existing = await client.query(
     `
     SELECT 1
     FROM referral_rewards
-    WHERE referred_user_id = $1
+    WHERE deposit_id = $1
     LIMIT 1
     `,
-    [deposit.user_id]
+    [deposit.id]
   );
 
-  if (rowCount > 0) return;
+  if (existing.rowCount > 0) return;
 
   const rewardCents = Math.floor(
     Number(deposit.amount_cents) * REWARD_PERCENT
@@ -59,6 +49,25 @@ const rewardReferral = async (client, depositId) => {
 
   if (rewardCents <= 0) return;
 
+  // Lock REFERRAL wallet
+  const walletRes = await client.query(
+    `
+    SELECT id
+    FROM wallets
+    WHERE user_id = $1
+      AND type = 'REFERRAL'
+    FOR UPDATE
+    `,
+    [referrerUserId]
+  );
+
+  if (!walletRes.rowCount) {
+    throw new Error('Referral wallet not found');
+  }
+
+  const referralWalletId = walletRes.rows[0].id;
+
+  // Record reward
   await client.query(
     `
     INSERT INTO referral_rewards (
@@ -69,38 +78,43 @@ const rewardReferral = async (client, depositId) => {
     )
     VALUES ($1, $2, $3, $4)
     `,
-    [referrerUserId, deposit.user_id, deposit.deposit_id, rewardCents]
+    [
+      referrerUserId,
+      deposit.user_id,
+      deposit.id,
+      rewardCents
+    ]
   );
 
-  const walletRes = await client.query(
+  // Credit REFERRAL wallet
+  await client.query(
     `
     UPDATE wallets
     SET balance_cents = balance_cents + $1
-    WHERE user_id = $2 AND type = 'REFERRAL'
-    `,
-    [rewardCents, referrerUserId]
-  );
-
-  if (walletRes.rowCount !== 1) {
-    throw new Error('Referral wallet not found');
-  }
-
-  await client.query(
-    `
-    UPDATE users
-    SET referral_earnings_cents = referral_earnings_cents + $1
     WHERE id = $2
     `,
-    [rewardCents, referrerUserId]
+    [rewardCents, referralWalletId]
   );
 
+  // Ledger entry
+  await client.query(
+    `
+    INSERT INTO wallet_ledger
+      (wallet_id, amount_cents, reason)
+    VALUES
+      ($1, $2, 'REFERRAL_REWARD')
+    `,
+    [referralWalletId, rewardCents]
+  );
+
+  // Mark deposit rewarded
   await client.query(
     `
     UPDATE deposits
     SET referral_rewarded = true
     WHERE id = $1
     `,
-    [deposit.deposit_id]
+    [deposit.id]
   );
 };
 
@@ -144,6 +158,7 @@ const confirmDeposit = async (req, res) => {
 
     await client.query('COMMIT');
     return res.json({ message: 'Deposit confirmed successfully' });
+
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
