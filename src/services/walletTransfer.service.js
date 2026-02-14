@@ -1,5 +1,3 @@
-// walletTransfer.service.js
-
 'use strict';
 
 const { pool } = require('../config/database');
@@ -18,9 +16,10 @@ async function transferToMainWallet({
       throw new Error('Invalid transfer amount');
     }
 
-    // 1️⃣ Lock user
+    // Lock user row
     const userRes = await client.query(
-      `SELECT id, referral_earnings_cents
+      `SELECT id,
+              COALESCE(referral_earnings_cents, 0) AS referral_earnings_cents
        FROM users
        WHERE id = $1
        FOR UPDATE`,
@@ -33,9 +32,9 @@ async function transferToMainWallet({
 
     const user = userRes.rows[0];
 
-    // 2️⃣ Determine source balance
+    // Deduct referral balance if source is REFERRAL
     if (source === 'REFERRAL') {
-      if (user.referral_earnings_cents < amountCents) {
+      if (Number(user.referral_earnings_cents) < amountCents) {
         throw new Error('Insufficient referral balance');
       }
 
@@ -47,12 +46,7 @@ async function transferToMainWallet({
       );
     }
 
-    if (source === 'BOT') {
-      // BOT transfers should already be validated by cycle settlement
-      // so nothing deducted here
-    }
-
-    // 3️⃣ Credit main wallet
+    // Lock REAL wallet
     const walletRes = await client.query(
       `SELECT id, balance_cents
        FROM wallets
@@ -68,6 +62,7 @@ async function transferToMainWallet({
 
     const wallet = walletRes.rows[0];
 
+    // Credit wallet
     await client.query(
       `UPDATE wallets
        SET balance_cents = balance_cents + $1
@@ -75,7 +70,7 @@ async function transferToMainWallet({
       [amountCents, wallet.id]
     );
 
-    // 4️⃣ Insert ledger entry
+    // Ledger entry
     await client.query(
       `INSERT INTO wallet_ledger
        (user_id, wallet_id, amount_cents, type, source, created_at)
@@ -87,7 +82,7 @@ async function transferToMainWallet({
 
     return {
       success: true,
-      transferred: amountCents
+      transferred_cents: amountCents
     };
 
   } catch (err) {
