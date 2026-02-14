@@ -126,7 +126,7 @@ async function transferProfits(req, res) {
 
       const user = userRes.rows[0];
 
-      if (Number(user.referral_earnings_cents) < amount_cents) {
+      if (Number(user.referral_earnings_cents || 0) < amount_cents) {
         throw new Error('Insufficient referral balance');
       }
 
