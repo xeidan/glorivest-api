@@ -4,18 +4,78 @@ const { pool } = require('../config/database');
 
 /**
  * Generate deterministic wallet code
- * Example: GV2-REAL, GV2-DEMO, GV2-REF
  */
 function makeWalletCode(userId, type) {
   return `GV${userId}-${type}`;
 }
 
 /**
- * Ensure user has REAL, DEMO, and REFERRAL wallets.
- * SAFE to call multiple times.
+ * 🔒 THE ONLY FUNCTION ALLOWED TO MUTATE MONEY
+ * All credits/debits must go through here.
  */
-async function ensureUserWallets(userId) {
-  await pool.query(
+async function applyWalletDelta(client, userId, type, deltaCents, reason) {
+  if (!Number.isInteger(deltaCents) || deltaCents === 0) {
+    throw new Error('Invalid wallet delta');
+  }
+
+  // 1️⃣ Lock wallet row
+  const { rows } = await client.query(
+    `
+    SELECT id, balance_cents
+    FROM wallets
+    WHERE user_id = $1
+      AND type = $2
+    FOR UPDATE
+    `,
+    [userId, type]
+  );
+
+  if (!rows.length) {
+    throw new Error(`${type} wallet not found`);
+  }
+
+  const wallet = rows[0];
+  const currentBalance = Number(wallet.balance_cents);
+  const newBalance = currentBalance + deltaCents;
+
+  if (newBalance < 0) {
+    throw new Error('Insufficient balance');
+  }
+
+  // 2️⃣ Insert ledger entry (authoritative)
+  await client.query(
+    `
+    INSERT INTO wallet_ledger
+      (wallet_id, amount_cents, reason, balance_after_cents)
+    VALUES ($1, $2, $3, $4)
+    `,
+    [
+      wallet.id,
+      deltaCents,
+      reason,
+      newBalance
+    ]
+  );
+
+  // 3️⃣ Update cached balance
+  await client.query(
+    `
+    UPDATE wallets
+    SET balance_cents = $1
+    WHERE id = $2
+    `,
+    [newBalance, wallet.id]
+  );
+
+  return newBalance;
+}
+
+/**
+ * Ensure REAL, DEMO, REFERRAL wallets exist.
+ * Safe to call inside transaction.
+ */
+async function ensureUserWallets(client, userId) {
+  await client.query(
     `
     INSERT INTO wallets (user_id, code, type, balance_cents, status)
     VALUES
@@ -26,51 +86,63 @@ async function ensureUserWallets(userId) {
     `,
     [
       userId,
-      `GV${userId}-REAL`,
-      `GV${userId}-DEMO`,
-      `GV${userId}-REF`
+      makeWalletCode(userId, 'REAL'),
+      makeWalletCode(userId, 'DEMO'),
+      makeWalletCode(userId, 'REFERRAL')
     ]
   );
 }
 
-
 /**
- * Reset demo wallet to $10,000
+ * Reset demo wallet to 1,000,000 cents
  */
-async function resetDemoWallet(userId, walletId) {
-  const { rowCount } = await pool.query(
+async function resetDemoWallet(client, userId) {
+  const { rows } = await client.query(
     `
-    UPDATE wallets
-    SET balance_cents = 1000000
-    WHERE id = $1
-      AND user_id = $2
+    SELECT balance_cents
+    FROM wallets
+    WHERE user_id = $1
       AND type = 'DEMO'
+    FOR UPDATE
     `,
-    [walletId, userId]
+    [userId]
   );
 
-  if (!rowCount) {
-    throw new Error('Invalid demo wallet');
+  if (!rows.length) {
+    throw new Error('Demo wallet not found');
   }
+
+  const current = Number(rows[0].balance_cents);
+  const target = 1000000;
+  const delta = target - current;
+
+  if (delta === 0) return target;
+
+  return applyWalletDelta(
+    client,
+    userId,
+    'DEMO',
+    delta,
+    'DEMO_RESET'
+  );
 }
 
 /**
  * Credit referral wallet
  */
-async function creditReferralWallet(userId, cents) {
-  await pool.query(
-    `
-    UPDATE wallets
-    SET balance_cents = balance_cents + $1
-    WHERE user_id = $2
-      AND type = 'REFERRAL'
-    `,
-    [cents, userId]
+async function creditReferralWallet(client, userId, cents) {
+  return applyWalletDelta(
+    client,
+    userId,
+    'REFERRAL',
+    cents,
+    'REFERRAL_REWARD'
   );
 }
 
 module.exports = {
   ensureUserWallets,
   resetDemoWallet,
-  creditReferralWallet
+  creditReferralWallet,
+  applyWalletDelta
 };
