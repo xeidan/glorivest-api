@@ -216,7 +216,7 @@ const verifyOtp = async (req, res) => {
     const user = userRows[0];
 
     // 4️⃣ Ensure wallets (REAL, DEMO, REFERRAL)
-    await ensureUserWallets(user.id);
+    await ensureUserWallets(clientuser.id);
 
     await client.query('COMMIT');
 

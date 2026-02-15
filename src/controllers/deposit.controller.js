@@ -1,32 +1,18 @@
 // src/controllers/deposit.controller.js
 'use strict';
 
-const depositService = require('../services/deposit.service');
+const { processSuccessfulDeposit } = require('../services/deposit.service');
 
-exports.createDepositReference = async (req, res) => {
+async function depositWebhook(req, res) {
   try {
-    const userId = req.user.id;
-    const { amount_usd } = req.body;
+    const { userId, amount_cents } = req.body;
 
-    const ref = await depositService.generateDepositReference(
-      userId,
-      amount_usd
-    );
+    await processSuccessfulDeposit(userId, amount_cents);
 
-    return res.json(ref);
+    res.json({ ok: true });
+
   } catch (err) {
-    console.error('createDepositReference error', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error(err);
+    res.status(500).json({ message: 'Deposit processing failed' });
   }
-};
-
-exports.checkDeposits = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const list = await depositService.getUserDeposits(userId);
-    return res.json(list);
-  } catch (err) {
-    console.error('checkDeposits error', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
+}

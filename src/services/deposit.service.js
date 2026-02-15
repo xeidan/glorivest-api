@@ -1,35 +1,39 @@
 'use strict';
 
-const { withTx } = require('../config/database');
-const { postTransaction } = require('./ledger.service');
-const crypto = require('crypto');
+const { pool } = require('../config/database');
+const { applyWalletDelta } = require('./wallet.service');
+const { processReferralReward } = require('./referralReward.service');
 
-// =========================
-// Create deposit reference
-// =========================
-exports.generateDepositReference = async (userId, accountId, amountUsd) => {
-  const amountCents = Math.round(Number(amountUsd) * 100);
-  if (!amountCents || amountCents <= 0) {
-    throw new Error('Invalid amount');
+async function processSuccessfulDeposit(userId, depositCents) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Credit user's REAL wallet
+    await applyWalletDelta(
+      client,
+      userId,
+      'REAL',
+      depositCents,
+      'DEPOSIT_SUCCESS'
+    );
+
+    // Credit referrer (if exists)
+    await processReferralReward(
+      client,
+      userId,
+      depositCents
+    );
+
+    await client.query('COMMIT');
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
+}
 
-  const reference = `DEP_${crypto.randomUUID()}`;
-
-  return withTx(async (c) => {
-    // ensure account exists + belongs to user
-    const q = await c.query(
-      `SELECT id FROM accounts WHERE id=$1 AND user_id=$2`,
-      [accountId, userId]
-    );
-    if (!q.rows.length) throw new Error('Account not found');
-
-    const { rows: [dep] } = await c.query(
-      `INSERT INTO deposits (user_id, account_id, amount_cents, reference, status)
-       VALUES ($1,$2,$3,$4,'pending')
-       RETURNING *`,
-      [userId, accountId, amountCents, reference]
-    );
-
-    return dep;
-  });
-};
+module.exports = { processSuccessfulDeposit };

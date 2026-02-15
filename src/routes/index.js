@@ -19,6 +19,6 @@ router.use('/cycle', require('./cycle.routes'));
 router.use('/transfer', require('./transfer.routes'));
 router.use('/performance', require('./performance.routes'));
 router.use('/leaderboard', require('./leaderboard.routes'));
-
+router.use('/admin', require('./admin.routes'));
 
 module.exports = router;
