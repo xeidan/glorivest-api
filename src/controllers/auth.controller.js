@@ -206,7 +206,10 @@ const verifyOtp = async (req, res) => {
         normalizedEmail,
         meta.password_hash,
         referralCode,
-        meta.referred_by ?? null // ✅ BIGINT OR NULL ONLY
+        meta.referred_by
+  ? Number(meta.referred_by)
+  : null
+// ✅ BIGINT OR NULL ONLY
       ]
     );
 
