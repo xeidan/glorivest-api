@@ -3,18 +3,16 @@
 const { transferToMainWallet } = require('../services/walletTransfer.service');
 
 async function transferProfits(req, res) {
-  console.log('REFERRAL TRANSFER DEBUG:', {
-  userId,
-  amount_cents,
-});
-console.log('Referral wallet before debit:', referralWallet);
-
   try {
     const userId = req.user.id;
     const { amount_cents, source } = req.body || {};
 
     if (!source) {
       return res.status(400).json({ error: 'Source required' });
+    }
+
+    if (!Number.isInteger(Number(amount_cents)) || Number(amount_cents) <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
     }
 
     const result = await transferToMainWallet({
