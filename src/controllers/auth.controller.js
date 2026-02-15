@@ -247,13 +247,6 @@ const verifyOtp = async (req, res) => {
 // -----------------------------
 const login = async (req, res) => {
   try {
-    // 🔍 HARD GUARD — this catches bad JSON early
-    if (!req.body || typeof req.body !== 'object') {
-      return res.status(400).json({
-        message: 'Invalid request body'
-      });
-    }
-
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -263,10 +256,14 @@ const login = async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT id, email, password_hash
-       FROM users
-       WHERE email = $1
-       LIMIT 1`,
+      `
+      SELECT id, email, password_hash,
+             failed_login_attempts,
+             account_locked_until
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+      `,
       [email.toLowerCase()]
     );
 
@@ -276,30 +273,63 @@ const login = async (req, res) => {
 
     const user = rows[0];
 
+    // 🔒 Check if locked
+    if (
+      user.account_locked_until &&
+      new Date(user.account_locked_until) > new Date()
+    ) {
+      return res.status(403).json({
+        message: 'Account temporarily locked. Try again later.'
+      });
+    }
+
     const match = await bcrypt.compare(password, user.password_hash);
+
     if (!match) {
+
+      const newAttempts = user.failed_login_attempts + 1;
+
+      // Lock after 5 failed attempts
+      if (newAttempts >= 5) {
+        await pool.query(
+          `
+          UPDATE users
+          SET failed_login_attempts = 0,
+              account_locked_until = NOW() + INTERVAL '15 minutes'
+          WHERE id = $1
+          `,
+          [user.id]
+        );
+
+        return res.status(403).json({
+          message: 'Too many failed attempts. Account locked for 15 minutes.'
+        });
+      }
+
+      await pool.query(
+        `
+        UPDATE users
+        SET failed_login_attempts = $1
+        WHERE id = $2
+        `,
+        [newAttempts, user.id]
+      );
+
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // -----------------------------
-    // DEVICE LOGGING (SAFE)
-    // -----------------------------
-    const userAgent = req.headers['user-agent'] || 'unknown';
-    const ip =
-      req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-      req.ip ||
-      'unknown';
+    // ✅ Reset attempts on success
+    await pool.query(
+      `
+      UPDATE users
+      SET failed_login_attempts = 0,
+          account_locked_until = NULL
+      WHERE id = $1
+      `,
+      [user.id]
+    );
 
-    try {
-      await logDevice(user.id, userAgent, ip);
-    } catch (e) {
-      console.warn('Device log failed:', e.message);
-    }
-
-    // Ensure user has wallets// Ensure wallets always exist
-    await ensureUserWallets(user.id);
-
-    const token = signToken({ id: user.id, email: user.email });
+    const token = signToken(user);
 
     return res.json({
       token,
@@ -311,13 +341,11 @@ const login = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('LOGIN ERROR FULL:', err);
-
-    return res.status(500).json({
-      message: 'Server error'
-    });
+    console.error('LOGIN ERROR:', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 
 
