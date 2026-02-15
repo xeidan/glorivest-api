@@ -1,14 +1,11 @@
 'use strict';
 
 const express = require('express');
-const { transferProfits } = require('../controllers/transfer.controller');
-const { transferLimiter } = require('../middleware/rateLimit');
-
-const requireAuth = require('../middleware/auth');
-
 const router = express.Router();
 
-router.post('/profits', requireAuth, transferLimiter, transferProfits);
+const requireAuth = require('../middleware/auth');
+const { transferProfits } = require('../controllers/transfer.controller');
 
+router.post('/profits', requireAuth, transferProfits);
 
 module.exports = router;
