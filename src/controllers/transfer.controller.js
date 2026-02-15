@@ -7,6 +7,7 @@ async function transferProfits(req, res) {
   userId,
   amount_cents,
 });
+console.log('Referral wallet before debit:', referralWallet);
 
   try {
     const userId = req.user.id;
