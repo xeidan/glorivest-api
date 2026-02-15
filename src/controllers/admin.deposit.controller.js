@@ -5,6 +5,7 @@ const db = require('../db');
 const REWARD_PERCENT = 0.05;
 
 const rewardReferral = async (client, depositId) => {
+
   const { rows } = await client.query(
     `
     SELECT
@@ -30,7 +31,6 @@ const rewardReferral = async (client, depositId) => {
 
   const referrerUserId = deposit.referred_by;
 
-  // Prevent double reward
   const existing = await client.query(
     `
     SELECT 1
@@ -49,10 +49,10 @@ const rewardReferral = async (client, depositId) => {
 
   if (rewardCents <= 0) return;
 
-  // Lock REFERRAL wallet
+  // Lock referral wallet
   const walletRes = await client.query(
     `
-    SELECT id
+    SELECT id, balance_cents
     FROM wallets
     WHERE user_id = $1
       AND type = 'REFERRAL'
@@ -65,9 +65,11 @@ const rewardReferral = async (client, depositId) => {
     throw new Error('Referral wallet not found');
   }
 
-  const referralWalletId = walletRes.rows[0].id;
+  const referralWallet = walletRes.rows[0];
+  const newBalance =
+    Number(referralWallet.balance_cents) + rewardCents;
 
-  // Record reward entry
+  // Record reward row
   await client.query(
     `
     INSERT INTO referral_rewards (
@@ -86,26 +88,7 @@ const rewardReferral = async (client, depositId) => {
     ]
   );
 
-  /* ---------- Credit REFERRAL wallet ---------- */
-
-  await client.query(
-    `
-    UPDATE wallets
-    SET balance_cents = balance_cents + $1
-    WHERE id = $2
-    `,
-    [rewardCents, referralWalletId]
-  );
-
-  // Fetch updated balance
-  const updated = await client.query(
-    `SELECT balance_cents FROM wallets WHERE id = $1`,
-    [referralWalletId]
-  );
-
-  const newBalance = Number(updated.rows[0].balance_cents);
-
-  // Ledger entry with balance_after_cents
+  // Ledger credit (trigger updates wallet)
   await client.query(
     `
     INSERT INTO wallet_ledger
@@ -113,10 +96,13 @@ const rewardReferral = async (client, depositId) => {
     VALUES
       ($1, $2, 'REFERRAL_REWARD', $3)
     `,
-    [referralWalletId, rewardCents, newBalance]
+    [
+      referralWallet.id,
+      rewardCents,
+      newBalance
+    ]
   );
 
-  // Mark deposit rewarded
   await client.query(
     `
     UPDATE deposits
@@ -166,11 +152,11 @@ const confirmDeposit = async (req, res) => {
     await rewardReferral(client, depositId);
 
     await client.query('COMMIT');
+
     return res.json({ message: 'Deposit confirmed successfully' });
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
     return res.status(500).json({ message: 'Failed to confirm deposit' });
   } finally {
     client.release();

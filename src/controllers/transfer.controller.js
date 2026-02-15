@@ -29,10 +29,7 @@ async function transferProfits(req, res) {
 
       if (!cycles.length) {
         await client.query('ROLLBACK');
-        return res.json({
-          transferred: 0,
-          message: 'No profits available'
-        });
+        return res.json({ transferred: 0 });
       }
 
       const totalProfit = cycles.reduce(
@@ -40,9 +37,9 @@ async function transferProfits(req, res) {
         0
       );
 
-      const walletRes = await client.query(
+      const { rows } = await client.query(
         `
-        SELECT id
+        SELECT id, balance_cents
         FROM wallets
         WHERE user_id = $1
           AND type = 'REAL'
@@ -51,31 +48,15 @@ async function transferProfits(req, res) {
         [userId]
       );
 
-      if (!walletRes.rowCount) {
+      if (!rows.length) {
         throw new Error('REAL wallet not found');
       }
 
-      const realWalletId = walletRes.rows[0].id;
+      const wallet = rows[0];
+      const newBalance =
+        Number(wallet.balance_cents) + totalProfit;
 
-      // Update wallet
-      await client.query(
-        `
-        UPDATE wallets
-        SET balance_cents = balance_cents + $1
-        WHERE id = $2
-        `,
-        [totalProfit, realWalletId]
-      );
-
-      // Fetch new balance
-      const updated = await client.query(
-        `SELECT balance_cents FROM wallets WHERE id = $1`,
-        [realWalletId]
-      );
-
-      const newBalance = Number(updated.rows[0].balance_cents);
-
-      // Ledger entry
+      // Ledger insert (wallet auto-updated by trigger)
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -83,7 +64,7 @@ async function transferProfits(req, res) {
         VALUES
           ($1, $2, 'PROFIT_TRANSFER', $3)
         `,
-        [realWalletId, totalProfit, newBalance]
+        [wallet.id, totalProfit, newBalance]
       );
 
       await client.query(
@@ -104,17 +85,15 @@ async function transferProfits(req, res) {
     }
 
     /* =========================================================
-       REFERRAL WALLET TRANSFER
+       REFERRAL TRANSFER
     ========================================================= */
     if (source === 'REFERRAL') {
 
       if (!Number.isInteger(amount_cents) || amount_cents <= 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: 'Invalid transfer amount'
-        });
+        throw new Error('Invalid amount');
       }
 
+      // Lock REFERRAL wallet
       const referralRes = await client.query(
         `
         SELECT id, balance_cents
@@ -133,48 +112,13 @@ async function transferProfits(req, res) {
       const referralWallet = referralRes.rows[0];
 
       if (Number(referralWallet.balance_cents) < amount_cents) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: 'Insufficient referral balance'
-        });
+        throw new Error('Insufficient referral balance');
       }
-
-      const realRes = await client.query(
-        `
-        SELECT id
-        FROM wallets
-        WHERE user_id = $1
-          AND type = 'REAL'
-        FOR UPDATE
-        `,
-        [userId]
-      );
-
-      if (!realRes.rowCount) {
-        throw new Error('REAL wallet not found');
-      }
-
-      const realWalletId = realRes.rows[0].id;
-
-      /* ---------- Debit REFERRAL wallet ---------- */
-
-      await client.query(
-        `
-        UPDATE wallets
-        SET balance_cents = balance_cents - $1
-        WHERE id = $2
-        `,
-        [amount_cents, referralWallet.id]
-      );
-
-      const referralUpdated = await client.query(
-        `SELECT balance_cents FROM wallets WHERE id = $1`,
-        [referralWallet.id]
-      );
 
       const referralNewBalance =
-        Number(referralUpdated.rows[0].balance_cents);
+        Number(referralWallet.balance_cents) - amount_cents;
 
+      // Debit referral wallet via ledger
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -189,25 +133,27 @@ async function transferProfits(req, res) {
         ]
       );
 
-      /* ---------- Credit REAL wallet ---------- */
-
-      await client.query(
+      // Lock REAL wallet
+      const realRes = await client.query(
         `
-        UPDATE wallets
-        SET balance_cents = balance_cents + $1
-        WHERE id = $2
+        SELECT id, balance_cents
+        FROM wallets
+        WHERE user_id = $1
+          AND type = 'REAL'
+        FOR UPDATE
         `,
-        [amount_cents, realWalletId]
+        [userId]
       );
 
-      const realUpdated = await client.query(
-        `SELECT balance_cents FROM wallets WHERE id = $1`,
-        [realWalletId]
-      );
+      if (!realRes.rowCount) {
+        throw new Error('REAL wallet not found');
+      }
 
+      const realWallet = realRes.rows[0];
       const realNewBalance =
-        Number(realUpdated.rows[0].balance_cents);
+        Number(realWallet.balance_cents) + amount_cents;
 
+      // Credit REAL wallet via ledger
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -216,7 +162,7 @@ async function transferProfits(req, res) {
           ($1, $2, 'REFERRAL_TRANSFER', $3)
         `,
         [
-          realWalletId,
+          realWallet.id,
           amount_cents,
           realNewBalance
         ]
@@ -230,15 +176,11 @@ async function transferProfits(req, res) {
       });
     }
 
-    await client.query('ROLLBACK');
-    return res.status(400).json({
-      error: 'Invalid transfer source'
-    });
+    throw new Error('Invalid source');
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
-    return res.status(500).json({ error: 'Transfer failed' });
+    return res.status(400).json({ error: err.message });
   } finally {
     client.release();
   }
