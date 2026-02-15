@@ -6,17 +6,18 @@ const express = require('express');
 const router = express.Router();
 
 const requireAuth = require('../middleware/auth');
+const { authLimiter, otpLimiter } = require('../middleware/rateLimit');
 const authCtrl = require('../controllers/auth.controller');
 
 // -----------------------------
-// PUBLIC ROUTES
+// PUBLIC ROUTES (Rate Limited)
 // -----------------------------
-router.post('/register', authCtrl.register);
-router.post('/login', authCtrl.login);
+router.post('/register', authLimiter, authCtrl.register);
+router.post('/login', authLimiter, authCtrl.login);
 
-router.post('/send-otp', authCtrl.sendOtp);
-router.post('/verify-otp', authCtrl.verifyOtp);
-router.post('/reset-password', authCtrl.resetPassword);
+router.post('/send-otp', otpLimiter, authCtrl.sendOtp);
+router.post('/verify-otp', authLimiter, authCtrl.verifyOtp);
+router.post('/reset-password', authLimiter, authCtrl.resetPassword);
 
 // -----------------------------
 // AUTHENTICATED ROUTES
@@ -24,10 +25,9 @@ router.post('/reset-password', authCtrl.resetPassword);
 router.get('/me', requireAuth, authCtrl.me);
 router.get('/devices', requireAuth, authCtrl.getDeviceHistory);
 
-router.post('/change-password', requireAuth, authCtrl.changePassword);
-router.post('/update-email/request', requireAuth, authCtrl.requestEmailUpdate);
-router.post('/update-email/confirm', requireAuth, authCtrl.confirmEmailUpdate);
-router.post('/delete-account', requireAuth, authCtrl.deleteAccount);
-
+router.post('/change-password', requireAuth, authLimiter, authCtrl.changePassword);
+router.post('/update-email/request', requireAuth, otpLimiter, authCtrl.requestEmailUpdate);
+router.post('/update-email/confirm', requireAuth, authLimiter, authCtrl.confirmEmailUpdate);
+router.post('/delete-account', requireAuth, authLimiter, authCtrl.deleteAccount);
 
 module.exports = router;
