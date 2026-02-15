@@ -11,12 +11,6 @@ async function transferProfits(req, res) {
       return res.status(400).json({ error: 'Source required' });
     }
 
-    if (source === 'BOT') {
-      return res.status(400).json({
-        error: 'BOT transfer must use cycle settlement'
-      });
-    }
-
     const result = await transferToMainWallet({
       userId,
       amountCents: Number(amount_cents),
@@ -28,7 +22,7 @@ async function transferProfits(req, res) {
     });
 
   } catch (err) {
-    console.error(err);
+    console.error('Transfer error:', err);
     return res.status(400).json({
       error: err.message || 'Transfer failed'
     });
