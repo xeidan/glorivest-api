@@ -2,6 +2,23 @@
 
 const { pool } = require('../config/database');
 
+async function getLastLedgerBalance(client, walletId) {
+  const { rows } = await client.query(
+    `
+    SELECT balance_after_cents
+    FROM wallet_ledger
+    WHERE wallet_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    [walletId]
+  );
+
+  if (!rows.length) return 0;
+
+  return Number(rows[0].balance_after_cents);
+}
+
 async function transferToMainWallet({
   userId,
   amountCents,
@@ -16,12 +33,12 @@ async function transferToMainWallet({
       throw new Error('Invalid transfer amount');
     }
 
-    /* =========================================================
-       LOCK REAL WALLET
-    ========================================================= */
+    // ===============================
+    // LOCK REAL WALLET
+    // ===============================
     const realRes = await client.query(
       `
-      SELECT id, balance_cents
+      SELECT id
       FROM wallets
       WHERE user_id = $1
         AND type = 'REAL'
@@ -34,16 +51,16 @@ async function transferToMainWallet({
       throw new Error('Main wallet not found');
     }
 
-    const realWallet = realRes.rows[0];
+    const realWalletId = realRes.rows[0].id;
 
-    /* =========================================================
-       REFERRAL FLOW
-    ========================================================= */
+    // ===============================
+    // REFERRAL FLOW
+    // ===============================
     if (source === 'REFERRAL') {
 
       const referralRes = await client.query(
         `
-        SELECT id, balance_cents
+        SELECT id
         FROM wallets
         WHERE user_id = $1
           AND type = 'REFERRAL'
@@ -56,26 +73,19 @@ async function transferToMainWallet({
         throw new Error('Referral wallet not found');
       }
 
-      const referralWallet = referralRes.rows[0];
+      const referralWalletId = referralRes.rows[0].id;
 
-      if (Number(referralWallet.balance_cents) < amountCents) {
+      const referralCurrentBalance =
+        await getLastLedgerBalance(client, referralWalletId);
+
+      if (referralCurrentBalance < amountCents) {
         throw new Error('Insufficient referral balance');
       }
 
       const referralNewBalance =
-        Number(referralWallet.balance_cents) - amountCents;
+        referralCurrentBalance - amountCents;
 
-      // UPDATE referral wallet table
-      await client.query(
-        `
-        UPDATE wallets
-        SET balance_cents = $1
-        WHERE id = $2
-        `,
-        [referralNewBalance, referralWallet.id]
-      );
-
-      // Ledger debit
+      // 1️⃣ Insert debit into ledger FIRST
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -84,30 +94,33 @@ async function transferToMainWallet({
           ($1, $2, 'REFERRAL_DEBIT', $3)
         `,
         [
-          referralWallet.id,
+          referralWalletId,
           -amountCents,
           referralNewBalance
         ]
       );
+
+      // 2️⃣ Update cached wallet balance
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = $1
+        WHERE id = $2
+        `,
+        [referralNewBalance, referralWalletId]
+      );
     }
 
-    /* =========================================================
-       CREDIT REAL WALLET
-    ========================================================= */
+    // ===============================
+    // CREDIT REAL WALLET
+    // ===============================
+    const realCurrentBalance =
+      await getLastLedgerBalance(client, realWalletId);
+
     const realNewBalance =
-      Number(realWallet.balance_cents) + amountCents;
+      realCurrentBalance + amountCents;
 
-    // UPDATE real wallet table
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = $1
-      WHERE id = $2
-      `,
-      [realNewBalance, realWallet.id]
-    );
-
-    // Ledger credit
+    // 1️⃣ Insert credit into ledger FIRST
     await client.query(
       `
       INSERT INTO wallet_ledger
@@ -116,13 +129,23 @@ async function transferToMainWallet({
         ($1, $2, $3, $4)
       `,
       [
-        realWallet.id,
+        realWalletId,
         amountCents,
         source === 'REFERRAL'
           ? 'REFERRAL_TRANSFER'
           : 'BOT_TRANSFER',
         realNewBalance
       ]
+    );
+
+    // 2️⃣ Update cached wallet balance
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = $1
+      WHERE id = $2
+      `,
+      [realNewBalance, realWalletId]
     );
 
     await client.query('COMMIT');
