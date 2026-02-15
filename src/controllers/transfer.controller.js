@@ -3,8 +3,7 @@
 const { transferToMainWallet } = require('../services/walletTransfer.service');
 
 async function transferProfits(req, res) {
-  throw new Error('TEST_CONTROLLER_EXECUTION');
-
+  
   try {
     const userId = req.user.id;
     const { amount_cents, source } = req.body || {};
