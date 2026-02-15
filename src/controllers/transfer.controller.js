@@ -3,7 +3,11 @@
 const { transferToMainWallet } = require('../services/walletTransfer.service');
 
 async function transferProfits(req, res) {
-  
+  console.log('REFERRAL TRANSFER DEBUG:', {
+  userId,
+  amount_cents,
+});
+
   try {
     const userId = req.user.id;
     const { amount_cents, source } = req.body || {};
