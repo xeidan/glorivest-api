@@ -110,7 +110,8 @@ const register = async (req, res) => {
         code,
         JSON.stringify({
           password_hash: hash,
-          referred_by: referredBy // ✅ stored safely for verification step
+          referred_by: referredBy ? Number(referredBy) : null
+ // ✅ stored safely for verification step
         })
       ]
     );
