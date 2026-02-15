@@ -65,7 +65,17 @@ async function transferToMainWallet({
       const referralNewBalance =
         Number(referralWallet.balance_cents) - amountCents;
 
-      // Ledger: debit referral
+      // UPDATE referral wallet table
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = $1
+        WHERE id = $2
+        `,
+        [referralNewBalance, referralWallet.id]
+      );
+
+      // Ledger debit
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -87,6 +97,17 @@ async function transferToMainWallet({
     const realNewBalance =
       Number(realWallet.balance_cents) + amountCents;
 
+    // UPDATE real wallet table
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = $1
+      WHERE id = $2
+      `,
+      [realNewBalance, realWallet.id]
+    );
+
+    // Ledger credit
     await client.query(
       `
       INSERT INTO wallet_ledger
