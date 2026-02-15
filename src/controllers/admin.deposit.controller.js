@@ -27,6 +27,25 @@ const rewardReferral = async (client, depositId) => {
   const deposit = rows[0];
 
   if (deposit.status !== 'SUCCESS') return;
+  // Only reward first successful deposit
+const firstCheck = await client.query(
+  `
+  SELECT COUNT(*)::int AS count
+  FROM deposits
+  WHERE user_id = $1
+    AND status = 'SUCCESS'
+  `,
+  [deposit.user_id]
+);
+
+if (firstCheck.rows[0].count > 1) {
+  return;
+}
+if (Number(deposit.amount_cents) < 10000) {
+  return;
+}
+
+
   if (!deposit.referred_by) return;
 
   const referrerUserId = deposit.referred_by;
