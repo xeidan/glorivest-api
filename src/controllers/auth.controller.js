@@ -164,7 +164,7 @@ const verifyOtp = async (req, res) => {
         AND code = $2
         AND purpose = $3
         AND used = false
-        AND expires_at > now()
+        AND expires_at > NOW()
       LIMIT 1
       `,
       [normalizedEmail, code, purpose]
@@ -179,7 +179,8 @@ const verifyOtp = async (req, res) => {
     const meta = otp.meta || {};
 
     if (!meta.password_hash) {
-      throw new Error('OTP meta missing password hash');
+      await client.query('ROLLBACK');
+      return res.status(500).json({ message: 'OTP corrupted' });
     }
 
     // 2️⃣ Mark OTP as used
@@ -188,8 +189,13 @@ const verifyOtp = async (req, res) => {
       [otp.id]
     );
 
-    // 3️⃣ Create user (THIS WAS MISSING)
+    // 3️⃣ Create user
     const referralCode = generateReferralCode();
+
+    const referredBy =
+      meta.referred_by && Number.isInteger(Number(meta.referred_by))
+        ? Number(meta.referred_by)
+        : null;
 
     const { rows: userRows } = await client.query(
       `
@@ -206,17 +212,18 @@ const verifyOtp = async (req, res) => {
         normalizedEmail,
         meta.password_hash,
         referralCode,
-        meta.referred_by
-  ? Number(meta.referred_by)
-  : null
-// ✅ BIGINT OR NULL ONLY
+        referredBy
       ]
     );
 
+    if (!userRows.length) {
+      throw new Error('User creation failed');
+    }
+
     const user = userRows[0];
 
-    // 4️⃣ Ensure wallets (REAL, DEMO, REFERRAL)
-    await ensureUserWallets(clientuser.id);
+    // 4️⃣ Create wallets INSIDE SAME TRANSACTION
+    await ensureUserWallets(client, user.id);
 
     await client.query('COMMIT');
 
@@ -241,6 +248,7 @@ const verifyOtp = async (req, res) => {
     client.release();
   }
 };
+
 
 
 
