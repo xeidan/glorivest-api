@@ -67,7 +67,7 @@ const rewardReferral = async (client, depositId) => {
 
   const referralWalletId = walletRes.rows[0].id;
 
-  // Record reward
+  // Record reward entry
   await client.query(
     `
     INSERT INTO referral_rewards (
@@ -86,7 +86,8 @@ const rewardReferral = async (client, depositId) => {
     ]
   );
 
-  // Credit REFERRAL wallet
+  /* ---------- Credit REFERRAL wallet ---------- */
+
   await client.query(
     `
     UPDATE wallets
@@ -96,15 +97,23 @@ const rewardReferral = async (client, depositId) => {
     [rewardCents, referralWalletId]
   );
 
-  // Ledger entry
+  // Fetch updated balance
+  const updated = await client.query(
+    `SELECT balance_cents FROM wallets WHERE id = $1`,
+    [referralWalletId]
+  );
+
+  const newBalance = Number(updated.rows[0].balance_cents);
+
+  // Ledger entry with balance_after_cents
   await client.query(
     `
     INSERT INTO wallet_ledger
-      (wallet_id, amount_cents, reason)
+      (wallet_id, amount_cents, reason, balance_after_cents)
     VALUES
-      ($1, $2, 'REFERRAL_REWARD')
+      ($1, $2, 'REFERRAL_REWARD', $3)
     `,
-    [referralWalletId, rewardCents]
+    [referralWalletId, rewardCents, newBalance]
   );
 
   // Mark deposit rewarded

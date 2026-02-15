@@ -16,7 +16,9 @@ async function transferToMainWallet({
       throw new Error('Invalid transfer amount');
     }
 
-    // Lock REAL wallet
+    /* =========================================================
+       LOCK REAL WALLET
+    ========================================================= */
     const realRes = await client.query(
       `
       SELECT id
@@ -34,9 +36,11 @@ async function transferToMainWallet({
 
     const realWalletId = realRes.rows[0].id;
 
+    /* =========================================================
+       REFERRAL FLOW (IF APPLICABLE)
+    ========================================================= */
     if (source === 'REFERRAL') {
 
-      // Lock REFERRAL wallet
       const referralRes = await client.query(
         `
         SELECT id, balance_cents
@@ -58,7 +62,8 @@ async function transferToMainWallet({
         throw new Error('Insufficient referral balance');
       }
 
-      // Debit REFERRAL wallet
+      /* ---------- Debit REFERRAL wallet ---------- */
+
       await client.query(
         `
         UPDATE wallets
@@ -68,18 +73,33 @@ async function transferToMainWallet({
         [amountCents, referralWallet.id]
       );
 
+      const referralUpdated = await client.query(
+        `SELECT balance_cents FROM wallets WHERE id = $1`,
+        [referralWallet.id]
+      );
+
+      const referralNewBalance =
+        Number(referralUpdated.rows[0].balance_cents);
+
       await client.query(
         `
         INSERT INTO wallet_ledger
-          (wallet_id, amount_cents, reason)
+          (wallet_id, amount_cents, reason, balance_after_cents)
         VALUES
-          ($1, $2, 'REFERRAL_DEBIT')
+          ($1, $2, 'REFERRAL_DEBIT', $3)
         `,
-        [referralWallet.id, -amountCents]
+        [
+          referralWallet.id,
+          -amountCents,
+          referralNewBalance
+        ]
       );
     }
 
-    // Credit REAL wallet
+    /* =========================================================
+       CREDIT REAL WALLET
+    ========================================================= */
+
     await client.query(
       `
       UPDATE wallets
@@ -89,19 +109,28 @@ async function transferToMainWallet({
       [amountCents, realWalletId]
     );
 
+    const realUpdated = await client.query(
+      `SELECT balance_cents FROM wallets WHERE id = $1`,
+      [realWalletId]
+    );
+
+    const realNewBalance =
+      Number(realUpdated.rows[0].balance_cents);
+
     await client.query(
       `
       INSERT INTO wallet_ledger
-        (wallet_id, amount_cents, reason)
+        (wallet_id, amount_cents, reason, balance_after_cents)
       VALUES
-        ($1, $2, $3)
+        ($1, $2, $3, $4)
       `,
       [
         realWalletId,
         amountCents,
         source === 'REFERRAL'
           ? 'REFERRAL_TRANSFER'
-          : 'BOT_TRANSFER'
+          : 'BOT_TRANSFER',
+        realNewBalance
       ]
     );
 
@@ -109,7 +138,8 @@ async function transferToMainWallet({
 
     return {
       success: true,
-      transferred_cents: amountCents
+      transferred_cents: amountCents,
+      new_balance: realNewBalance
     };
 
   } catch (err) {
