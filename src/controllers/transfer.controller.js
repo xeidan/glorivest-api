@@ -56,7 +56,8 @@ async function transferProfits(req, res) {
       const newBalance =
         Number(wallet.balance_cents) + totalProfit;
 
-      // Ledger insert (wallet auto-updated by trigger)
+      /* ---------- Single Ledger (existing) ---------- */
+
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -66,6 +67,30 @@ async function transferProfits(req, res) {
         `,
         [wallet.id, totalProfit, newBalance]
       );
+
+      /* ---------- Double Entry ---------- */
+
+      const tx = await client.query(
+        `
+        INSERT INTO financial_transactions (reference, description)
+        VALUES ($1, $2)
+        RETURNING id
+        `,
+        ['BOT_TRANSFER', 'Bot profit transfer']
+      );
+
+      const txId = tx.rows[0].id;
+
+      await client.query(
+        `
+        INSERT INTO financial_entries
+          (transaction_id, wallet_id, direction, amount_cents)
+        VALUES ($1, $2, 'CREDIT', $3)
+        `,
+        [txId, wallet.id, totalProfit]
+      );
+
+      /* ---------- Zero out cycle profits ---------- */
 
       await client.query(
         `
@@ -93,7 +118,8 @@ async function transferProfits(req, res) {
         throw new Error('Invalid amount');
       }
 
-      // Lock REFERRAL wallet
+      /* ---------- Lock REFERRAL wallet ---------- */
+
       const referralRes = await client.query(
         `
         SELECT id, balance_cents
@@ -118,7 +144,8 @@ async function transferProfits(req, res) {
       const referralNewBalance =
         Number(referralWallet.balance_cents) - amount_cents;
 
-      // Debit referral wallet via ledger
+      /* ---------- Single Ledger: Referral Debit ---------- */
+
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -133,7 +160,8 @@ async function transferProfits(req, res) {
         ]
       );
 
-      // Lock REAL wallet
+      /* ---------- Lock REAL wallet ---------- */
+
       const realRes = await client.query(
         `
         SELECT id, balance_cents
@@ -150,10 +178,12 @@ async function transferProfits(req, res) {
       }
 
       const realWallet = realRes.rows[0];
+
       const realNewBalance =
         Number(realWallet.balance_cents) + amount_cents;
 
-      // Credit REAL wallet via ledger
+      /* ---------- Single Ledger: Real Credit ---------- */
+
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -166,6 +196,39 @@ async function transferProfits(req, res) {
           amount_cents,
           realNewBalance
         ]
+      );
+
+      /* ---------- Double Entry ---------- */
+
+      const tx = await client.query(
+        `
+        INSERT INTO financial_transactions (reference, description)
+        VALUES ($1, $2)
+        RETURNING id
+        `,
+        ['REFERRAL_TRANSFER', 'Referral to main wallet transfer']
+      );
+
+      const txId = tx.rows[0].id;
+
+      // Debit referral
+      await client.query(
+        `
+        INSERT INTO financial_entries
+          (transaction_id, wallet_id, direction, amount_cents)
+        VALUES ($1, $2, 'DEBIT', $3)
+        `,
+        [txId, referralWallet.id, amount_cents]
+      );
+
+      // Credit real
+      await client.query(
+        `
+        INSERT INTO financial_entries
+          (transaction_id, wallet_id, direction, amount_cents)
+        VALUES ($1, $2, 'CREDIT', $3)
+        `,
+        [txId, realWallet.id, amount_cents]
       );
 
       await client.query('COMMIT');
