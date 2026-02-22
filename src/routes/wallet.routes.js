@@ -3,12 +3,11 @@
 const express = require('express');
 const router = express.Router();
 
-const auth = require('../middleware/auth');
-const walletController = require('../controllers/wallet.controller');
+const requireAuth = require('../middleware/auth');
+const { getWallets, resetDemoWalletController, transferReferralToReal } = require('../controllers/wallet.controller');
 
-router.get('/', auth, walletController.getWallets);
-router.post('/:id/demo-reset', auth, walletController.resetDemoWallet);
-router.post('/referral-transfer', auth, walletController.transferReferralToReal);
-
+router.get('/', requireAuth, getWallets);
+router.post('/:id/demo-reset', requireAuth, resetDemoWalletController);
+router.post('/referral-transfer', requireAuth, transferReferralToReal);
 
 module.exports = router;

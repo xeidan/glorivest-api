@@ -151,6 +151,6 @@ const transferReferralToReal = async (req, res) => {
 
 module.exports = {
   getWallets,
-  resetDemoWallet,
+  resetDemoWalletController,
   transferReferralToReal
 };
