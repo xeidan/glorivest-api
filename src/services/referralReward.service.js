@@ -29,7 +29,7 @@ async function processReferralReward(client, userId, depositCents) {
     referrerId,
     'REFERRAL',
     reward,
-    'REFERRAL_DEPOSIT_REWARD'
+    'REFERRAL_REWARD'
   );
 }
 
