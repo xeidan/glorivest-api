@@ -1,24 +1,13 @@
 // src/routes/deposit.routes.js
-const router = require('express').Router();
+'use strict';
 
-const auth = require('../middleware/auth');
-const loadAccount = require('../middleware/loadAccount');
-const { requireLiveAccount } = require('../middleware/accountGuards');
+const express = require('express');
+const router = express.Router();
 
-const depositController = require('../controllers/deposit.controller');
+const { depositWebhook } = require('../controllers/deposit.controller');
 
-router.post(
-  '/',
-  auth,
-  loadAccount,
-  requireLiveAccount,
-  depositController.createDepositReference
-);
-
-router.get(
-  '/',
-  auth,
-  depositController.checkDeposits
-);
+// Webhook endpoint
+router.post('/webhook', depositWebhook);
 
 module.exports = router;
+
