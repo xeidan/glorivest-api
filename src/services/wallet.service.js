@@ -18,10 +18,10 @@ async function applyWalletDelta(client, userId, type, deltaCents, reason) {
     throw new Error('Invalid wallet delta');
   }
 
-  // 1️⃣ Lock wallet row
+  // 1️⃣ Lock wallet
   const { rows } = await client.query(
     `
-    SELECT id, balance_cents
+    SELECT id
     FROM wallets
     WHERE user_id = $1
       AND type = $2
@@ -34,15 +34,31 @@ async function applyWalletDelta(client, userId, type, deltaCents, reason) {
     throw new Error(`${type} wallet not found`);
   }
 
-  const wallet = rows[0];
-  const currentBalance = Number(wallet.balance_cents);
+  const walletId = rows[0].id;
+
+  // 2️⃣ Get last ledger balance (authoritative)
+  const { rows: ledgerRows } = await client.query(
+    `
+    SELECT balance_after_cents
+    FROM wallet_ledger
+    WHERE wallet_id = $1
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    [walletId]
+  );
+
+  const currentBalance = ledgerRows.length
+    ? Number(ledgerRows[0].balance_after_cents)
+    : 0;
+
   const newBalance = currentBalance + deltaCents;
 
   if (newBalance < 0) {
     throw new Error('Insufficient balance');
   }
 
-  // 2️⃣ Insert ledger entry (authoritative)
+  // 3️⃣ Insert ledger entry
   await client.query(
     `
     INSERT INTO wallet_ledger
@@ -50,25 +66,27 @@ async function applyWalletDelta(client, userId, type, deltaCents, reason) {
     VALUES ($1, $2, $3, $4)
     `,
     [
-      wallet.id,
+      walletId,
       deltaCents,
       reason,
       newBalance
     ]
   );
 
-  // 3️⃣ Update cached balance
+  // 4️⃣ Update cached wallet balance
   await client.query(
     `
     UPDATE wallets
     SET balance_cents = $1
     WHERE id = $2
     `,
-    [newBalance, wallet.id]
+    [newBalance, walletId]
   );
 
   return newBalance;
 }
+
+
 
 /**
  * Ensure REAL, DEMO, REFERRAL wallets exist.
