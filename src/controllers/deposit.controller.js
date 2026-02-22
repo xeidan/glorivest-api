@@ -16,3 +16,7 @@ async function depositWebhook(req, res) {
     res.status(500).json({ message: 'Deposit processing failed' });
   }
 }
+
+module.exports = {
+  depositWebhook
+};
