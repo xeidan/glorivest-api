@@ -1,6 +1,7 @@
 'use strict';
 
 const { pool } = require('../config/database');
+const { resetDemoWallet } = require('../services/wallet.service');
 
 const DEMO_BALANCE_CENTS = 1_000_000;
 
@@ -19,61 +20,36 @@ const getWallets = async (req, res) => {
   res.json(rows);
 };
 
+
+
 // RESET demo wallet
-// RESET demo wallet (FULL RESET)
-const resetDemoWallet = async (req, res) => {
+const resetDemoWalletController = async (req, res) => {
   const client = await pool.connect();
 
   try {
     const userId = req.user.id;
-    const walletId = Number(req.params.id);
 
     await client.query('BEGIN');
 
-    // 1️⃣ Verify demo wallet
-    const { rows } = await client.query(
-      `
-      SELECT id
-      FROM wallets
-      WHERE id = $1
-        AND user_id = $2
-        AND type = 'DEMO'
-      FOR UPDATE
-      `,
-      [walletId, userId]
-    );
+    const newBalance = await resetDemoWallet(client, userId);
 
-    if (!rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Demo wallet not found' });
-    }
-
-    // 2️⃣ Reset balance + timestamp
+    // Instead of DELETE cycles → soft cancel
     await client.query(
       `
-      UPDATE wallets
-      SET balance_cents = $1,
-          demo_reset_at = NOW()
-      WHERE id = $2
+      UPDATE cycles
+      SET status = 'CANCELLED'
+      WHERE wallet_id = (
+        SELECT id FROM wallets
+        WHERE user_id = $1 AND type = 'DEMO'
+      )
       `,
-      [DEMO_BALANCE_CENTS, walletId]
-    );
-
-    // 3️⃣ DELETE ALL DEMO CYCLES (active + completed)
-    await client.query(
-      `
-      DELETE FROM cycles
-      WHERE wallet_id = $1
-      `,
-      [walletId]
+      [userId]
     );
 
     await client.query('COMMIT');
 
-    res.json({
-      balance_cents: DEMO_BALANCE_CENTS,
-      demo_reset_at: new Date().toISOString()
-    });
+    res.json({ balance_cents: newBalance });
+
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Demo reset failed:', err);
@@ -82,6 +58,8 @@ const resetDemoWallet = async (req, res) => {
     client.release();
   }
 };
+
+
 
 
 
