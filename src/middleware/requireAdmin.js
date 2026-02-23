@@ -1,12 +1,12 @@
 'use strict';
 
-const db = require('../db');
+const { pool } = require('../config/database');
 
 module.exports = async function requireAdmin(req, res, next) {
   try {
     const userId = req.user.id;
 
-    const { rows } = await db.query(
+    const { rows } = await pool.query(
       `SELECT role FROM users WHERE id = $1`,
       [userId]
     );
