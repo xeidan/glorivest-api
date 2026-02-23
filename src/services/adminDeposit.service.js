@@ -12,7 +12,7 @@ async function approveDeposit(depositId, adminId) {
 
     const { rows } = await client.query(
       `
-      SELECT id, user_id, amount_cents, status
+      SELECT id, user_id, amount_exact_cents, status, referral_rewarded
       FROM deposits
       WHERE id = $1
       FOR UPDATE
@@ -26,33 +26,45 @@ async function approveDeposit(depositId, adminId) {
 
     const deposit = rows[0];
 
-    if (deposit.status === 'SUCCESS') {
-      throw new Error('Deposit already processed');
+    if (deposit.status !== 'USER_MARKED_PAID') {
+      throw new Error('Invalid deposit state');
     }
 
-    await client.query(
-      `
-      UPDATE deposits
-      SET status = 'SUCCESS',
-          approved_by = $1,
-          approved_at = NOW()
-      WHERE id = $2
-      `,
-      [adminId, depositId]
-    );
-
+    // Credit wallet using exact amount sent
     await applyWalletDelta(
       client,
       deposit.user_id,
       'REAL',
-      deposit.amount_cents,
-      'DEPOSIT_SUCCESS'
+      Number(deposit.amount_exact_cents),
+      'BANK_DEPOSIT_SUCCESS'
     );
 
-    await processReferralReward(
-      client,
-      deposit.user_id,
-      deposit.amount_cents
+    // Optional referral reward (only once)
+    if (!deposit.referral_rewarded) {
+      await processReferralReward(
+        client,
+        deposit.user_id,
+        Number(deposit.amount_exact_cents)
+      );
+
+      await client.query(
+        `
+        UPDATE deposits
+        SET referral_rewarded = true
+        WHERE id = $1
+        `,
+        [depositId]
+      );
+    }
+
+    // Finalize deposit
+    await client.query(
+      `
+      UPDATE deposits
+      SET status = 'SUCCESS'
+      WHERE id = $1
+      `,
+      [depositId]
     );
 
     await client.query('COMMIT');
