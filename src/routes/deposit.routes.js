@@ -3,17 +3,16 @@
 const express = require('express');
 const router = express.Router();
 
+const requireAuth = require('../middleware/auth');
 const {
   createDeposit,
-  markPaid
+  markDepositPaid
 } = require('../controllers/deposit.controller');
 
-const authenticate = require('../middleware/auth');
-
 // Create deposit
-router.post('/', authenticate, createDeposit);
+router.post('/', requireAuth, createDeposit);
 
 // Mark deposit as paid
-router.post('/:depositId/mark-paid', authenticate, markPaid);
+router.post('/:depositId/mark-paid', requireAuth, markDepositPaid);
 
 module.exports = router;
