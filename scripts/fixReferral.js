@@ -15,12 +15,12 @@ async function run() {
     // wallet_type = 'REFERRAL'
     // amount = +2000 cents
     await applyWalletDelta(
-      client,
-      2,
-      'REFERRAL',
-      2000,
-      'REF_CORRECTION'
-    );
+        client,
+        2,
+        'REFERRAL',
+        2000,
+        'REFERRAL_REWARD'
+     );
 
     await client.query('COMMIT');
 
