@@ -1,13 +1,19 @@
-// src/routes/deposit.routes.js
 'use strict';
 
 const express = require('express');
 const router = express.Router();
 
-const { depositWebhook } = require('../controllers/deposit.controller');
+const {
+  createDeposit,
+  markPaid
+} = require('../controllers/deposit.controller');
 
-// Webhook endpoint
-router.post('/webhook', depositWebhook);
+const { authenticate } = require('../middlewares/auth.middleware');
+
+// Create deposit
+router.post('/', authenticate, createDeposit);
+
+// Mark deposit as paid
+router.post('/:depositId/mark-paid', authenticate, markPaid);
 
 module.exports = router;
-
