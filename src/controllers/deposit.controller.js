@@ -39,7 +39,53 @@ async function markPaid(req, res) {
   }
 }
 
+
+async function markDepositPaid(userId, depositId) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `
+      SELECT *
+      FROM deposits
+      WHERE id = $1
+        AND user_id = $2
+      FOR UPDATE
+      `,
+      [depositId, userId]
+    );
+
+    if (!rows.length) {
+      throw new Error('Deposit not found');
+    }
+
+    if (rows[0].status !== 'AWAITING_PAYMENT') {
+      throw new Error('Invalid deposit state');
+    }
+
+    await client.query(
+      `
+      UPDATE deposits
+      SET status = 'USER_MARKED_PAID'
+      WHERE id = $1
+      `,
+      [depositId]
+    );
+
+    await client.query('COMMIT');
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   createDeposit,
-  markPaid
+  markPaid,
+  markDepositPaid
 };
