@@ -36,7 +36,7 @@ async function approveDeposit(depositId, adminId) {
       deposit.user_id,
       'REAL',
       Number(deposit.amount_exact_cents),
-      'BANK_DEPOSIT_SUCCESS'
+      'DEPOSIT_SUCCESS'
     );
 
     // Optional referral reward (only once)
