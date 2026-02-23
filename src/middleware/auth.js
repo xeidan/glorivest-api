@@ -1,3 +1,4 @@
+// src/middleware/auth.js
 'use strict';
 
 const jwt = require('jsonwebtoken');

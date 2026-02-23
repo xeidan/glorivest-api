@@ -8,7 +8,7 @@ const {
   markPaid
 } = require('../controllers/deposit.controller');
 
-const { authenticate } = require('../middlewares/auth.middleware');
+const authenticate = require('../middleware/auth');
 
 // Create deposit
 router.post('/', authenticate, createDeposit);
