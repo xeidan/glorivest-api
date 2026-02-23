@@ -1,5 +1,4 @@
--- idempotent bootstrap for Glorivest (derived from old server.js)
--- Run: psql "$DATABASE_URL" -f src/models/bootstrap_sql.sql
+-- src/models/bootstrap_sql.sql
 
 BEGIN;
 

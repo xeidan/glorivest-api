@@ -21,5 +21,6 @@ router.use('/performance', require('./performance.routes'));
 router.use('/leaderboard', require('./leaderboard.routes'));
 router.use('/deposit', require('./deposit.routes')); 
 router.use('/admin', require('./admin.routes'));
+router.use('/rates', require('./rates.routes'));
 
 module.exports = router;
