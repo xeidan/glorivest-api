@@ -11,7 +11,7 @@ async function createBankDeposit(userId, amountRequestedCents) {
     const suffix = Math.floor(Math.random() * 90) + 10;
     const exactAmount = amountRequestedCents + suffix;
 
-    const reference = `GV-${Date.now()}-${Math.floor(Math.random()*9999)}`;
+    const reference = `GV-${Date.now()}-${Math.floor(Math.random() * 9999)}`;
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
 
     const { rows } = await client.query(
@@ -69,7 +69,14 @@ async function markDepositPaid(userId, depositId) {
       throw new Error('Deposit not found');
     }
 
-    if (rows[0].status !== 'AWAITING_PAYMENT') {
+    const deposit = rows[0];
+
+    // 🔒 Expiry enforcement
+    if (deposit.expires_at && new Date(deposit.expires_at) < new Date()) {
+      throw new Error('Deposit expired');
+    }
+
+    if (deposit.status !== 'AWAITING_PAYMENT') {
       throw new Error('Invalid deposit state');
     }
 

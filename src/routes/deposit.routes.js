@@ -7,10 +7,12 @@ const requireAuth = require('../middleware/auth');
 
 const {
   createDeposit,
-  markPaid
+  markPaid,
+  listUserDeposits
 } = require('../controllers/deposit.controller');
 
 router.post('/', requireAuth, createDeposit);
 router.post('/:depositId/mark-paid', requireAuth, markPaid);
+router.get('/', requireAuth, listUserDeposits);
 
 module.exports = router;

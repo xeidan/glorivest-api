@@ -2,76 +2,61 @@
 
 const db = require('../db');
 const { applyWalletDelta } = require('../services/wallet.service');
+const { pool } = require('../config/database');
 
-const confirmDeposit = async (req, res) => {
-  const { depositId } = req.params;
-  const client = await db.connect();
 
+
+
+async function listDeposits(req, res) {
   try {
-    await client.query('BEGIN');
+    const { status } = req.query;
 
-    const { rows } = await client.query(
+    const { rows } = await pool.query(
       `
-      SELECT *
+      SELECT id,
+             user_id,
+             amount_requested_cents,
+             amount_exact_cents,
+             reference,
+             method,
+             status,
+             expires_at,
+             created_at
       FROM deposits
-      WHERE id = $1
-      FOR UPDATE
+      WHERE ($1::text IS NULL OR status = $1)
+      ORDER BY created_at DESC
       `,
-      [depositId]
+      [status || null]
     );
 
-    if (!rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Deposit not found' });
-    }
+    const now = new Date();
 
-    const deposit = rows[0];
+    const deposits = rows.map(d => {
+      const isExpired =
+        d.status !== 'SUCCESS' &&
+        d.expires_at &&
+        new Date(d.expires_at) < now;
 
-    if (deposit.status === 'SUCCESS') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Already confirmed' });
-    }
+      return {
+        id: d.id,
+        user_id: d.user_id,
+        amount_requested_cents: Number(d.amount_requested_cents),
+        amount_exact_cents: Number(d.amount_exact_cents),
+        reference: d.reference,
+        method: d.method,
+        status: isExpired ? 'EXPIRED' : d.status,
+        expires_at: d.expires_at,
+        created_at: d.created_at,
+        is_expired: Boolean(isExpired)
+      };
+    });
 
-    if (deposit.status !== 'USER_MARKED_PAID') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Deposit not ready for confirmation' });
-    }
-
-    if (deposit.expires_at && new Date(deposit.expires_at) < new Date()) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Deposit expired' });
-    }
-    
-    // Credit wallet
-    await applyWalletDelta(
-      client,
-      deposit.user_id,
-      'REAL',
-      Number(deposit.amount_exact_cents),
-      'BANK_DEPOSIT'
-    );
-
-    // Update deposit status
-    await client.query(
-      `
-      UPDATE deposits
-      SET status = 'SUCCESS'
-      WHERE id = $1
-      `,
-      [depositId]
-    );
-
-    await client.query('COMMIT');
-
-    return res.json({ message: 'Deposit confirmed successfully' });
+    return res.json(deposits);
 
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
-    return res.status(500).json({ message: 'Failed to confirm deposit' });
-  } finally {
-    client.release();
+    console.error('listDeposits error:', err);
+    return res.status(500).json({ message: 'Failed to fetch deposits' });
   }
-};
+}
 
-module.exports = { confirmDeposit };
+module.exports = { listDeposits };

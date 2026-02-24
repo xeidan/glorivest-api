@@ -1,5 +1,6 @@
 'use strict';
 
+const { pool } = require('../config/database');
 const {
   createBankDeposit,
   markDepositPaid
@@ -11,13 +12,13 @@ const {
 async function createDeposit(req, res) {
   try {
     const userId = req.user.id;
-    const { amount_cents } = req.body;
+    const amountCents = Number(req.body.amount_cents);
 
-    if (!Number.isInteger(amount_cents) || amount_cents < 5000) {
+    if (!Number.isInteger(amountCents) || amountCents < 5000) {
       return res.status(400).json({ message: 'Invalid amount' });
     }
 
-    const deposit = await createBankDeposit(userId, amount_cents);
+    const deposit = await createBankDeposit(userId, amountCents);
 
     return res.status(201).json(deposit);
 
@@ -33,10 +34,10 @@ async function createDeposit(req, res) {
 async function markPaid(req, res) {
   try {
     const userId = req.user.id;
-    const { depositId } = req.params;
+    const depositId = Number(req.params.depositId);
 
-    if (!depositId) {
-      return res.status(400).json({ message: 'Deposit ID required' });
+    if (!Number.isInteger(depositId)) {
+      return res.status(400).json({ message: 'Invalid deposit ID' });
     }
 
     await markDepositPaid(userId, depositId);
@@ -50,7 +51,8 @@ async function markPaid(req, res) {
       return res.status(404).json({ message: err.message });
     }
 
-    if (err.message === 'Invalid deposit state') {
+    if (err.message === 'Invalid deposit state' ||
+        err.message === 'Deposit expired') {
       return res.status(400).json({ message: err.message });
     }
 
@@ -58,7 +60,61 @@ async function markPaid(req, res) {
   }
 }
 
+/**
+ * List user deposits
+ */
+async function listUserDeposits(req, res) {
+  try {
+    const userId = req.user.id;
+
+    const { rows } = await pool.query(
+      `
+      SELECT id,
+             amount_requested_cents,
+             amount_exact_cents,
+             reference,
+             method,
+             status,
+             expires_at,
+             created_at
+      FROM deposits
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      `,
+      [userId]
+    );
+
+    const now = new Date();
+
+    const deposits = rows.map(d => {
+      const isExpired =
+        d.status !== 'SUCCESS' &&
+        d.expires_at &&
+        new Date(d.expires_at) < now;
+
+      return {
+        id: d.id,
+        amount_requested_cents: Number(d.amount_requested_cents),
+        amount_exact_cents: Number(d.amount_exact_cents),
+        reference: d.reference,
+        method: d.method,
+        status: isExpired ? 'EXPIRED' : d.status,
+        expires_at: d.expires_at,
+        created_at: d.created_at,
+        is_expired: Boolean(isExpired)
+      };
+    });
+
+    return res.json(deposits);
+
+  } catch (err) {
+    console.error('listUserDeposits error:', err);
+    return res.status(500).json({ message: 'Failed to fetch deposits' });
+  }
+}
+
 module.exports = {
   createDeposit,
-  markPaid
+  markPaid,
+  listUserDeposits
 };

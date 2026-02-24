@@ -14,15 +14,22 @@ function makeWalletCode(userId, type) {
  * 🔒 THE ONLY FUNCTION ALLOWED TO MUTATE MONEY
  * All credits/debits must go through here.
  */
-async function applyWalletDelta(client, userId, type, deltaCents, reason) {
+async function applyWalletDelta(
+  client,
+  userId,
+  type,
+  deltaCents,
+  reason,
+  reference = null
+) {
   if (!Number.isInteger(deltaCents) || deltaCents === 0) {
     throw new Error('Invalid wallet delta');
   }
 
-  // 1️⃣ Lock wallet
+  // Lock wallet row
   const { rows } = await client.query(
     `
-    SELECT id
+    SELECT id, balance_cents
     FROM wallets
     WHERE user_id = $1
       AND type = $2
@@ -36,52 +43,35 @@ async function applyWalletDelta(client, userId, type, deltaCents, reason) {
   }
 
   const walletId = rows[0].id;
-
-  // 2️⃣ Get last ledger balance (authoritative)
-  const { rows: ledgerRows } = await client.query(
-    `
-    SELECT balance_after_cents
-    FROM wallet_ledger
-    WHERE wallet_id = $1
-    ORDER BY id DESC
-    LIMIT 1
-    `,
-    [walletId]
-  );
-
-  const currentBalance = ledgerRows.length
-    ? Number(ledgerRows[0].balance_after_cents)
-    : 0;
-
+  const currentBalance = Number(rows[0].balance_cents);
   const newBalance = currentBalance + deltaCents;
 
   if (newBalance < 0) {
     throw new Error('Insufficient balance');
   }
 
-  // 3️⃣ Insert ledger entry
+  const refType = reference?.refType || null;
+  const refId = reference?.refId || null;
+
   await client.query(
     `
     INSERT INTO wallet_ledger
-      (wallet_id, amount_cents, reason, balance_after_cents)
-    VALUES ($1, $2, $3, $4)
+      (wallet_id,
+       amount_cents,
+       reason,
+       balance_after_cents,
+       ref_type,
+       ref_id)
+    VALUES ($1,$2,$3,$4,$5,$6)
     `,
     [
       walletId,
       deltaCents,
       reason,
-      newBalance
+      newBalance,
+      refType,
+      refId
     ]
-  );
-
-  // 4️⃣ Update cached wallet balance
-  await client.query(
-    `
-    UPDATE wallets
-    SET balance_cents = $1
-    WHERE id = $2
-    `,
-    [newBalance, walletId]
   );
 
   return newBalance;
