@@ -1,7 +1,5 @@
 'use strict';
 
-const db = require('../db');
-const { applyWalletDelta } = require('../services/wallet.service');
 const { pool } = require('../config/database');
 
 
