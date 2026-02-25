@@ -137,7 +137,10 @@ async function cancelDeposit(userId, depositId) {
       throw new Error('Cannot cancel completed deposit');
     }
 
-    if (deposit.status === 'CANCELLED' || deposit.status === 'EXPIRED') {
+    if (
+      deposit.status === 'CANCELLED' ||
+      deposit.status === 'EXPIRED'
+    ) {
       await client.query('COMMIT');
       return { success: true };
     }
@@ -151,23 +154,8 @@ async function cancelDeposit(userId, depositId) {
       [depositId]
     );
 
-    // 🔐 Audit log (user initiated)
-    await client.query(
-      `
-      INSERT INTO admin_audit_logs
-        (admin_id, action, entity_type, entity_id, metadata)
-      VALUES ($1,$2,$3,$4,$5)
-      `,
-      [
-        null,
-        'CANCEL_DEPOSIT',
-        'deposit',
-        depositId,
-        JSON.stringify({ user_id: userId })
-      ]
-    );
-
     await client.query('COMMIT');
+
     return { success: true };
 
   } catch (err) {
@@ -177,6 +165,8 @@ async function cancelDeposit(userId, depositId) {
     client.release();
   }
 }
+
+
 
 // =========================
 // Approve Deposit (Admin)
