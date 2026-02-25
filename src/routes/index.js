@@ -2,6 +2,8 @@
 
 const express = require('express');
 const router = express.Router();
+const auth = require('../middleware/auth');
+const requireAdmin = require('../middleware/requireAdmin');
 
 /*
 |--------------------------------------------------------------------------
@@ -33,7 +35,7 @@ router.use('/rates', require('./rates.routes'));
 | Admin Routes
 |--------------------------------------------------------------------------
 */
-router.use('/admin', require('./admin.routes'));
+router.use('/admin', auth, requireAdmin, require('./admin.routes'));
 
 
 module.exports = router;

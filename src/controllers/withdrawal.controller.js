@@ -15,6 +15,14 @@ exports.requestWithdrawal = async (req, res) => {
       });
     }
 
+    if (!Number.isFinite(Number(amount_usd)) || Number(amount_usd) <= 0) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
+
+    if (typeof destination !== 'string' || destination.length < 5) {
+      return res.status(400).json({ message: 'Invalid destination' });
+    }
+
     const amount = Number(amount_usd);
 
     if (!Number.isFinite(amount) || amount <= 0) {

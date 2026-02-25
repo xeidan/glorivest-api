@@ -56,4 +56,26 @@ app.use('*', (req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
+
+/* ======================================================
+   RATE LIMITER
+====================================================== */
+const rateLimit = require('express-rate-limit');
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300
+});
+
+app.use(globalLimiter);
+
+const moneyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20
+});
+
+app.use('/api/deposit', moneyLimiter);
+app.use('/api/withdrawals', moneyLimiter);
+
+
 module.exports = app;

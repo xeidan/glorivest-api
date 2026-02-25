@@ -3,6 +3,7 @@
 const { pool } = require('../config/database');
 const { applyWalletDelta } = require('./wallet.service');
 
+
 // =========================
 // Create Withdrawal Request
 // =========================
@@ -11,12 +12,16 @@ async function createWithdrawalRequest(
   walletId,
   amountUsd,
   destination,
-  method // 'BANK' | 'CRYPTO'
+  method
 ) {
   const amountCents = Math.round(Number(amountUsd) * 100);
 
-  if (!amountCents || amountCents <= 0) {
+  if (!Number.isFinite(amountCents) || amountCents <= 0) {
     throw new Error('Invalid amount');
+  }
+
+  if (typeof destination !== 'string' || destination.length < 5) {
+    throw new Error('Invalid destination');
   }
 
   const client = await pool.connect();
@@ -46,7 +51,6 @@ async function createWithdrawalRequest(
       throw new Error('Insufficient balance');
     }
 
-    // Create withdrawal request (NO ledger mutation)
     const { rows: [withdrawal] } = await client.query(
       `
       INSERT INTO withdrawals
@@ -58,7 +62,6 @@ async function createWithdrawalRequest(
     );
 
     await client.query('COMMIT');
-
     return withdrawal;
 
   } catch (err) {
@@ -117,7 +120,6 @@ async function cancelWithdrawal(userId, withdrawalId) {
     );
 
     await client.query('COMMIT');
-
     return { success: true };
 
   } catch (err) {
@@ -181,6 +183,7 @@ async function approveWithdrawal(withdrawalId, adminId) {
 
     const withdrawal = rows[0];
 
+    // Idempotent
     if (withdrawal.status === 'APPROVED') {
       await client.query('COMMIT');
       return { success: true };
@@ -190,6 +193,7 @@ async function approveWithdrawal(withdrawalId, adminId) {
       throw new Error('Withdrawal cannot be approved');
     }
 
+    // 🔒 Debit wallet safely
     await applyWalletDelta(
       client,
       withdrawal.user_id,
@@ -208,7 +212,6 @@ async function approveWithdrawal(withdrawalId, adminId) {
       [withdrawalId]
     );
 
-    // 🔐 Success audit
     await client.query(
       `
       INSERT INTO admin_audit_logs
@@ -256,6 +259,8 @@ async function approveWithdrawal(withdrawalId, adminId) {
     client.release();
   }
 }
+
+
 
 module.exports = {
   createWithdrawalRequest,
