@@ -84,11 +84,3 @@ exports.listUserDeposits = async (req, res) => {
     });
   }
 };
-
-
-module.exports = {
-  createDeposit,
-  markPaid,
-  listUserDeposits,
-  cancelDeposit
-};
