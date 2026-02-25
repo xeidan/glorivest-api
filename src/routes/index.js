@@ -1,26 +1,39 @@
 'use strict';
 
-console.log('✅ routes/index.js loaded');
-
 const express = require('express');
 const router = express.Router();
 
-const authMiddleware = require('../middleware/auth');
-const { getPerformanceSummary } = require('../controllers/performance.controller');
-
-// AUTH
+/*
+|--------------------------------------------------------------------------
+| Public / Auth Routes
+|--------------------------------------------------------------------------
+*/
 router.use('/auth', require('./auth.routes'));
 
-// CORE
+
+/*
+|--------------------------------------------------------------------------
+| User Core Routes
+|--------------------------------------------------------------------------
+*/
 router.use('/accounts', require('./account.routes'));
-router.use('/trades', require('./trade.routes'));
 router.use('/wallets', require('./wallet.routes'));
+router.use('/trades', require('./trade.routes'));
 router.use('/cycle', require('./cycle.routes'));
 router.use('/transfer', require('./transfer.routes'));
+router.use('/deposit', require('./deposit.routes'));
+router.use('/withdrawals', require('./withdrawal.routes'));
 router.use('/performance', require('./performance.routes'));
 router.use('/leaderboard', require('./leaderboard.routes'));
-router.use('/deposit', require('./deposit.routes')); 
-router.use('/admin', require('./admin.routes'));
 router.use('/rates', require('./rates.routes'));
+
+
+/*
+|--------------------------------------------------------------------------
+| Admin Routes
+|--------------------------------------------------------------------------
+*/
+router.use('/admin', require('./admin.routes'));
+
 
 module.exports = router;

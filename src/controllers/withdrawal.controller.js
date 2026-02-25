@@ -1,64 +1,90 @@
 'use strict';
 
-const { pool } = require('../config/database');
+const withdrawalService = require('../services/withdrawal.service');
 
-const createWithdrawal = async (req, res) => {
-  const { wallet_id, amount_cents } = req.body;
+// ==========================
+// Create Withdrawal
+// ==========================
+exports.requestWithdrawal = async (req, res) => {
+  try {
+    const { wallet_id, amount_usd, destination, method } = req.body;
 
-  if (!wallet_id || !amount_cents) {
+    if (!wallet_id || !amount_usd || !destination || !method) {
+      return res.status(400).json({
+        message: 'wallet_id, amount_usd, destination and method required'
+      });
+    }
+
+    const amount = Number(amount_usd);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        message: 'Invalid withdrawal amount'
+      });
+    }
+
+    if (!['BANK', 'CRYPTO'].includes(method)) {
+      return res.status(400).json({
+        message: 'Invalid withdrawal method'
+      });
+    }
+
+    const withdrawal = await withdrawalService.createWithdrawalRequest(
+      req.user.id,
+      wallet_id,
+      amount,
+      destination,
+      method
+    );
+
+    return res.status(201).json(withdrawal);
+
+  } catch (err) {
+    console.error('requestWithdrawal error:', err);
+
     return res.status(400).json({
-      message: 'wallet_id and amount_cents required'
+      message: err.message || 'Withdrawal request failed'
     });
   }
-
-  // Fetch wallet
-  const { rows: walletRows } = await pool.query(
-    `
-    SELECT id, type, balance_cents
-    FROM wallets
-    WHERE id = $1 AND user_id = $2
-    LIMIT 1
-    `,
-    [wallet_id, req.user.id]
-  );
-
-  if (!walletRows.length) {
-    return res.status(404).json({ message: 'Wallet not found' });
-  }
-
-  const wallet = walletRows[0];
-
-  // ❌ DEMO WALLET
-  if (wallet.type === 'DEMO') {
-    return res.status(403).json({
-      message: 'Withdrawals are not allowed from demo wallet'
-    });
-  }
-
-  // ❌ REFERRAL WALLET
-  if (wallet.type === 'REFERRAL') {
-    return res.status(403).json({
-      message: 'Withdrawals are not allowed from referral wallet'
-    });
-  }
-
-  // ❌ INVALID
-  if (wallet.type !== 'REAL') {
-    return res.status(403).json({
-      message: 'Invalid wallet type for withdrawal'
-    });
-  }
-
-  // ❌ INSUFFICIENT
-  if (Number(wallet.balance_cents) < Number(amount_cents)) {
-    return res.status(400).json({ message: 'Insufficient balance' });
-  }
-
-  // TODO: create withdrawal record, deduct balance
-
-  return res.json({ message: 'Withdrawal request accepted' });
 };
 
-module.exports = {
-  createWithdrawal
+// ==========================
+// Cancel Withdrawal
+// ==========================
+exports.cancelWithdrawal = async (req, res) => {
+  try {
+    await withdrawalService.cancelWithdrawal(
+      req.user.id,
+      req.params.id
+    );
+
+    return res.json({ message: 'Withdrawal cancelled' });
+
+  } catch (err) {
+    console.error('cancelWithdrawal error:', err);
+
+    return res.status(400).json({
+      message: err.message || 'Cancellation failed'
+    });
+  }
+};
+
+// ==========================
+// List My Withdrawals
+// ==========================
+exports.myWithdrawals = async (req, res) => {
+  try {
+    const withdrawals = await withdrawalService.listUserWithdrawals(
+      req.user.id
+    );
+
+    return res.json(withdrawals);
+
+  } catch (err) {
+    console.error('myWithdrawals error:', err);
+
+    return res.status(500).json({
+      message: 'Failed to fetch withdrawals'
+    });
+  }
 };

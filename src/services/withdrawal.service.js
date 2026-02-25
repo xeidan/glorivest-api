@@ -1,57 +1,280 @@
 'use strict';
 
-const { pool, withTx } = require('../config/database');
-const tron = require('../crypto/tron');
-const { postTransaction } = require('./ledger.service');
+const { pool } = require('../config/database');
+const { applyWalletDelta } = require('./wallet.service');
 
 // =========================
 // Create Withdrawal Request
 // =========================
-exports.createWithdrawalRequest = async (
+async function createWithdrawalRequest(
   userId,
-  accountId,
+  walletId,
   amountUsd,
-  address
-) => {
+  destination,
+  method // 'BANK' | 'CRYPTO'
+) {
   const amountCents = Math.round(Number(amountUsd) * 100);
+
   if (!amountCents || amountCents <= 0) {
     throw new Error('Invalid amount');
   }
 
-  return await withTx(async (c) => {
-    // 🔒 lock account
-    const accQ = await c.query(
-      `SELECT balance_cents
-       FROM accounts
-       WHERE id=$1 AND user_id=$2
-       FOR UPDATE`,
-      [accountId, userId]
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 🔒 Lock wallet row
+    const { rows } = await client.query(
+      `
+      SELECT balance_cents
+      FROM wallets
+      WHERE id = $1
+        AND user_id = $2
+      FOR UPDATE
+      `,
+      [walletId, userId]
     );
 
-    if (!accQ.rows.length)
-      throw new Error('Account not found');
+    if (!rows.length) {
+      throw new Error('Wallet not found');
+    }
 
-    const balance = Number(accQ.rows[0].balance_cents);
+    const balance = Number(rows[0].balance_cents);
 
-    if (balance < amountCents)
+    if (balance < amountCents) {
       throw new Error('Insufficient balance');
+    }
 
-    // create withdrawal request
-    const { rows: [w] } = await c.query(
-      `INSERT INTO withdrawals (user_id, account_id, amount_cents, address, status)
-       VALUES ($1,$2,$3,$4,'pending')
-       RETURNING *`,
-      [userId, accountId, amountCents, address]
+    // Create withdrawal request (NO ledger mutation)
+    const { rows: [withdrawal] } = await client.query(
+      `
+      INSERT INTO withdrawals
+        (user_id, wallet_id, amount_cents, destination, method, status)
+      VALUES ($1,$2,$3,$4,$5,'PENDING')
+      RETURNING *
+      `,
+      [userId, walletId, amountCents, destination, method]
     );
 
-    // ledger entry (single source of truth)
-    await postTransaction({
-      userId,
-      accountId,
-      type: 'withdrawal',
-      amountCents: -amountCents
-    }, c);
+    await client.query('COMMIT');
 
-    return w;
-  });
+    return withdrawal;
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+
+
+// =========================
+// Cancel Withdrawal
+// =========================
+async function cancelWithdrawal(userId, withdrawalId) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `
+      SELECT id, status
+      FROM withdrawals
+      WHERE id = $1
+        AND user_id = $2
+      FOR UPDATE
+      `,
+      [withdrawalId, userId]
+    );
+
+    if (!rows.length) {
+      throw new Error('Withdrawal not found');
+    }
+
+    const withdrawal = rows[0];
+
+    if (withdrawal.status === 'CANCELLED') {
+      await client.query('COMMIT');
+      return { success: true };
+    }
+
+    if (withdrawal.status !== 'PENDING') {
+      throw new Error('Withdrawal cannot be cancelled');
+    }
+
+    await client.query(
+      `
+      UPDATE withdrawals
+      SET status = 'CANCELLED',
+          updated_at = now()
+      WHERE id = $1
+      `,
+      [withdrawalId]
+    );
+
+    // 🔐 Audit log (user initiated)
+    await client.query(
+      `
+      INSERT INTO admin_audit_logs
+        (admin_id, action, entity_type, entity_id, metadata)
+      VALUES ($1,$2,$3,$4,$5)
+      `,
+      [
+        null,
+        'CANCEL_WITHDRAWAL',
+        'withdrawal',
+        withdrawalId,
+        JSON.stringify({ user_id: userId })
+      ]
+    );
+
+    await client.query('COMMIT');
+    return { success: true };
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+
+
+// =========================
+// List User Withdrawals
+// =========================
+async function listUserWithdrawals(userId) {
+  const { rows } = await pool.query(
+    `
+    SELECT id,
+           wallet_id,
+           amount_cents,
+           method,
+           destination,
+           status,
+           created_at,
+           updated_at
+    FROM withdrawals
+    WHERE user_id = $1
+    ORDER BY created_at DESC
+    `,
+    [userId]
+  );
+
+  return rows;
+}
+
+
+
+// =========================
+// Approve Withdrawal (Admin)
+// =========================
+async function approveWithdrawal(withdrawalId, adminId) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `
+      SELECT id, user_id, wallet_id, amount_cents, status
+      FROM withdrawals
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [withdrawalId]
+    );
+
+    if (!rows.length) {
+      throw new Error('Withdrawal not found');
+    }
+
+    const withdrawal = rows[0];
+
+    if (withdrawal.status === 'APPROVED') {
+      await client.query('COMMIT');
+      return { success: true };
+    }
+
+    if (withdrawal.status !== 'PENDING') {
+      throw new Error('Withdrawal cannot be approved');
+    }
+
+    await applyWalletDelta(
+      client,
+      withdrawal.user_id,
+      'REAL',
+      -Number(withdrawal.amount_cents),
+      'WITHDRAWAL_APPROVED'
+    );
+
+    await client.query(
+      `
+      UPDATE withdrawals
+      SET status = 'APPROVED',
+          updated_at = now()
+      WHERE id = $1
+      `,
+      [withdrawalId]
+    );
+
+    // 🔐 Success audit
+    await client.query(
+      `
+      INSERT INTO admin_audit_logs
+        (admin_id, action, entity_type, entity_id, metadata)
+      VALUES ($1,$2,$3,$4,$5)
+      `,
+      [
+        adminId,
+        'APPROVE_WITHDRAWAL',
+        'withdrawal',
+        withdrawalId,
+        JSON.stringify({
+          user_id: withdrawal.user_id,
+          amount_cents: withdrawal.amount_cents
+        })
+      ]
+    );
+
+    await client.query('COMMIT');
+    return { success: true };
+
+  } catch (err) {
+
+    try {
+      await client.query(
+        `
+        INSERT INTO admin_audit_logs
+          (admin_id, action, entity_type, entity_id, metadata)
+        VALUES ($1,$2,$3,$4,$5)
+        `,
+        [
+          adminId,
+          'FAILED_APPROVE_WITHDRAWAL',
+          'withdrawal',
+          withdrawalId,
+          JSON.stringify({ error: err.message })
+        ]
+      );
+    } catch (_) {}
+
+    await client.query('ROLLBACK');
+    throw err;
+
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = {
+  createWithdrawalRequest,
+  cancelWithdrawal,
+  approveWithdrawal,
+  listUserWithdrawals
 };
