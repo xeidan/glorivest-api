@@ -116,23 +116,8 @@ async function cancelWithdrawal(userId, withdrawalId) {
       [withdrawalId]
     );
 
-    // 🔐 Audit log (user initiated)
-    await client.query(
-      `
-      INSERT INTO admin_audit_logs
-        (admin_id, action, entity_type, entity_id, metadata)
-      VALUES ($1,$2,$3,$4,$5)
-      `,
-      [
-        null,
-        'CANCEL_WITHDRAWAL',
-        'withdrawal',
-        withdrawalId,
-        JSON.stringify({ user_id: userId })
-      ]
-    );
-
     await client.query('COMMIT');
+
     return { success: true };
 
   } catch (err) {
