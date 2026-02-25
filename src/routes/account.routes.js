@@ -8,12 +8,10 @@ const loadAccount = require('../middleware/loadAccount');
 const guardRoute = require('../middleware/guardRoute');
 
 const {
-  requireDemoAccount,
-  requireLiveAccount
+  requireDemoAccount
 } = require('../middleware/accountGuards');
 
 const accountController = require('../controllers/account.controller');
-const withdrawalController = require('../controllers/withdrawal.controller');
 
 // ==================================================
 // DASHBOARD CORE
@@ -44,19 +42,6 @@ router.post(
   loadAccount,
   guardRoute(requireDemoAccount),
   accountController.resetDemo
-);
-
-// ==================================================
-// LIVE ONLY
-// ==================================================
-
-// POST /api/accounts/:accountId/withdraw
-router.post(
-  '/:accountId/withdraw',
-  auth,
-  loadAccount,
-  guardRoute(requireLiveAccount),
-  withdrawalController.createWithdrawal
 );
 
 module.exports = router;
