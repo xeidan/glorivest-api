@@ -26,7 +26,6 @@ async function applyWalletDelta(
     throw new Error('Invalid wallet delta');
   }
 
-  // Lock wallet row
   const { rows } = await client.query(
     `
     SELECT id, balance_cents
@@ -72,6 +71,16 @@ async function applyWalletDelta(
       refType,
       refId
     ]
+  );
+
+  await client.query(
+    `
+    UPDATE wallets
+    SET balance_cents = $1,
+        updated_at = NOW()
+    WHERE id = $2
+    `,
+    [newBalance, walletId]
   );
 
   return newBalance;
