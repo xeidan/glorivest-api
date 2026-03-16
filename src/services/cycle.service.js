@@ -2,6 +2,129 @@
 
 const { pool } = require('../config/database');
 
+
+// =====================================================
+// START NEW CYCLE
+// =====================================================
+
+async function startCycle({
+  userId,
+  walletId,
+  capitalAmount,
+  expectedProfit,
+  durationMonths
+}) {
+
+  const client = await pool.connect();
+
+  try {
+
+    await client.query('BEGIN');
+
+    // -------------------------------------------------
+    // Lock wallet
+    // -------------------------------------------------
+
+    const walletRes = await client.query(
+      `
+      SELECT *
+      FROM wallets
+      WHERE id = $1
+      AND user_id = $2
+      FOR UPDATE
+      `,
+      [walletId, userId]
+    );
+
+    if (!walletRes.rows.length) {
+      throw new Error('Wallet not found');
+    }
+
+    const wallet = walletRes.rows[0];
+
+    // -------------------------------------------------
+    // Calculate deployed capital
+    // -------------------------------------------------
+
+    const deployedRes = await client.query(
+      `
+      SELECT COALESCE(SUM(capital_cents),0) AS deployed
+      FROM cycles
+      WHERE wallet_id = $1
+      AND status = 'RUNNING'
+      `,
+      [walletId]
+    );
+
+    const deployed = Number(deployedRes.rows[0].deployed);
+    const available = Number(wallet.balance_cents) - deployed;
+
+    if (capitalAmount > available) {
+      throw new Error('INSUFFICIENT_AVAILABLE_BALANCE');
+    }
+
+    // -------------------------------------------------
+    // Insert cycle
+    // -------------------------------------------------
+
+    const DAYS_PER_MONTH = 30;
+    const totalDays = durationMonths * DAYS_PER_MONTH;
+
+    const { rows } = await client.query(
+      `
+      INSERT INTO cycles (
+        user_id,
+        wallet_id,
+        wallet_type,
+        capital_cents,
+        expected_profit_cents,
+        duration_months,
+        started_at,
+        ends_at,
+        status
+      )
+      VALUES (
+        $1,$2,$3,$4,$5,$6,
+        NOW(),
+        NOW() + ($7 || ' days')::interval,
+        'RUNNING'
+      )
+      RETURNING *
+      `,
+      [
+        userId,
+        walletId,
+        wallet.type,
+        capitalAmount,
+        expectedProfit,
+        durationMonths,
+        totalDays
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return rows[0];
+
+  } catch (err) {
+
+    await client.query('ROLLBACK');
+    throw err;
+
+  } finally {
+
+    client.release();
+
+  }
+
+}
+
+
+
+// =====================================================
+// SETTLE COMPLETED CYCLES
+// =====================================================
+
 async function settleCompletedCycles() {
 
   const client = await pool.connect();
@@ -15,39 +138,23 @@ async function settleCompletedCycles() {
       SELECT *
       FROM cycles
       WHERE status = 'RUNNING'
-        AND ends_at <= NOW()
+      AND ends_at <= NOW()
       FOR UPDATE
       `
     );
 
     for (const cycle of cycles) {
 
-      // calculate pnl
-      const pnlRes = await client.query(
-        `
-        SELECT COALESCE(SUM(
-          CASE
-            WHEN side = 'LONG'
-              THEN (exit_price - entry_price) * size
-            WHEN side = 'SHORT'
-              THEN (entry_price - exit_price) * size
-            ELSE 0
-          END
-        ),0) AS total_pnl
-        FROM positions
-        WHERE cycle_id = $1
-          AND status = 'CLOSED'
-        `,
-        [cycle.id]
-      );
-
-      const totalPnl = Number(pnlRes.rows[0].total_pnl);
-      const pnlCents = Math.round(totalPnl * 100);
+      const expectedProfitCents =
+        Number(cycle.expected_profit_cents || 0);
 
       const totalReturnCents =
-        Number(cycle.capital_cents) + pnlCents;
+        Number(cycle.capital_cents) + expectedProfitCents;
 
-      // lock wallet
+      // -------------------------------------------------
+      // Lock wallet
+      // -------------------------------------------------
+
       const walletRes = await client.query(
         `
         SELECT balance_cents
@@ -68,7 +175,10 @@ async function settleCompletedCycles() {
       const newBalance =
         currentBalance + totalReturnCents;
 
-      // insert ledger FIRST (required by trigger)
+      // -------------------------------------------------
+      // Ledger entry (trigger requires this first)
+      // -------------------------------------------------
+
       await client.query(
         `
         INSERT INTO wallet_ledger
@@ -87,7 +197,10 @@ async function settleCompletedCycles() {
         ]
       );
 
-      // update wallet AFTER ledger insert
+      // -------------------------------------------------
+      // Update wallet
+      // -------------------------------------------------
+
       await client.query(
         `
         UPDATE wallets
@@ -101,7 +214,10 @@ async function settleCompletedCycles() {
         ]
       );
 
-      // mark cycle completed
+      // -------------------------------------------------
+      // Mark cycle completed
+      // -------------------------------------------------
+
       await client.query(
         `
         UPDATE cycles
@@ -111,7 +227,7 @@ async function settleCompletedCycles() {
         WHERE id = $2
         `,
         [
-          pnlCents,
+          expectedProfitCents,
           cycle.id
         ]
       );
@@ -131,8 +247,12 @@ async function settleCompletedCycles() {
     client.release();
 
   }
+
 }
 
+
+
 module.exports = {
+  startCycle,
   settleCompletedCycles
 };
