@@ -87,18 +87,17 @@ async function transferToMainWallet({
 
       // 1️⃣ Insert debit into ledger FIRST
       await client.query(
-        `
-        INSERT INTO wallet_ledger
-          (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
-        VALUES
-          ($1, $2, 'REFERRAL_DEBIT', $3, NULL)
-        `,
-        [
-          referralWalletId,
-          -amountCents,
-          referralNewBalance
-        ]
-      );
+`
+INSERT INTO wallet_ledger
+(wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+VALUES ($1, $2, 'REFERRAL_DEBIT', $3, NULL)
+`,
+[
+  referralWalletId,
+  -amountCents,
+  referralNewBalance
+]
+);
 
       // 2️⃣ Update cached wallet balance
       await client.query(
@@ -122,21 +121,20 @@ async function transferToMainWallet({
 
     // 1️⃣ Insert credit into ledger FIRST
     await client.query(
-      `
-      INSERT INTO wallet_ledger
-        (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
-      VALUES
-        ($1, $2, $3, $4, NULL)
-      `,
-      [
-        realWalletId,
-        amountCents,
-        source === 'REFERRAL'
-          ? 'REFERRAL_TRANSFER'
-          : 'BOT_TRANSFER',
-        realNewBalance
-      ]
-    );
+`
+INSERT INTO wallet_ledger
+(wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+VALUES ($1, $2, $3, $4, NULL)
+`,
+[
+  realWalletId,
+  amountCents,
+  source === 'REFERRAL'
+    ? 'REFERRAL_TRANSFER'
+    : 'BOT_TRANSFER',
+  realNewBalance
+]
+);
 
     // 2️⃣ Update cached wallet balance
     await client.query(
