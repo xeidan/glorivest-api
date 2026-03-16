@@ -7,6 +7,7 @@ async function settleCompletedCycles() {
   const client = await pool.connect();
 
   try {
+
     await client.query('BEGIN');
 
     const { rows: cycles } = await client.query(
@@ -21,7 +22,7 @@ async function settleCompletedCycles() {
 
     for (const cycle of cycles) {
 
-      // 1️⃣ Calculate real PnL from CLOSED trades only
+      // calculate pnl
       const pnlRes = await client.query(
         `
         SELECT COALESCE(SUM(
@@ -46,7 +47,7 @@ async function settleCompletedCycles() {
       const totalReturnCents =
         Number(cycle.capital_cents) + pnlCents;
 
-      // 2️⃣ Lock wallet to calculate new balance safely
+      // lock wallet
       const walletRes = await client.query(
         `
         SELECT balance_cents
@@ -58,41 +59,25 @@ async function settleCompletedCycles() {
       );
 
       if (!walletRes.rows.length) {
-        throw new Error('Wallet not found during cycle settlement');
+        throw new Error('Wallet not found');
       }
 
-      const currentBalance = Number(walletRes.rows[0].balance_cents);
-      const newBalance = currentBalance + totalReturnCents;
+      const currentBalance =
+        Number(walletRes.rows[0].balance_cents);
 
-      // 3️⃣ Update wallet balance
-      await client.query(
-        `
-        UPDATE wallets
-        SET balance_cents = $1,
-            updated_at = NOW()
-        WHERE id = $2
-        `,
-        [newBalance, cycle.wallet_id]
-      );
+      const newBalance =
+        currentBalance + totalReturnCents;
 
-      // 4️⃣ Store realized profit + mark cycle completed
-      await client.query(
-        `
-        UPDATE cycles
-        SET status = 'COMPLETED',
-            completed_at = NOW(),
-            realized_profit_cents = $1
-        WHERE id = $2
-        `,
-        [pnlCents, cycle.id]
-      );
-
-      // 5️⃣ Insert ledger entry with required balance_after_cents
+      // insert ledger FIRST (required by trigger)
       await client.query(
         `
         INSERT INTO wallet_ledger
-          (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
-        VALUES ($1, $2, 'CYCLE_SETTLEMENT', $3, $4)
+          (wallet_id,
+           amount_cents,
+           reason,
+           balance_after_cents,
+           cycle_id)
+        VALUES ($1,$2,'CYCLE_SETTLEMENT',$3,$4)
         `,
         [
           cycle.wallet_id,
@@ -101,16 +86,50 @@ async function settleCompletedCycles() {
           cycle.id
         ]
       );
+
+      // update wallet AFTER ledger insert
+      await client.query(
+        `
+        UPDATE wallets
+        SET balance_cents = $1,
+            updated_at = NOW()
+        WHERE id = $2
+        `,
+        [
+          newBalance,
+          cycle.wallet_id
+        ]
+      );
+
+      // mark cycle completed
+      await client.query(
+        `
+        UPDATE cycles
+        SET status = 'COMPLETED',
+            completed_at = NOW(),
+            realized_profit_cents = $1
+        WHERE id = $2
+        `,
+        [
+          pnlCents,
+          cycle.id
+        ]
+      );
     }
 
     await client.query('COMMIT');
+
     return cycles.length;
 
   } catch (err) {
+
     await client.query('ROLLBACK');
     throw err;
+
   } finally {
+
     client.release();
+
   }
 }
 
