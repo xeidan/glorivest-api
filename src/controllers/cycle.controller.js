@@ -210,9 +210,8 @@ async function stopCycle({ userId, cycleId }) {
       await client.query(
         `
         INSERT INTO wallet_ledger
-          (wallet_id, cycle_id, type, reason, amount_cents, balance_after_cents)
-        VALUES
-          ($1, $2, 'CREDIT', 'CYCLE_FORFEIT_REFUND', $3, $4)
+        (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+        VALUES ($1,$2,$3,$4,$5)
         `,
         [
           wallet.id,
