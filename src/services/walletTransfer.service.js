@@ -89,9 +89,9 @@ async function transferToMainWallet({
       await client.query(
         `
         INSERT INTO wallet_ledger
-          (wallet_id, amount_cents, reason, balance_after_cents)
+          (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
         VALUES
-          ($1, $2, 'REFERRAL_DEBIT', $3)
+          ($1, $2, 'REFERRAL_DEBIT', $3, NULL)
         `,
         [
           referralWalletId,
@@ -124,9 +124,9 @@ async function transferToMainWallet({
     await client.query(
       `
       INSERT INTO wallet_ledger
-        (wallet_id, amount_cents, reason, balance_after_cents)
+        (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
       VALUES
-        ($1, $2, $3, $4)
+        ($1, $2, $3, $4, NULL)
       `,
       [
         realWalletId,
