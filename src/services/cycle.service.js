@@ -41,24 +41,41 @@ async function settleCompletedCycles() {
       );
 
       const totalPnl = Number(pnlRes.rows[0].total_pnl);
-
       const pnlCents = Math.round(totalPnl * 100);
 
       const totalReturnCents =
-        cycle.capital_cents + pnlCents;
+        Number(cycle.capital_cents) + pnlCents;
 
-      // 2️⃣ Credit wallet
+      // 2️⃣ Lock wallet to calculate new balance safely
+      const walletRes = await client.query(
+        `
+        SELECT balance_cents
+        FROM wallets
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [cycle.wallet_id]
+      );
+
+      if (!walletRes.rows.length) {
+        throw new Error('Wallet not found during cycle settlement');
+      }
+
+      const currentBalance = Number(walletRes.rows[0].balance_cents);
+      const newBalance = currentBalance + totalReturnCents;
+
+      // 3️⃣ Update wallet balance
       await client.query(
         `
         UPDATE wallets
-        SET balance_cents = balance_cents + $1,
+        SET balance_cents = $1,
             updated_at = NOW()
         WHERE id = $2
         `,
-        [totalReturnCents, cycle.wallet_id]
+        [newBalance, cycle.wallet_id]
       );
 
-      // 3️⃣ Store realized profit + mark completed
+      // 4️⃣ Store realized profit + mark cycle completed
       await client.query(
         `
         UPDATE cycles
@@ -70,14 +87,19 @@ async function settleCompletedCycles() {
         [pnlCents, cycle.id]
       );
 
-      // 4️⃣ Ledger entry
+      // 5️⃣ Insert ledger entry with required balance_after_cents
       await client.query(
         `
         INSERT INTO wallet_ledger
-          (wallet_id, amount_cents, reason, cycle_id)
-        VALUES ($1, $2, 'CYCLE_SETTLEMENT', $3)
+          (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+        VALUES ($1, $2, 'CYCLE_SETTLEMENT', $3, $4)
         `,
-        [cycle.wallet_id, totalReturnCents, cycle.id]
+        [
+          cycle.wallet_id,
+          totalReturnCents,
+          newBalance,
+          cycle.id
+        ]
       );
     }
 
