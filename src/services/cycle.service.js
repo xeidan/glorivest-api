@@ -250,9 +250,107 @@ async function settleCompletedCycles() {
 
 }
 
+async function stopCycle({ userId, cycleId }) {
 
+  const client = await pool.connect();
+
+  try {
+
+    await client.query('BEGIN');
+
+    // lock cycle
+    const cycleRes = await client.query(
+      `
+      SELECT *
+      FROM cycles
+      WHERE id = $1
+      AND user_id = $2
+      AND status = 'RUNNING'
+      FOR UPDATE
+      `,
+      [cycleId, userId]
+    );
+
+    if (!cycleRes.rows.length) {
+      throw new Error('Active cycle not found');
+    }
+
+    const cycle = cycleRes.rows[0];
+
+    // lock wallet
+    const walletRes = await client.query(
+      `
+      SELECT balance_cents
+      FROM wallets
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [cycle.wallet_id]
+    );
+
+    const currentBalance = Number(walletRes.rows[0].balance_cents);
+
+    const refundAmount = Number(cycle.capital_cents);
+
+    const newBalance = currentBalance + refundAmount;
+
+    // ledger entry
+    await client.query(
+      `
+      INSERT INTO wallet_ledger
+      (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+      VALUES ($1,$2,'CYCLE_FORFEIT_REFUND',$3,$4)
+      `,
+      [
+        cycle.wallet_id,
+        refundAmount,
+        newBalance,
+        cycle.id
+      ]
+    );
+
+    // update wallet
+    await client.query(
+      `
+      UPDATE wallets
+      SET balance_cents = $1,
+          updated_at = NOW()
+      WHERE id = $2
+      `,
+      [newBalance, cycle.wallet_id]
+    );
+
+    // cancel cycle
+    await client.query(
+      `
+      UPDATE cycles
+      SET status = 'CANCELLED',
+          completed_at = NOW(),
+          realized_profit_cents = 0
+      WHERE id = $1
+      `,
+      [cycle.id]
+    );
+
+    await client.query('COMMIT');
+
+    return cycle;
+
+  } catch (err) {
+
+    await client.query('ROLLBACK');
+    throw err;
+
+  } finally {
+
+    client.release();
+
+  }
+
+}
 
 module.exports = {
   startCycle,
+  stopCycle,
   settleCompletedCycles
 };
