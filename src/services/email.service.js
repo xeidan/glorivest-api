@@ -8,9 +8,16 @@ const resend = new Resend(process.env.RESEND_API_KEY);
  * Send OTP email
  */
 async function sendOTPEmail(to, otp) {
+  if (!to) {
+    console.error('❌ No recipient email provided');
+    return false;
+  }
+
   try {
-    await resend.emails.send({
-      from: 'no-reply@glorivest.com',
+    console.log('📨 Attempting to send OTP email →', to);
+
+    const response = await resend.emails.send({
+      from: 'Glorivest <no-reply@glorivest.com>',
       to,
       subject: 'Your Glorivest OTP',
       html: `
@@ -23,11 +30,17 @@ async function sendOTPEmail(to, otp) {
       `
     });
 
-  } catch (err) {
-    console.error('Email send failed:', err);
+    console.log('✅ Email API response:', response);
 
-    // 🔴 FALLBACK (DO NOT REMOVE TODAY)
-    console.log('OTP FALLBACK:', otp);
+    return true;
+
+  } catch (err) {
+    console.error('❌ Email send failed FULL:', err);
+
+    // fallback so you don’t get blocked
+    console.log('⚠️ OTP FALLBACK:', otp);
+
+    return false;
   }
 }
 
