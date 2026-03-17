@@ -122,7 +122,7 @@ SELECT
 
 FROM cycles c
 WHERE c.wallet_id = $1
-  AND c.display_status = 'RUNNING'
+  AND c.status = 'RUNNING'
 ORDER BY c.started_at ASC;
 
 
