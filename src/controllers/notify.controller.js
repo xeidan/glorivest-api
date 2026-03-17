@@ -1,7 +1,7 @@
 // src/controllers/notify.controller.js
 'use strict';
 
-const { sendMailSafe, EmailTpl } = require('../utils/email');
+const { sendEmail } = require('../services/email.service');
 const { pool } = require('../config/database');
 
 exports.notifyDeposit = async (req, res) => {
@@ -16,7 +16,7 @@ exports.notifyDeposit = async (req, res) => {
     if (!u.rows.length)
       return res.status(404).json({ message: 'User not found' });
 
-    await sendMailSafe({
+    await sendEmail({
       to: u.rows[0].email,
       subject: 'Deposit Confirmed',
       html: EmailTpl.depositConfirmed({
@@ -45,7 +45,7 @@ exports.notifyWithdrawal = async (req, res) => {
     if (!u.rows.length)
       return res.status(404).json({ message: 'User not found' });
 
-    await sendMailSafe({
+    await sendEmail({
       to: u.rows[0].email,
       subject: 'Withdrawal Successful',
       html: EmailTpl.withdrawalConfirmed({

@@ -4,7 +4,7 @@
 const pool = require('../config/database').pool;
 const geoip = require('geoip-lite');
 const UAParser = require('ua-parser-js');
-const { sendMailSafe, EmailTpl } = require('../utils/email');
+const { sendEmail } = require('../services/email.service');
 
 async function saveLoginEvent({ user_id = null, ip, user_agent, fingerprint = null, succeeded = false, suspicious = false, reason = null }) {
   const geo = geoip.lookup(ip) || {};
