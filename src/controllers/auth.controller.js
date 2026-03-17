@@ -97,7 +97,10 @@ const register = async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
 
     // 4️⃣ Generate OTP
-    const code = genOtp();
+const code = genOtp();
+
+// 🔴 CRITICAL FOR LAUNCH (OTP fallback)
+console.log('OTP GENERATED (REGISTER):', code, 'EMAIL:', normalizedEmail);
 
     // 5️⃣ Store OTP + registration payload
     await pool.query(
@@ -513,6 +516,9 @@ const requestEmailUpdate = async (req, res) => {
 
     const code = genOtp();
 
+    // 🔴 CRITICAL FOR LAUNCH
+    console.log('OTP GENERATED (EMAIL UPDATE):', code, 'EMAIL:', newEmail.toLowerCase());
+
     await pool.query(
       `
       INSERT INTO otps (email, code, purpose, expires_at, meta)
@@ -595,6 +601,9 @@ const sendOtp = async (req, res) => {
     }
 
     const code = genOtp();
+
+// 🔴 CRITICAL FOR LAUNCH
+console.log('OTP GENERATED (SEND OTP):', code, 'EMAIL:', email);
 
     await pool.query(
       `
