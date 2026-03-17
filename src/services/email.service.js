@@ -10,7 +10,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 async function sendOTPEmail(to, otp) {
   try {
     await resend.emails.send({
-      from: 'onboarding@resend.dev', // TEMP (works instantly)
+      from: 'no-reply@glorivest.com',
       to,
       subject: 'Your Glorivest OTP',
       html: `
