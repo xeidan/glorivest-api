@@ -119,8 +119,6 @@ console.log('OTP GENERATED (REGISTER):', code, 'EMAIL:', normalizedEmail);
       ]
     );
 
-    // 6️⃣ Send email
-   const { sendOTPEmail } = require('../utils/email');
 
 await sendOTPEmail(normalizedEmail, code);
 
@@ -523,11 +521,7 @@ const requestEmailUpdate = async (req, res) => {
       [newEmail.toLowerCase(), code, JSON.stringify({ user_id: userId })]
     );
 
-    await sendMailSafe({
-      to: newEmail,
-      subject: 'Confirm your new email',
-      html: `<p>Your OTP is <b>${code}</b>. It expires in ${OTP_TTL_MIN} minutes.</p>`
-    });
+    await sendOTPEmail(newEmail, code);
 
     return res.json({ message: 'Verification code sent to new email' });
   } catch (err) {
@@ -609,11 +603,7 @@ console.log('OTP GENERATED (SEND OTP):', code, 'EMAIL:', email);
       [email.toLowerCase(), code, purpose]
     );
 
-    await sendMailSafe({
-      to: email,
-      subject: 'Your Glorivest OTP',
-      html: `<p>Your OTP is <b>${code}</b>. It expires in ${OTP_TTL_MIN} minutes.</p>`
-    });
+    await sendOTPEmail(email, code);
 
     return res.json({ message: 'OTP sent' });
   } catch (err) {
