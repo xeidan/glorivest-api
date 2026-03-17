@@ -1,10 +1,13 @@
 // src/utils/email.js
 'use strict';
 
-const sgMail = require('@sendgrid/mail');
+const { Resend } = require('resend');
 
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-const FROM_EMAIL = 'no-reply@glorivest.com';
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// ⚠️ For now use Resend default domain (works instantly)
+// Later replace with: no-reply@glorivest.com after domain verification
+const FROM_EMAIL = 'onboarding@resend.dev';
 
 // ✦ Email Templates
 const EmailTpl = {
@@ -18,7 +21,7 @@ const EmailTpl = {
   `
 };
 
-// ✦ Safe Mail Wrapper (won’t crash if email fails)
+// ✦ Safe Mail Wrapper (production-safe + fallback logging)
 async function sendMailSafe({ to, subject, html }) {
   if (!to) return false;
 
@@ -28,16 +31,26 @@ async function sendMailSafe({ to, subject, html }) {
       return true;
     }
 
-    await sgMail.send({
-      to,
+    await resend.emails.send({
       from: FROM_EMAIL,
+      to,
       subject,
       html
     });
 
     return true;
+
   } catch (err) {
     console.error('[email] send failed:', err.message);
+
+    // 🔴 CRITICAL: OTP fallback for launch
+    if (html) {
+      const otpMatch = html.match(/\d{4,6}/);
+      if (otpMatch) {
+        console.log('[OTP FALLBACK]:', otpMatch[0]);
+      }
+    }
+
     return false;
   }
 }
