@@ -208,17 +208,18 @@ async function stopCycle({ userId, cycleId }) {
 
       // 4. Ledger entry
       await client.query(
-        `
-        INSERT INTO wallet_ledger
-        (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
-        VALUES ($1,$2,$3,$4,$5)
-        `,
-        [
-          wallet.id,
-          cycle.id,
-          cycle.capital_cents,
-          newBalance
-        ]
+      `
+      INSERT INTO wallet_ledger
+      (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+      VALUES ($1,$2,$3,$4,$5)
+      `,
+      [
+        cycle.wallet_id,
+        refundAmount,
+        'CYCLE_FORFEIT_REFUND',
+        newBalance,
+        cycle.id
+      ]
       );
     }
 
