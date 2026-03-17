@@ -122,7 +122,7 @@ SELECT
 
 FROM cycles c
 WHERE c.wallet_id = $1
-  AND c.status = 'RUNNING'
+  AND c.display_status = 'RUNNING'
 ORDER BY c.started_at ASC;
 
 
@@ -171,15 +171,19 @@ router.get('/completed', auth, async (req, res) => {
     }
 
     const cyclesRes = await pool.query(
-      `
-      SELECT *
-      FROM cycles
-      WHERE wallet_id = $1
-        AND status = 'COMPLETED'
-      ORDER BY completed_at DESC
-      `,
-      [walletId]
-    );
+  `
+  SELECT *,
+    CASE
+      WHEN status = 'CANCELLED' THEN 'FORFEITED'
+      ELSE 'COMPLETED'
+    END AS display_status
+  FROM cycles
+  WHERE wallet_id = $1
+    AND status IN ('COMPLETED', 'CANCELLED')
+  ORDER BY completed_at DESC
+  `,
+  [walletId]
+);
 
     return res.json({ cycles: cyclesRes.rows });
 
