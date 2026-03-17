@@ -172,15 +172,15 @@ async function stopCycle({ userId, cycleId }) {
 
     const cycle = cycleRes.rows[0];
 
-    // DEMO cycles do NOT affect wallets
     const isDemo = cycle.wallet_type === 'DEMO';
 
-    // 2. Lock wallet (LIVE only)
-    let wallet;
+    // 2. LIVE wallet handling only
     if (!isDemo) {
+
+      // lock wallet
       const walletRes = await client.query(
         `
-        SELECT *
+        SELECT balance_cents
         FROM wallets
         WHERE id = $1
         FOR UPDATE
@@ -192,43 +192,46 @@ async function stopCycle({ userId, cycleId }) {
         throw new Error('Wallet not found');
       }
 
-      wallet = walletRes.rows[0];
+      const currentBalance = Number(walletRes.rows[0].balance_cents);
 
-      // 3. Refund capital
-      const newBalance = wallet.balance_cents + cycle.capital_cents;
+      const refundAmount = Number(cycle.capital_cents);
+      const newBalance = currentBalance + refundAmount;
 
+      // IMPORTANT: ledger FIRST (trigger depends on this)
+      await client.query(
+        `
+        INSERT INTO wallet_ledger
+        (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
+        VALUES ($1,$2,$3,$4,$5)
+        `,
+        [
+          cycle.wallet_id,
+          refundAmount,
+          'CYCLE_FORFEIT_REFUND',
+          newBalance,
+          cycle.id
+        ]
+      );
+
+      // THEN update wallet
       await client.query(
         `
         UPDATE wallets
-        SET balance_cents = $1
+        SET balance_cents = $1,
+            updated_at = NOW()
         WHERE id = $2
         `,
-        [newBalance, wallet.id]
-      );
-
-      // 4. Ledger entry
-      await client.query(
-      `
-      INSERT INTO wallet_ledger
-      (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
-      VALUES ($1,$2,$3,$4,$5)
-      `,
-      [
-        cycle.wallet_id,
-        refundAmount,
-        'CYCLE_FORFEIT_REFUND',
-        newBalance,
-        cycle.id
-      ]
+        [newBalance, cycle.wallet_id]
       );
     }
 
-    // 5. Cancel cycle
+    // 3. Cancel cycle
     const { rows } = await client.query(
       `
       UPDATE cycles
       SET status = 'CANCELLED',
-          completed_at = NOW()
+          completed_at = NOW(),
+          realized_profit_cents = 0
       WHERE id = $1
       RETURNING *
       `,
@@ -236,6 +239,7 @@ async function stopCycle({ userId, cycleId }) {
     );
 
     await client.query('COMMIT');
+
     return rows[0];
 
   } catch (err) {
