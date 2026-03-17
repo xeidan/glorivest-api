@@ -5,7 +5,7 @@ const pool = db.pool;
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
-const { sendMailSafe, EmailTpl } = require('../utils/email');
+const { sendOTPEmail } = require('../utils/email');
 const { logDevice, getDevices } = require('../utils/device');
 const { ensureUserWallets } = require('../services/wallet.service');
 const { generateReferralCode } = require('../utils/referralCode');
@@ -120,13 +120,9 @@ console.log('OTP GENERATED (REGISTER):', code, 'EMAIL:', normalizedEmail);
     );
 
     // 6️⃣ Send email
-    await sendMailSafe({
-      to: normalizedEmail,
-      subject: 'Your Glorivest verification code',
-      html: EmailTpl?.otp
-        ? EmailTpl.otp({ code, purpose: 'verify', email: normalizedEmail })
-        : `<p>Your OTP is <b>${code}</b></p>`
-    });
+   const { sendOTPEmail } = require('../utils/email');
+
+await sendOTPEmail(normalizedEmail, code);
 
     return res.json({ message: 'OTP sent' });
 
