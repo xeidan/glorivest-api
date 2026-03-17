@@ -4,78 +4,85 @@ const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const FROM = 'Glorivest <no-reply@glorivest.com>';
+// ✅ Use a real sender (NOT no-reply)
+const FROM_EMAIL = 'Glorivest <support@glorivest.com>';
 
 /**
- * CORE EMAIL SENDER
+ * Send OTP email (production-safe)
  */
-async function sendEmail({ to, subject, html }) {
+async function sendOTPEmail(to, otp) {
   if (!to) {
-    console.error('❌ Missing recipient');
+    console.error('❌ No recipient email provided');
     return false;
   }
 
   try {
-    console.log('📨 Sending email →', to);
+    console.log('📨 Sending OTP email →', to);
 
-    const res = await resend.emails.send({
-      from: FROM,
+    const subject = 'Your Glorivest verification code (expires in 10 minutes)';
+
+    const html = `
+      <div style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
+        <h2 style="margin-bottom: 10px;">Verify your email</h2>
+        <p>Use the code below to continue:</p>
+
+        <div style="
+          font-size: 32px;
+          font-weight: bold;
+          letter-spacing: 4px;
+          margin: 20px 0;
+        ">
+          ${otp}
+        </div>
+
+        <p>This code expires in 10 minutes.</p>
+
+        <hr style="margin: 30px 0;" />
+
+        <p style="font-size: 12px; color: #777;">
+          If you didn’t request this, you can safely ignore this email.
+        </p>
+
+        <p style="font-size: 12px; color: #777;">
+          — Glorivest Team
+        </p>
+      </div>
+    `;
+
+    // ✅ Plain text version (VERY important for deliverability)
+    const text = `
+Your Glorivest verification code:
+
+${otp}
+
+This code expires in 10 minutes.
+
+If you didn’t request this, ignore this email.
+— Glorivest
+    `;
+
+    const response = await resend.emails.send({
+      from: FROM_EMAIL,
       to,
       subject,
-      html
+      html,
+      text
     });
 
-    console.log('✅ Email sent:', res);
+    console.log('✅ Email sent:', response);
+
     return true;
 
   } catch (err) {
-    console.error('❌ Email error FULL:', err);
+    console.error('❌ Email send failed FULL:', err);
 
-    // fallback: log OTP if present
-    const otpMatch = html?.match(/\d{4,6}/);
-    if (otpMatch) {
-      console.log('⚠️ OTP FALLBACK:', otpMatch[0]);
-    }
+    // 🔴 Fallback so flow never breaks
+    console.log('⚠️ OTP FALLBACK:', otp);
 
     return false;
   }
 }
 
-/**
- * OTP EMAIL
- */
-function buildOTPEmail(otp) {
-  return `
-    <div style="font-family: sans-serif;">
-      <h2>Your OTP Code</h2>
-      <p>Use the code below:</p>
-      <h1>${otp}</h1>
-      <p>This code expires shortly.</p>
-    </div>
-  `;
-}
-
-/**
- * PUBLIC HELPERS
- */
-async function sendOTPEmail(to, otp) {
-  return sendEmail({
-    to,
-    subject: 'Your Glorivest OTP',
-    html: buildOTPEmail(otp)
-  });
-}
-
-async function sendWelcomeEmail(to) {
-  return sendEmail({
-    to,
-    subject: 'Welcome to Glorivest',
-    html: `<h2>Welcome to Glorivest</h2><p>Your account is ready.</p>`
-  });
-}
-
 module.exports = {
-  sendEmail,
-  sendOTPEmail,
-  sendWelcomeEmail
+  sendOTPEmail
 };
