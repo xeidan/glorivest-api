@@ -4,25 +4,35 @@ const { pool } = require('../config/database');
 
 module.exports = async function requireAdmin(req, res, next) {
   try {
-    if (!req.user?.id) {
-      return res.status(401).json({ message: 'Unauthorized' });
+    // 🔴 ensure auth middleware worked
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ message: 'Unauthorized (no user)' });
     }
 
     const { rows } = await pool.query(
-      `SELECT role FROM users WHERE id = $1 LIMIT 1`,
+      `SELECT id, role FROM users WHERE id = $1 LIMIT 1`,
       [req.user.id]
     );
 
     if (!rows.length) {
-      return res.status(401).json({ message: 'Unauthorized' });
+      return res.status(401).json({ message: 'Unauthorized (user not found)' });
     }
 
     const role = rows[0].role;
 
-    // ✅ Case-insensitive check (prevents ADMIN/admin issues)
+    console.log('ADMIN CHECK:', {
+      userId: req.user.id,
+      roleFromDB: role
+    });
+
     if (!role || role.toLowerCase() !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
+      return res.status(403).json({
+        message: `Admin access required. Your role: ${role}`
+      });
     }
+
+    // ✅ attach admin
+    req.admin = rows[0];
 
     next();
 
