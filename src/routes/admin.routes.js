@@ -9,7 +9,7 @@ const requireAdmin = require('../middleware/requireAdmin');
 
 const { approveDeposit } = require('../services/adminDeposit.service');
 const { approveWithdrawal } = require('../services/withdrawal.service');
-const { listDeposits } = require('../controllers/admin.deposit.controller');
+const { listDeposits, listWithdrawals } = require('../controllers/admin.deposit.controller');
 
 // ==========================
 // Admin Rate Limiter
@@ -26,13 +26,13 @@ router.use(requireAuth);
 router.use(requireAdmin);
 router.use(adminLimiter);
 
+
 // ==========================
-// List Deposits (Admin Queue)
+// List Deposits, Withdrawals (Admin Queue)
 // ==========================
-router.get(
-  '/deposits',
-  listDeposits
-);
+router.get('/deposits', listDeposits);
+router.get('/withdrawals', listWithdrawals);
+
 
 // ==========================
 // Approve Deposit
@@ -41,7 +41,7 @@ router.post(
   '/deposits/:id/approve',
   async (req, res) => {
     try {
-      await approveDeposit(req.params.id, req.user.id);
+      await approveDeposit(req.params.id, req.admin.id);
       return res.json({ message: 'Deposit approved' });
     } catch (err) {
       console.error('approveDeposit error:', err);
@@ -57,7 +57,7 @@ router.post(
   '/withdrawals/:id/approve',
   async (req, res) => {
     try {
-      await approveWithdrawal(req.params.id, req.user.id);
+      await approveWithdrawal(req.params.id, req.admin.id);
       return res.json({ message: 'Withdrawal approved' });
     } catch (err) {
       console.error('approveWithdrawal error:', err);

@@ -260,7 +260,7 @@ const verifyOtp = async (req, res) => {
 // -----------------------------
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    let { email, password } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({
@@ -268,16 +268,21 @@ const login = async (req, res) => {
       });
     }
 
+    email = email.toLowerCase().trim();
+
     const { rows } = await pool.query(
       `
-      SELECT id, email, password_hash,
+      SELECT id,
+             email,
+             password_hash,
+             role,
              failed_login_attempts,
              account_locked_until
       FROM users
       WHERE email = $1
       LIMIT 1
       `,
-      [email.toLowerCase()]
+      [email]
     );
 
     if (!rows.length) {
@@ -286,7 +291,7 @@ const login = async (req, res) => {
 
     const user = rows[0];
 
-    // 🔒 Check if locked
+    // 🔒 Check lock
     if (
       user.account_locked_until &&
       new Date(user.account_locked_until) > new Date()
@@ -299,11 +304,9 @@ const login = async (req, res) => {
     const match = await bcrypt.compare(password, user.password_hash);
 
     if (!match) {
+      const attempts = user.failed_login_attempts + 1;
 
-      const newAttempts = user.failed_login_attempts + 1;
-
-      // Lock after 5 failed attempts
-      if (newAttempts >= 5) {
+      if (attempts >= 5) {
         await pool.query(
           `
           UPDATE users
@@ -325,13 +328,13 @@ const login = async (req, res) => {
         SET failed_login_attempts = $1
         WHERE id = $2
         `,
-        [newAttempts, user.id]
+        [attempts, user.id]
       );
 
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // ✅ Reset attempts on success
+    // ✅ Reset attempts
     await pool.query(
       `
       UPDATE users
@@ -344,12 +347,14 @@ const login = async (req, res) => {
 
     const token = signToken(user);
 
+    // ✅ CLEAN + COMPLETE RESPONSE
     return res.json({
       token,
       user: {
         id: user.id,
         email: user.email,
-        glorivest_id: `GV${150000 + user.id}`
+        role: user.role || 'user', // 🔴 REQUIRED
+        glorivest_id: `GV${150000 + Number(user.id)}`
       }
     });
 

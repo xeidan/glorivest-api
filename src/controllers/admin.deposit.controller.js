@@ -57,4 +57,25 @@ async function listDeposits(req, res) {
   }
 }
 
-module.exports = { listDeposits };
+
+async function listWithdrawals(req, res) {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id,
+             user_id,
+             amount_cents,
+             status,
+             created_at
+      FROM withdrawals
+      ORDER BY created_at DESC
+    `);
+
+    return res.json(rows);
+
+  } catch (err) {
+    console.error('listWithdrawals error:', err);
+    return res.status(500).json({ message: 'Failed to fetch withdrawals' });
+  }
+}
+
+module.exports = { listDeposits, listWithdrawals };
