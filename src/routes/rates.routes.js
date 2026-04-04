@@ -1,11 +1,12 @@
 'use strict';
+
 const express = require('express');
 const router = express.Router();
 
-router.get('/', async (req, res) => {
-  res.json({
-    USD_NGN: 1500
-  });
-});
+const rateController = require('../controllers/rate.controller');
+const requireAdmin = require('../middleware/requireAdmin');
+
+router.get('/', rateController.getRate);
+router.put('/', requireAdmin, rateController.updateRate);
 
 module.exports = router;

@@ -30,6 +30,7 @@ router.use('/leaderboard', require('./leaderboard.routes'));
 router.use('/rates', require('./rates.routes'));
 
 
+
 /*
 |--------------------------------------------------------------------------
 | Admin Routes
