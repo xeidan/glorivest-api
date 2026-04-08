@@ -2,7 +2,12 @@
 
 const { Resend } = require('resend');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resend = null;
+
+if (process.env.RESEND_API_KEY) {
+  const { Resend } = require('resend');
+  resend = new Resend(process.env.RESEND_API_KEY);
+}
 
 // ✅ Use a real sender (NOT no-reply)
 const FROM_EMAIL = 'Glorivest <support@glorivest.com>';
@@ -15,6 +20,11 @@ async function sendOTPEmail(to, otp) {
     console.error('❌ No recipient email provided');
     return false;
   }
+
+  if (!resend) {
+  console.log('Email service disabled');
+  return;
+}
 
   try {
     console.log('📨 Sending OTP email →', to);
