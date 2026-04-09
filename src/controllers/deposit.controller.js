@@ -97,6 +97,7 @@ exports.createDeposit = async (req, res) => {
     console.error(err);
     res.status(500).json({ message: 'Deposit failed' });
   }
+  console.log('NEW DEPOSIT LOGIC RUNNING V2');
 };
 
 /* ================= MARK PAID ================= */
