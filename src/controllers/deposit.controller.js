@@ -11,9 +11,6 @@ function generateReference() {
 
 exports.createDeposit = async (req, res) => {
   try {
-    console.log('CREATE DEPOSIT HIT');
-    console.log('BODY:', req.body);
-
     const userId = req.user.id;
 
     const {
@@ -42,8 +39,6 @@ exports.createDeposit = async (req, res) => {
 
     const rate = Number(rows[0]?.value);
 
-    console.log('RATE:', rate);
-
     if (!rate) {
       return res.status(500).json({ message: 'Rate not set' });
     }
@@ -51,35 +46,38 @@ exports.createDeposit = async (req, res) => {
     const usd = amount_cents / 100;
     const ngn = usd * rate;
 
-    console.log('USD:', usd);
-    console.log('NGN:', ngn);
-
-    const reference = generateReference();
+    const reference = `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
     const result = await pool.query(`
       INSERT INTO deposits (
         user_id,
         amount_cents,
+        amount_exact_cents,
+        amount_requested_cents,
         amount,
-        currency,
-        src_currency,
         fx_rate,
         fx_at,
         reference,
         status,
+        method,
         sender_account_name,
         sender_account_number,
         sender_bank_name
       )
       VALUES (
-        $1,$2,$3,
-        'USD',
-        'NGN',
-        $4,
+        $1,  -- user_id
+        $2,  -- amount_cents
+        $2,  -- amount_exact_cents
+        $2,  -- amount_requested_cents
+        $3,  -- amount (NGN)
+        $4,  -- fx_rate
         NOW(),
-        $5,
+        $5,  -- reference
         'PENDING',
-        $6,$7,$8
+        'BANK',
+        $6,
+        $7,
+        $8
       )
       RETURNING *
     `, [
@@ -93,13 +91,11 @@ exports.createDeposit = async (req, res) => {
       sender_bank_name
     ]);
 
-    console.log('INSERTED:', result.rows[0]);
-
     return res.json(result.rows[0]);
 
   } catch (err) {
-    console.error('CREATE ERROR:', err);
-    return res.status(500).json({ message: 'Deposit failed' });
+    console.error(err);
+    res.status(500).json({ message: 'Deposit failed' });
   }
 };
 
