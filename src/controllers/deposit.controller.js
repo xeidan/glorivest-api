@@ -3,18 +3,17 @@
 const { pool } = require('../config/database');
 const depositService = require('../services/deposit.service');
 
-// ==========================
-// Generate Reference
-// ==========================
 function generateReference() {
   return `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 }
 
-// ==========================
-// Create Deposit
-// ==========================
+/* ================= CREATE ================= */
+
 exports.createDeposit = async (req, res) => {
   try {
+    console.log('CREATE DEPOSIT HIT');
+    console.log('BODY:', req.body);
+
     const userId = req.user.id;
 
     const {
@@ -36,12 +35,14 @@ exports.createDeposit = async (req, res) => {
       return res.status(400).json({ message: 'Invalid account number' });
     }
 
-    // ✅ GET RATE
+    // GET RATE
     const { rows } = await pool.query(
       `SELECT value FROM settings WHERE key = 'USDT_NGN_RATE' LIMIT 1`
     );
 
-    const rate = Number(rows[0]?.value || 0);
+    const rate = Number(rows[0]?.value);
+
+    console.log('RATE:', rate);
 
     if (!rate) {
       return res.status(500).json({ message: 'Rate not set' });
@@ -49,6 +50,9 @@ exports.createDeposit = async (req, res) => {
 
     const usd = amount_cents / 100;
     const ngn = usd * rate;
+
+    console.log('USD:', usd);
+    console.log('NGN:', ngn);
 
     const reference = generateReference();
 
@@ -89,17 +93,18 @@ exports.createDeposit = async (req, res) => {
       sender_bank_name
     ]);
 
+    console.log('INSERTED:', result.rows[0]);
+
     return res.json(result.rows[0]);
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Deposit failed' });
+    console.error('CREATE ERROR:', err);
+    return res.status(500).json({ message: 'Deposit failed' });
   }
 };
 
-// ==========================
-// Mark Paid
-// ==========================
+/* ================= MARK PAID ================= */
+
 exports.markPaid = async (req, res) => {
   try {
     await depositService.markDepositPaid(
@@ -110,13 +115,13 @@ exports.markPaid = async (req, res) => {
     res.json({ message: 'Marked as paid' });
 
   } catch (err) {
+    console.error(err);
     res.status(400).json({ message: err.message });
   }
 };
 
-// ==========================
-// Cancel
-// ==========================
+/* ================= CANCEL ================= */
+
 exports.cancelDeposit = async (req, res) => {
   try {
     await depositService.cancelDeposit(
@@ -127,18 +132,19 @@ exports.cancelDeposit = async (req, res) => {
     res.json({ message: 'Cancelled' });
 
   } catch (err) {
+    console.error(err);
     res.status(400).json({ message: err.message });
   }
 };
 
-// ==========================
-// List
-// ==========================
+/* ================= LIST ================= */
+
 exports.listUserDeposits = async (req, res) => {
   try {
     const deposits = await depositService.listUserDeposits(req.user.id);
     res.json(deposits);
   } catch (err) {
+    console.error(err);
     res.status(400).json({ message: err.message });
   }
 };
