@@ -1,6 +1,14 @@
 'use strict';
 
+const { pool } = require('../config/database');
 const depositService = require('../services/deposit.service');
+
+// ==========================
+// Generate Reference
+// ==========================
+function generateReference() {
+  return `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+}
 
 // ==========================
 // Create Deposit
@@ -11,7 +19,6 @@ exports.createDeposit = async (req, res) => {
 
     const {
       amount_cents,
-      method,
       sender_account_name,
       sender_account_number,
       sender_bank_name
@@ -21,7 +28,15 @@ exports.createDeposit = async (req, res) => {
       return res.status(400).json({ message: 'Minimum deposit is $50' });
     }
 
-    // 🔑 GET RATE FROM SETTINGS
+    if (!sender_account_name || !sender_account_number || !sender_bank_name) {
+      return res.status(400).json({ message: 'Missing bank details' });
+    }
+
+    if (!/^\d{10}$/.test(sender_account_number)) {
+      return res.status(400).json({ message: 'Invalid account number' });
+    }
+
+    // ✅ GET RATE
     const { rows } = await pool.query(
       `SELECT value FROM settings WHERE key = 'USDT_NGN_RATE' LIMIT 1`
     );
@@ -35,7 +50,8 @@ exports.createDeposit = async (req, res) => {
     const usd = amount_cents / 100;
     const ngn = usd * rate;
 
-    // 🔒 CREATE DEPOSIT (LOCK RATE)
+    const reference = generateReference();
+
     const result = await pool.query(`
       INSERT INTO deposits (
         user_id,
@@ -45,19 +61,21 @@ exports.createDeposit = async (req, res) => {
         src_currency,
         fx_rate,
         fx_at,
+        reference,
         status,
         sender_account_name,
         sender_account_number,
         sender_bank_name
       )
       VALUES (
-        $1, $2, $3,
+        $1,$2,$3,
         'USD',
         'NGN',
         $4,
         NOW(),
+        $5,
         'PENDING',
-        $5, $6, $7
+        $6,$7,$8
       )
       RETURNING *
     `, [
@@ -65,6 +83,7 @@ exports.createDeposit = async (req, res) => {
       amount_cents,
       ngn,
       rate,
+      reference,
       sender_account_name,
       sender_account_number,
       sender_bank_name
@@ -79,7 +98,7 @@ exports.createDeposit = async (req, res) => {
 };
 
 // ==========================
-// Mark Deposit Paid
+// Mark Paid
 // ==========================
 exports.markPaid = async (req, res) => {
   try {
@@ -88,17 +107,15 @@ exports.markPaid = async (req, res) => {
       req.params.depositId
     );
 
-    return res.json({ message: 'Marked as paid' });
+    res.json({ message: 'Marked as paid' });
 
   } catch (err) {
-    return res.status(400).json({
-      message: err.message
-    });
+    res.status(400).json({ message: err.message });
   }
 };
 
 // ==========================
-// Cancel Deposit
+// Cancel
 // ==========================
 exports.cancelDeposit = async (req, res) => {
   try {
@@ -107,29 +124,21 @@ exports.cancelDeposit = async (req, res) => {
       req.params.depositId
     );
 
-    return res.json({ message: 'Deposit cancelled' });
+    res.json({ message: 'Cancelled' });
 
   } catch (err) {
-    return res.status(400).json({
-      message: err.message
-    });
+    res.status(400).json({ message: err.message });
   }
 };
 
 // ==========================
-// List User Deposits
+// List
 // ==========================
 exports.listUserDeposits = async (req, res) => {
   try {
-    const deposits = await depositService.listUserDeposits(
-      req.user.id
-    );
-
-    return res.json(deposits);
-
+    const deposits = await depositService.listUserDeposits(req.user.id);
+    res.json(deposits);
   } catch (err) {
-    return res.status(400).json({
-      message: err.message
-    });
+    res.status(400).json({ message: err.message });
   }
 };
