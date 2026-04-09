@@ -3,6 +3,8 @@
 const { pool } = require('../config/database');
 const depositService = require('../services/deposit.service');
 
+/* ================= UTIL ================= */
+
 function generateReference() {
   return `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 }
@@ -13,14 +15,22 @@ exports.createDeposit = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const {
+    let {
       amount_cents,
       sender_account_name,
       sender_account_number,
       sender_bank_name
     } = req.body;
 
-    if (!amount_cents || amount_cents < 5000) {
+    // 🔒 FORCE NUMBER
+    amount_cents = Number(amount_cents);
+
+    console.log('BODY:', req.body);
+    console.log('AMOUNT_CENTS:', amount_cents);
+
+    /* ---------- VALIDATION ---------- */
+
+    if (!Number.isFinite(amount_cents) || amount_cents < 5000) {
       return res.status(400).json({ message: 'Minimum deposit is $50' });
     }
 
@@ -29,32 +39,48 @@ exports.createDeposit = async (req, res) => {
     }
 
     if (!/^\d{10}$/.test(sender_account_number)) {
-      return res.status(400).json({ message: 'Invalid account number' });
+      return res.status(400).json({ message: 'Account number must be 10 digits' });
     }
 
-    // GET RATE
+    /* ---------- GET RATE ---------- */
+
     const { rows } = await pool.query(
       `SELECT value FROM settings WHERE key = 'USDT_NGN_RATE' LIMIT 1`
     );
 
-    const rate = Number(rows[0]?.value);
+    const rate = parseFloat(rows[0]?.value);
 
-    if (!rate) {
-      return res.status(500).json({ message: 'Rate not set' });
+    console.log('RATE:', rate);
+
+    if (!Number.isFinite(rate)) {
+      return res.status(500).json({ message: 'Invalid rate in settings' });
     }
+
+    /* ---------- CALCULATE ---------- */
 
     const usd = amount_cents / 100;
     const ngn = usd * rate;
 
-    const reference = `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    console.log('USD:', usd);
+    console.log('NGN:', ngn);
+
+    if (!Number.isFinite(ngn)) {
+      return res.status(500).json({ message: 'NGN calculation failed' });
+    }
+
+    const reference = generateReference();
+
+    /* ---------- INSERT ---------- */
 
     const result = await pool.query(`
       INSERT INTO deposits (
         user_id,
+        amount_requested_cents,
         amount_cents,
         amount_exact_cents,
-        amount_requested_cents,
         amount,
+        currency,
+        src_currency,
         fx_rate,
         fx_at,
         reference,
@@ -66,10 +92,12 @@ exports.createDeposit = async (req, res) => {
       )
       VALUES (
         $1,  -- user_id
+        $2,  -- amount_requested_cents
         $2,  -- amount_cents
         $2,  -- amount_exact_cents
-        $2,  -- amount_requested_cents
         $3,  -- amount (NGN)
+        'USD',
+        'NGN',
         $4,  -- fx_rate
         NOW(),
         $5,  -- reference
@@ -91,13 +119,14 @@ exports.createDeposit = async (req, res) => {
       sender_bank_name
     ]);
 
-    return res.json(result.rows[0]);
+    console.log('DEPOSIT CREATED:', result.rows[0]);
+
+    return res.status(201).json(result.rows[0]);
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Deposit failed' });
+    console.error('CREATE DEPOSIT ERROR:', err);
+    return res.status(500).json({ message: 'Deposit failed' });
   }
-  console.log('NEW DEPOSIT LOGIC RUNNING V2');
 };
 
 /* ================= MARK PAID ================= */
@@ -109,11 +138,11 @@ exports.markPaid = async (req, res) => {
       req.params.depositId
     );
 
-    res.json({ message: 'Marked as paid' });
+    return res.json({ message: 'Marked as paid' });
 
   } catch (err) {
-    console.error(err);
-    res.status(400).json({ message: err.message });
+    console.error('MARK PAID ERROR:', err);
+    return res.status(400).json({ message: err.message });
   }
 };
 
@@ -126,11 +155,11 @@ exports.cancelDeposit = async (req, res) => {
       req.params.depositId
     );
 
-    res.json({ message: 'Cancelled' });
+    return res.json({ message: 'Cancelled' });
 
   } catch (err) {
-    console.error(err);
-    res.status(400).json({ message: err.message });
+    console.error('CANCEL ERROR:', err);
+    return res.status(400).json({ message: err.message });
   }
 };
 
@@ -139,9 +168,10 @@ exports.cancelDeposit = async (req, res) => {
 exports.listUserDeposits = async (req, res) => {
   try {
     const deposits = await depositService.listUserDeposits(req.user.id);
-    res.json(deposits);
+    return res.json(deposits);
+
   } catch (err) {
-    console.error(err);
-    res.status(400).json({ message: err.message });
+    console.error('LIST ERROR:', err);
+    return res.status(400).json({ message: err.message });
   }
 };
