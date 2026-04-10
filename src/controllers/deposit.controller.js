@@ -55,33 +55,33 @@ exports.createDeposit = async (req, res) => {
     const reference = `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
     // ✅ INSERT (MATCHES YOUR REAL DB STRUCTURE)
-    const result = await pool.query(`
+const result = await pool.query(`
   INSERT INTO deposits (
     user_id,
     amount_requested_cents,
-    amount_cents,
     amount_exact_cents,
+    amount_cents,
     amount,
     fx_rate,
-    fx_at,
     reference,
     status,
     method,
+    expires_at,
     sender_account_name,
     sender_account_number,
     sender_bank_name
   )
   VALUES (
-    $1,  -- user_id
-    $2,  -- requested
-    $2,  -- amount_cents
-    $2,  -- exact
-    $3,  -- NGN
-    $4,  -- rate
-    NOW(),
+    $1,
+    $2,
+    $2,
+    $2,
+    $3,
+    $4,
     $5,
-    'PENDING',
+    'AWAITING_PAYMENT',
     'BANK',
+    NOW() + INTERVAL '30 minutes',
     $6,
     $7,
     $8
@@ -89,10 +89,10 @@ exports.createDeposit = async (req, res) => {
   RETURNING *
 `, [
   userId,
-  amount_cents, // $2
-  ngn,          // $3
-  rate,         // $4
-  reference,    // $5
+  amount_cents,  // $2
+  ngn,           // $3
+  rate,          // $4
+  reference,     // $5
   sender_account_name, // $6
   sender_account_number, // $7
   sender_bank_name // $8
