@@ -11,20 +11,21 @@ function generateReference() {
 
 exports.createDeposit = async (req, res) => {
   try {
-    console.log('CREATE DEPOSIT HIT');
-
     const userId = req.user.id;
 
-    let {
+    const {
       amount_cents,
       sender_account_name,
       sender_account_number,
       sender_bank_name
     } = req.body;
 
-    amount_cents = Number(amount_cents);
+    // ✅ VALIDATION
+    if (!Number.isFinite(amount_cents)) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
 
-    if (!amount_cents || amount_cents < 5000) {
+    if (amount_cents < 5000) {
       return res.status(400).json({ message: 'Minimum deposit is $50' });
     }
 
@@ -36,7 +37,7 @@ exports.createDeposit = async (req, res) => {
       return res.status(400).json({ message: 'Invalid account number' });
     }
 
-    // GET RATE
+    // ✅ GET RATE
     const { rows } = await pool.query(
       `SELECT value FROM settings WHERE key = 'USDT_NGN_RATE' LIMIT 1`
     );
@@ -47,68 +48,60 @@ exports.createDeposit = async (req, res) => {
       return res.status(500).json({ message: 'Rate not set' });
     }
 
+    // ✅ CALCULATIONS
     const usd = amount_cents / 100;
     const ngn = usd * rate;
 
-    const reference = generateReference();
+    const reference = `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-    console.log('INSERTING:', {
-      userId,
-      amount_cents,
-      ngn,
-      rate,
-      reference
-    });
-
+    // ✅ INSERT (MATCHES YOUR REAL DB STRUCTURE)
     const result = await pool.query(`
-      INSERT INTO deposits (
-        user_id,
-        amount_cents,
-        amount_exact_cents,
-        amount_requested_cents,
-        amount,
-        fx_rate,
-        fx_at,
-        reference,
-        status,
-        method,
-        sender_account_name,
-        sender_account_number,
-        sender_bank_name
-      )
-      VALUES (
-        $1,
-        $2,
-        $2,
-        $2,
-        $3,
-        $4,
-        NOW(),
-        $5,
-        'PENDING',
-        'BANK',
-        $6,
-        $7,
-        $8
-      )
-      RETURNING *
-    `, [
-      userId,
-      amount_cents,
-      ngn,
-      rate,
-      reference,
-      sender_account_name,
-      sender_account_number,
-      sender_bank_name
-    ]);
-
-    console.log('DEPOSIT CREATED:', result.rows[0]);
+  INSERT INTO deposits (
+    user_id,
+    amount_requested_cents,
+    amount_cents,
+    amount_exact_cents,
+    amount,
+    fx_rate,
+    fx_at,
+    reference,
+    status,
+    method,
+    sender_account_name,
+    sender_account_number,
+    sender_bank_name
+  )
+  VALUES (
+    $1,  -- user_id
+    $2,  -- requested
+    $2,  -- amount_cents
+    $2,  -- exact
+    $3,  -- NGN
+    $4,  -- rate
+    NOW(),
+    $5,
+    'PENDING',
+    'BANK',
+    $6,
+    $7,
+    $8
+  )
+  RETURNING *
+`, [
+  userId,
+  amount_cents, // $2
+  ngn,          // $3
+  rate,         // $4
+  reference,    // $5
+  sender_account_name, // $6
+  sender_account_number, // $7
+  sender_bank_name // $8
+]);
 
     return res.json(result.rows[0]);
 
   } catch (err) {
-    console.error('DEPOSIT ERROR:', err);
+    console.error('CREATE DEPOSIT ERROR:', err);
     res.status(500).json({ message: 'Deposit failed' });
   }
 };

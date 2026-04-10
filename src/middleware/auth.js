@@ -40,4 +40,5 @@ module.exports = function requireAuth(req, res, next) {
     console.error('auth middleware error:', err.message);
     return res.status(401).json({ message: 'Unauthorized' });
   }
+  console.log('JWT_SECRET:', process.env.JWT_SECRET);
 };

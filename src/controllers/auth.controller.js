@@ -20,7 +20,7 @@ const DEMO_BALANCE_CENTS = 1_000_000;
 
 // -----------------------------
 // Helpers
-// -----------------------------
+// -----------------------------   
 function signToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email },
