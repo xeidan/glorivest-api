@@ -16,7 +16,7 @@ const DATABASE_URL =
   get('SUPABASE_DATABASE_URL');
 const JWT_SECRET = get('JWT_SECRET', 'change-me-in-prod');
 const SENDGRID_API_KEY = get('SENDGRID_API_KEY');
-const FROM_EMAIL = get('FROM_EMAIL', 'no-reply@glorivest.com');
+const FROM_EMAIL = get('FROM_EMAIL', 'noreply@glorivest.com');
 const ENCRYPTION_KEY = get('ENCRYPTION_KEY'); // expected 64 hex chars
 const OMNIBUS_TRON_PRIVATE_KEY = get('OMNIBUS_TRON_PRIVATE_KEY', '');
 const OMNIBUS_TRON_ADDRESS = get('OMNIBUS_TRON_ADDRESS', '');
