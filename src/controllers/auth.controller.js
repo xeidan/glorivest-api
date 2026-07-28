@@ -46,9 +46,15 @@ function genAccountCode(userId, seq, tierSlug) {
 // -----------------------------   
 function signToken(user) {
   return jwt.sign(
-    { id: user.id, email: user.email },
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role
+    },
     JWT_SECRET,
-    { expiresIn: '7d' }
+    {
+      expiresIn: '7d'
+    }
   );
 }
 

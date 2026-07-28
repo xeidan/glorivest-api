@@ -5,6 +5,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const maintenance = require('./middleware/maintenance');
 
 const routes = require('./routes'); // routes/index.js
 
