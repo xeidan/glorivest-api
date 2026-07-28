@@ -329,7 +329,6 @@ await postTransaction(
 
 
 
-
 // -----------------------------
 // LOGIN
 // -----------------------------
@@ -345,46 +344,15 @@ const login = async (req, res) => {
 
     email = email.toLowerCase().trim();
 
-    // -----------------------------
-    // DEBUG INFO
-    // -----------------------------
-    const dbInfo = await pool.query(`
-      SELECT
-        current_database() AS database,
-        current_schema() AS schema,
-        current_setting('search_path') AS search_path
-    `);
-
-    console.log('DB INFO:', dbInfo.rows[0]);
-
-    const cols = await pool.query(`
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name = 'users'
-      ORDER BY ordinal_position
-    `);
-
-    console.log('PUBLIC USERS COLUMNS:', cols.rows);
-
-    try {
-      const url = new URL(process.env.DATABASE_URL);
-      console.log('DATABASE HOST:', url.host);
-    } catch {
-      console.log('DATABASE HOST: invalid DATABASE_URL');
-    }
-
-    // -----------------------------
-    // LOGIN QUERY
-    // -----------------------------
     const { rows } = await pool.query(
       `
       SELECT
-          id,
-          email,
-          password_hash,
-          failed_login_attempts,
-          account_locked_until
+        id,
+        email,
+        password_hash,
+        role,
+        failed_login_attempts,
+        account_locked_until
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -400,7 +368,7 @@ const login = async (req, res) => {
 
     const user = rows[0];
 
-    // Account locked?
+    // Check if account is locked
     if (
       user.account_locked_until &&
       new Date(user.account_locked_until) > new Date()
@@ -445,7 +413,7 @@ const login = async (req, res) => {
       });
     }
 
-    // Reset failed attempts
+    // Reset failed login attempts
     await pool.query(
       `
       UPDATE users
@@ -463,11 +431,10 @@ const login = async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
-        role: 'user',
+        role: user.role,
         glorivest_id: `GV${150000 + Number(user.id)}`
       }
     });
-
   } catch (err) {
     console.error('LOGIN ERROR:', err);
     return res.status(500).json({
