@@ -5,7 +5,10 @@ const pool = db.pool;
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
-const { sendOTPEmail } = require('../services/email.service');
+const {
+  sendOTPEmail,
+  sendWelcomeEmail
+} = require('../services/email.service');
 const { logDevice, getDevices } = require('../utils/device');
 const { postTransaction } = require('../services/ledger.service');
 const { generateReferralCode } = require('../utils/referralCode');
@@ -239,67 +242,83 @@ const verifyOtp = async (req, res) => {
 
     const user = userRows[0];
 
-    // 4️⃣ Create wallets INSIDE SAME TRANSACTION
-  // Create default demo account
-const tierRes = await client.query(
-  `SELECT id, slug
-   FROM account_tiers
-   WHERE slug = 'demo'
-   LIMIT 1`
-);
+    // 4️⃣ Create default demo account
+    const tierRes = await client.query(
+      `
+      SELECT id, slug
+      FROM account_tiers
+      WHERE slug = 'demo'
+      LIMIT 1
+      `
+    );
 
-if (tierRes.rowCount === 0) {
-  throw new Error('Demo account tier not found');
-}
+    if (tierRes.rowCount === 0) {
+      throw new Error('Demo account tier not found');
+    }
 
-const tier = tierRes.rows[0];
+    const tier = tierRes.rows[0];
 
-// Determine next account sequence for the user
-const seqRes = await client.query(
-  `SELECT COUNT(*)::int AS total
-   FROM accounts
-   WHERE user_id = $1`,
-  [user.id]
-);
+    const seqRes = await client.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM accounts
+      WHERE user_id = $1
+      `,
+      [user.id]
+    );
 
-const sequence = seqRes.rows[0].total + 1;
+    const sequence = seqRes.rows[0].total + 1;
 
-// These helper functions already exist in this file
-const accountCode = genAccountCode(user.id, sequence, tier.slug);
+    const accountCode = genAccountCode(
+      user.id,
+      sequence,
+      tier.slug
+    );
 
-const accountRes = await client.query(
-  `INSERT INTO accounts (
-      user_id,
-      tier_id,
-      account_code,
-      status,
-      balance_cents,
-      profit_cents,
-      created_at
-   )
-   VALUES ($1,$2,$3,'ACTIVE',$4,0,NOW())
-   RETURNING id`,
-  [
-    user.id,
-    tier.id,
-    accountCode,
-    DEMO_BALANCE_CENTS // Demo balance (10,000.00 if stored in cents)
-  ]
-);
+    const accountRes = await client.query(
+      `
+      INSERT INTO accounts (
+        user_id,
+        tier_id,
+        account_code,
+        status,
+        balance_cents,
+        profit_cents,
+        created_at
+      )
+      VALUES ($1, $2, $3, 'ACTIVE', $4, 0, NOW())
+      RETURNING id
+      `,
+      [
+        user.id,
+        tier.id,
+        accountCode,
+        DEMO_BALANCE_CENTS
+      ]
+    );
 
-await postTransaction(
-  {
-    userId: user.id,
-    accountId: accountRes.rows[0].id,
-    type: 'opening_balance',
-    amountCents: DEMO_BALANCE_CENTS,
-  },
-  client
-);
+    await postTransaction(
+      {
+        userId: user.id,
+        accountId: accountRes.rows[0].id,
+        type: 'opening_balance',
+        amountCents: DEMO_BALANCE_CENTS
+      },
+      client
+    );
 
+    // 5️⃣ Commit transaction
     await client.query('COMMIT');
 
-    // 5️⃣ Issue JWT
+    // 6️⃣ Send welcome email (doesn't block signup)
+    sendWelcomeEmail({
+      to: user.email,
+      firstName: user.email.split('@')[0]
+    }).catch(err => {
+      console.error('Welcome email failed:', err);
+    });
+
+    // 7️⃣ Issue JWT
     const token = jwt.sign(
       {
         id: user.id,
