@@ -7,7 +7,7 @@ const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('../config/env');
 const { sendOTPEmail } = require('../services/email.service');
 const { logDevice, getDevices } = require('../utils/device');
-const { ensureUserWallets } = require('../services/wallet.service');
+const { postTransaction } = require('../services/ledger.service');
 const { generateReferralCode } = require('../utils/referralCode');
 
 
@@ -16,7 +16,24 @@ const { generateReferralCode } = require('../utils/referralCode');
 // Constants
 // -----------------------------
 const OTP_TTL_MIN = 10;
-const DEMO_BALANCE_CENTS = 1_000_000;
+
+
+function tierCodeFromSlug(slug) {
+  const map = {
+    standard: 'STD',
+    pro: 'PRO',
+    elite: 'ELT',
+    demo: 'DEM'
+  };
+
+  return map[slug] || (slug || '').slice(0, 3).toUpperCase();
+}
+
+function genAccountCode(userId, seq, tierSlug) {
+  const base = 150000 + Number(userId);
+  const index = String(seq).padStart(2, '0');
+  return `GV${base}-${index}-${tierCodeFromSlug(tierSlug)}`;
+}
 
 // -----------------------------
 // Helpers
@@ -220,7 +237,62 @@ const verifyOtp = async (req, res) => {
     const user = userRows[0];
 
     // 4️⃣ Create wallets INSIDE SAME TRANSACTION
-    await ensureUserWallets(client, user.id);
+  // Create default demo account
+const tierRes = await client.query(
+  `SELECT id, slug
+   FROM account_tiers
+   WHERE slug = 'demo'
+   LIMIT 1`
+);
+
+if (tierRes.rowCount === 0) {
+  throw new Error('Demo account tier not found');
+}
+
+const tier = tierRes.rows[0];
+
+// Determine next account sequence for the user
+const seqRes = await client.query(
+  `SELECT COUNT(*)::int AS total
+   FROM accounts
+   WHERE user_id = $1`,
+  [user.id]
+);
+
+const sequence = seqRes.rows[0].total + 1;
+
+// These helper functions already exist in this file
+const accountCode = genAccountCode(user.id, sequence, tier.slug);
+
+const accountRes = await client.query(
+  `INSERT INTO accounts (
+      user_id,
+      tier_id,
+      account_code,
+      status,
+      balance_cents,
+      profit_cents,
+      created_at
+   )
+   VALUES ($1,$2,$3,'ACTIVE',$4,0,NOW())
+   RETURNING id`,
+  [
+    user.id,
+    tier.id,
+    accountCode,
+    DEMO_BALANCE_CENTS // Demo balance (10,000.00 if stored in cents)
+  ]
+);
+
+await postTransaction(
+  {
+    userId: user.id,
+    accountId: accountRes.rows[0].id,
+    type: 'opening_balance',
+    amountCents: DEMO_BALANCE_CENTS,
+  },
+  client
+);
 
     await client.query('COMMIT');
 

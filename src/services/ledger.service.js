@@ -1,40 +1,71 @@
-// src/services/ledger.service.js
-module.exports.postTransaction = async function ({
-  userId,
-  accountId,
-  type,
-  amountCents,
-  reference = null,
-  meta = {}
-}, db) {
+'use strict';
 
-  return db.transaction(async trx => {
-    const last = await trx('transactions')
-      .where({ account_id: accountId })
-      .orderBy('id', 'desc')
-      .first();
+async function postTransaction(
+  {
+    userId,
+    accountId,
+    type,
+    amountCents,
+    reference = null,
+    meta = {},
+  },
+  client
+) {
+  // Get current account balance
+  const accountRes = await client.query(
+    `SELECT balance_cents
+     FROM accounts
+     WHERE id = $1
+     FOR UPDATE`,
+    [accountId]
+  );
 
-    const prev = last ? last.balance_after_cents : 0;
-    const next = prev + amountCents;
+  if (accountRes.rowCount === 0) {
+    throw new Error('Account not found');
+  }
 
-    if (next < 0) throw new Error('Insufficient funds');
+  const previousBalance = Number(accountRes.rows[0].balance_cents || 0);
+  const newBalance = previousBalance + Number(amountCents);
 
-    const [tx] = await trx('transactions')
-      .insert({
-        user_id: userId,
-        account_id: accountId,
-        type,
-        amount_cents: amountCents,
-        balance_after_cents: next,
-        reference,
-        meta
-      })
-      .returning('*');
+  if (newBalance < 0) {
+    throw new Error('Insufficient funds');
+  }
 
-    await trx('accounts')
-      .where({ id: accountId })
-      .update({ balance_cents: next });
+  // Insert transaction
+  const txRes = await client.query(
+    `INSERT INTO transactions (
+      user_id,
+      account_id,
+      type,
+      amount_cents,
+      balance_after_cents,
+      reference,
+      meta
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    RETURNING *`,
+    [
+      userId,
+      accountId,
+      type,
+      amountCents,
+      newBalance,
+      reference,
+      JSON.stringify(meta),
+    ]
+  );
 
-    return tx;
-  });
+  // Update account balance
+  await client.query(
+    `UPDATE accounts
+     SET balance_cents = $1
+     WHERE id = $2`,
+    [newBalance, accountId]
+  );
+
+  return txRes.rows[0];
+}
+
+module.exports = {
+  postTransaction,
 };
