@@ -347,15 +347,15 @@ const login = async (req, res) => {
 
     const { rows } = await pool.query(
       `
-      SELECT id,
-             email,
-             password_hash,
-             role,
-             failed_login_attempts,
-             account_locked_until
-      FROM users
-      WHERE email = $1
-      LIMIT 1
+SELECT
+    id,
+    email,
+    password_hash,
+    failed_login_attempts,
+    account_locked_until
+FROM users
+WHERE email = $1
+LIMIT 1
       `,
       [email]
     );
@@ -425,12 +425,12 @@ const login = async (req, res) => {
     // ✅ CLEAN + COMPLETE RESPONSE
     return res.json({
       token,
-      user: {
-        id: user.id,
-        email: user.email,
-        role: user.role || 'user', // 🔴 REQUIRED
-        glorivest_id: `GV${150000 + Number(user.id)}`
-      }
+     user: {
+  id: user.id,
+  email: user.email,
+  role: 'user',
+  glorivest_id: `GV${150000 + Number(user.id)}`
+}
     });
 
   } catch (err) {
@@ -444,13 +444,13 @@ const login = async (req, res) => {
 
 
 // -----------------------------
-// ME (WALLET-BASED)
+// ME (ACCOUNT-BASED)
 // -----------------------------
 const me = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // 1️⃣ Fetch user (NO referral joins, NO casts)
+    // 1️⃣ Fetch user
     const { rows: userRows } = await pool.query(
       `
       SELECT id, email, referral_code
@@ -467,44 +467,51 @@ const me = async (req, res) => {
 
     const user = userRows[0];
 
-    // 2️⃣ Fetch wallets
-    const { rows: wallets } = await pool.query(
+    // 2️⃣ Fetch accounts
+    const { rows: accounts } = await pool.query(
       `
-      SELECT id, code, type, balance_cents, status
-      FROM wallets
-      WHERE user_id = $1
-      ORDER BY created_at ASC
+      SELECT
+        a.id,
+        a.account_code,
+        a.balance_cents,
+        a.profit_cents,
+        a.status,
+        t.slug AS tier
+      FROM accounts a
+      JOIN account_tiers t
+        ON t.id = a.tier_id
+      WHERE a.user_id = $1
+      ORDER BY a.created_at ASC
       `,
       [userId]
     );
 
-    const referralWallet =
-      wallets.find(w => w.type === 'REFERRAL') || null;
+    // 3️⃣ Find demo account
+    const demoAccount =
+      accounts.find(a => a.tier === 'demo') || null;
 
-    // 3️⃣ COUNT referrals CORRECTLY (BIGINT → BIGINT)
+    // 4️⃣ Count referrals
     const { rows: countRows } = await pool.query(
       `
       SELECT COUNT(*)::int AS count
       FROM users
       WHERE referred_by = $1
       `,
-      [userId] // ✅ THIS IS THE FIX
+      [userId]
     );
 
     const totalReferrals = countRows[0]?.count || 0;
 
-    // 4️⃣ Respond
+    // 5️⃣ Response
     return res.json({
       id: user.id,
       email: user.email,
-      glorivest_id: `GV${150000 + user.id}`,
+      glorivest_id: `GV${150000 + Number(user.id)}`,
       referral_code: user.referral_code,
       total_referrals: totalReferrals,
-      referral_earnings_cents: referralWallet
-        ? Number(referralWallet.balance_cents)
-        : 0,
-      referral_wallet: referralWallet,
-      wallets
+      referral_earnings_cents: 0,
+      accounts,
+      active_account: demoAccount
     });
 
   } catch (err) {
