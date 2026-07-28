@@ -11,7 +11,9 @@ const get = (k, fallback = undefined) => {
 };
 
 const NODE_ENV = get('NODE_ENV', 'development');
-const DATABASE_URL = get('DATABASE_URL');
+const DATABASE_URL =
+  get('DATABASE_URL') ||
+  get('SUPABASE_DATABASE_URL');
 const JWT_SECRET = get('JWT_SECRET', 'change-me-in-prod');
 const SENDGRID_API_KEY = get('SENDGRID_API_KEY');
 const FROM_EMAIL = get('FROM_EMAIL', 'no-reply@glorivest.com');

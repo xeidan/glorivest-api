@@ -9,10 +9,10 @@ if (!DATABASE_URL && NODE_ENV === 'production') {
 }
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false
-  }
+    rejectUnauthorized: false,
+  },
 });
 
 async function withTx(fn) {
