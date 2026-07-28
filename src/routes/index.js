@@ -38,12 +38,6 @@ router.use('/rates', require('./rates.routes'));
 */
 router.use('/admin', auth, requireAdmin, require('./admin.routes'));
 
-router.use(
-  '/admin/settings',
-  auth,
-  requireAdmin,
-  require('./admin.settings.routes')
-);
 
 
 module.exports = router;
