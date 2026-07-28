@@ -12,10 +12,13 @@ const { generateReferralCode } = require('../utils/referralCode');
 
 
 
+
+
 // -----------------------------
 // Constants
 // -----------------------------
 const OTP_TTL_MIN = 10;
+const DEMO_BALANCE_CENTS = 1_000_000;
 
 
 function tierCodeFromSlug(slug) {
