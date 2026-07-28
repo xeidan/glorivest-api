@@ -21,6 +21,12 @@ const adminLimiter = rateLimit({
   legacyHeaders: false
 });
 
+//  
+const {
+  getSettings,
+  updateSettings
+} = require('../controllers/admin.settings.controller');
+
 // Apply base middleware to all admin routes
 router.use(requireAuth);
 router.use(requireAdmin);
@@ -64,6 +70,21 @@ router.post(
       return res.status(400).json({ message: err.message });
     }
   }
+);
+
+
+// ==========================
+// Platform Settings
+// ==========================
+
+router.get(
+  '/settings',
+  getSettings
+);
+
+router.put(
+  '/settings',
+  updateSettings
 );
 
 module.exports = router;
