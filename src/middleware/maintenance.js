@@ -3,6 +3,7 @@
 const { pool } = require('../config/database');
 
 module.exports = async function maintenance(req, res, next) {
+      console.log('🟡 Maintenance middleware:', req.originalUrl);
   try {
     // Always allow health checks
     if (req.path === '/health') {
