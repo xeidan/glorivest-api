@@ -42,7 +42,7 @@ router.use(
   '/admin/settings',
   auth,
   requireAdmin,
-  require('./admin/settings.routes')
+  require('./admin.settings.routes')
 );
 
 
