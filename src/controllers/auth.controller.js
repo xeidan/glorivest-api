@@ -345,28 +345,62 @@ const login = async (req, res) => {
 
     email = email.toLowerCase().trim();
 
+    // -----------------------------
+    // DEBUG INFO
+    // -----------------------------
+    const dbInfo = await pool.query(`
+      SELECT
+        current_database() AS database,
+        current_schema() AS schema,
+        current_setting('search_path') AS search_path
+    `);
+
+    console.log('DB INFO:', dbInfo.rows[0]);
+
+    const cols = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'users'
+      ORDER BY ordinal_position
+    `);
+
+    console.log('PUBLIC USERS COLUMNS:', cols.rows);
+
+    try {
+      const url = new URL(process.env.DATABASE_URL);
+      console.log('DATABASE HOST:', url.host);
+    } catch {
+      console.log('DATABASE HOST: invalid DATABASE_URL');
+    }
+
+    // -----------------------------
+    // LOGIN QUERY
+    // -----------------------------
     const { rows } = await pool.query(
       `
-SELECT
-    id,
-    email,
-    password_hash,
-    failed_login_attempts,
-    account_locked_until
-FROM users
-WHERE email = $1
-LIMIT 1
+      SELECT
+          id,
+          email,
+          password_hash,
+          failed_login_attempts,
+          account_locked_until
+      FROM users
+      WHERE email = $1
+      LIMIT 1
       `,
       [email]
     );
 
     if (!rows.length) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return res.status(401).json({
+        message: 'Invalid credentials'
+      });
     }
 
     const user = rows[0];
 
-    // 🔒 Check lock
+    // Account locked?
     if (
       user.account_locked_until &&
       new Date(user.account_locked_until) > new Date()
@@ -379,7 +413,7 @@ LIMIT 1
     const match = await bcrypt.compare(password, user.password_hash);
 
     if (!match) {
-      const attempts = user.failed_login_attempts + 1;
+      const attempts = (user.failed_login_attempts || 0) + 1;
 
       if (attempts >= 5) {
         await pool.query(
@@ -406,10 +440,12 @@ LIMIT 1
         [attempts, user.id]
       );
 
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return res.status(401).json({
+        message: 'Invalid credentials'
+      });
     }
 
-    // ✅ Reset attempts
+    // Reset failed attempts
     await pool.query(
       `
       UPDATE users
@@ -422,20 +458,21 @@ LIMIT 1
 
     const token = signToken(user);
 
-    // ✅ CLEAN + COMPLETE RESPONSE
     return res.json({
       token,
-     user: {
-  id: user.id,
-  email: user.email,
-  role: 'user',
-  glorivest_id: `GV${150000 + Number(user.id)}`
-}
+      user: {
+        id: user.id,
+        email: user.email,
+        role: 'user',
+        glorivest_id: `GV${150000 + Number(user.id)}`
+      }
     });
 
   } catch (err) {
     console.error('LOGIN ERROR:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({
+      message: 'Server error'
+    });
   }
 };
 
