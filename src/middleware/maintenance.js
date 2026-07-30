@@ -2,40 +2,25 @@
 
 const { pool } = require('../config/database');
 
+const PUBLIC_ROUTES = new Set([
+  '/api/auth/login',
+  '/api/auth/register',
+  '/api/auth/verify-otp',
+  '/api/auth/resend-otp'
+]);
+
 module.exports = async function maintenance(req, res, next) {
-  // ===== DEBUG START =====
-  console.log('\n==============================');
-  console.log('🟡 Maintenance middleware');
-  console.log('URL:', req.originalUrl);
-  console.log('PATH:', req.path);
-  console.log('==============================');
-  // ===== DEBUG END =====
-
   try {
-    // Allow health endpoint
+    // Always allow health checks
     if (req.path === '/health') {
-      // ===== DEBUG START =====
-      console.log('✅ Health check allowed');
-      // ===== DEBUG END =====
       return next();
     }
 
-    // Public routes
-    const publicRoutes = [
-      '/api/auth/login',
-      '/api/auth/register',
-      '/api/auth/verify-otp',
-      '/api/auth/resend-otp'
-    ];
-
-    if (publicRoutes.includes(req.originalUrl)) {
-      // ===== DEBUG START =====
-      console.log('✅ Public auth route allowed');
-      // ===== DEBUG END =====
+    // Allow public auth routes
+    if (PUBLIC_ROUTES.has(req.originalUrl)) {
       return next();
     }
 
-    // Fetch maintenance settings
     const { rows } = await pool.query(
       `
       SELECT value
@@ -45,45 +30,22 @@ module.exports = async function maintenance(req, res, next) {
       `
     );
 
-    // ===== DEBUG START =====
-    console.log('Database rows:', rows);
-    // ===== DEBUG END =====
-
     if (!rows.length) {
-      // ===== DEBUG START =====
-      console.log('❌ No maintenance settings found');
-      // ===== DEBUG END =====
+      console.warn('⚠️ Maintenance settings not found. Skipping maintenance check.');
       return next();
     }
 
     const settings = rows[0].value || {};
 
-    // ===== DEBUG START =====
-    console.log('Settings object:', settings);
-    console.log('Enabled:', settings.enabled);
-    console.log('Enabled type:', typeof settings.enabled);
-    console.log('Title:', settings.title);
-    console.log('Message:', settings.message);
-    console.log('EndsAt:', settings.endsAt);
-    // ===== DEBUG END =====
-
+    // Maintenance disabled
     if (!settings.enabled) {
-      // ===== DEBUG START =====
-      console.log('🟢 Maintenance disabled');
-      // ===== DEBUG END =====
       return next();
     }
 
-    // ===== DEBUG START =====
-    console.log('🔴 Maintenance ENABLED');
-    // ===== DEBUG END =====
+    console.log(`🟡 Maintenance mode active (${req.method} ${req.originalUrl})`);
 
-    // Check for admin bypass
+    // Admin bypass
     if (req.user?.id) {
-      // ===== DEBUG START =====
-      console.log('Checking admin for user:', req.user.id);
-      // ===== DEBUG END =====
-
       const { rows: adminRows } = await pool.query(
         `
         SELECT role
@@ -94,30 +56,16 @@ module.exports = async function maintenance(req, res, next) {
         [req.user.id]
       );
 
-      // ===== DEBUG START =====
-      console.log('Admin lookup:', adminRows);
-      // ===== DEBUG END =====
-
-      if (
+      const isAdmin =
         adminRows.length &&
         typeof adminRows[0].role === 'string' &&
-        adminRows[0].role.toLowerCase() === 'admin'
-      ) {
-        // ===== DEBUG START =====
-        console.log('✅ Admin bypass granted');
-        // ===== DEBUG END =====
+        adminRows[0].role.toLowerCase() === 'admin';
+
+      if (isAdmin) {
+        console.log(`🟢 Maintenance bypass granted for admin ${req.user.id}`);
         return next();
       }
-    } else {
-      // ===== DEBUG START =====
-      console.log('No authenticated user attached to request');
-      // ===== DEBUG END =====
     }
-
-    // ===== DEBUG START =====
-    console.log('⛔ Returning HTTP 503');
-    console.log('==============================\n');
-    // ===== DEBUG END =====
 
     return res.status(503).json({
       maintenance: true,
@@ -128,13 +76,9 @@ module.exports = async function maintenance(req, res, next) {
       endsAt: settings.endsAt || null
     });
   } catch (err) {
-    // ===== DEBUG START =====
-    console.error('❌ Maintenance middleware error');
-    console.error(err);
-    console.log('==============================\n');
-    // ===== DEBUG END =====
+    console.error('❌ Maintenance middleware failed:', err.message);
 
-    // Never block the app because of a maintenance check failure
+    // Fail open
     return next();
   }
 };
