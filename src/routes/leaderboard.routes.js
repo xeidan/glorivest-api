@@ -7,11 +7,10 @@ const auth = require('../middleware/auth');
 const router = express.Router();
 
 /**
- * GET /api/leaderboard
+ * Temporary Leaderboard
  *
- * Current ranking:
- * 1. Highest account balance
- * 2. Fallback to newest users
+ * Referral wallet has not been implemented yet,
+ * so everyone has 0 referral earnings.
  */
 
 router.get('/', auth, async (req, res) => {
@@ -19,34 +18,12 @@ router.get('/', auth, async (req, res) => {
 
     const { rows } = await pool.query(`
       SELECT
-        u.email,
-        COALESCE(a.balance_cents, 0) AS referral_earnings_cents
-      FROM users u
-      LEFT JOIN accounts a
-        ON a.user_id = u.id
-      ORDER BY
-        referral_earnings_cents DESC,
-        u.created_at DESC
+        email,
+        0::bigint AS referral_earnings_cents
+      FROM users
+      ORDER BY created_at DESC
       LIMIT 10
     `);
-
-    const hasAnyBalance = rows.some(
-      r => Number(r.referral_earnings_cents) > 0
-    );
-
-    if (!hasAnyBalance) {
-
-      const { rows: fallback } = await pool.query(`
-        SELECT
-          email,
-          0 AS referral_earnings_cents
-        FROM users
-        ORDER BY created_at DESC
-        LIMIT 10
-      `);
-
-      return res.json(fallback);
-    }
 
     return res.json(rows);
 
