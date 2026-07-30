@@ -2,102 +2,100 @@
 
 const { pool } = require('../config/database');
 
+const {
+  lockFunds,
+  unlockFunds,
+  getAccountForUpdate
+} = require('./account.service');
+
+const {
+  applyWalletDelta
+} = require('./wallet.service');
 
 // =====================================================
-// START NEW CYCLE
+// START CYCLE
 // =====================================================
 
 async function startCycle({
   userId,
-  walletId,
   capitalAmount,
-  expectedProfit,
+  expectedProfit = 0,
   durationMonths
 }) {
-
   const client = await pool.connect();
 
   try {
-
     await client.query('BEGIN');
 
-    // -------------------------------------------------
-    // Lock wallet
-    // -------------------------------------------------
-
-    const walletRes = await client.query(
-      `
-      SELECT *
-      FROM wallets
-      WHERE id = $1
-      AND user_id = $2
-      FOR UPDATE
-      `,
-      [walletId, userId]
-    );
-
-    if (!walletRes.rows.length) {
-      throw new Error('Wallet not found');
+    if (!capitalAmount || capitalAmount <= 0) {
+      throw new Error('Invalid capital amount');
     }
 
-    const wallet = walletRes.rows[0];
+    if (![1, 3, 6].includes(Number(durationMonths))) {
+      throw new Error('Invalid duration');
+    }
 
-    // -------------------------------------------------
-    // Calculate deployed capital
-    // -------------------------------------------------
+    const account = await getAccountForUpdate(
+      client,
+      userId,
+      'INVESTMENT'
+    );
 
-    const deployedRes = await client.query(
+    const running = await client.query(
       `
-      SELECT COALESCE(SUM(capital_cents),0) AS deployed
+      SELECT id
       FROM cycles
-      WHERE wallet_id = $1
-      AND status = 'RUNNING'
+      WHERE account_id = $1
+        AND status = 'RUNNING'
+      LIMIT 1
       `,
-      [walletId]
+      [account.id]
     );
 
-    const deployed = Number(deployedRes.rows[0].deployed);
-    const available = Number(wallet.balance_cents) - deployed;
-
-    if (capitalAmount > available) {
-      throw new Error('INSUFFICIENT_AVAILABLE_BALANCE');
+    if (running.rows.length) {
+      throw new Error('An active cycle already exists');
     }
 
-    // -------------------------------------------------
-    // Insert cycle
-    // -------------------------------------------------
+    await lockFunds(
+      client,
+      userId,
+      Number(capitalAmount)
+    );
 
-    const DAYS_PER_MONTH = 30;
-    const totalDays = durationMonths * DAYS_PER_MONTH;
+    const totalDays = Number(durationMonths) * 30;
 
     const { rows } = await client.query(
       `
       INSERT INTO cycles (
+        account_id,
         user_id,
-        wallet_id,
-        wallet_type,
         capital_cents,
         expected_profit_cents,
+        realized_profit_cents,
         duration_months,
+        status,
         started_at,
-        ends_at,
-        status
+        ends_at
       )
       VALUES (
-        $1,$2,$3,$4,$5,$6,
+        $1,
+        $2,
+        $3,
+        $4,
+        0,
+        $5,
+        'RUNNING',
         NOW(),
-        NOW() + ($7 || ' days')::interval,
-        'RUNNING'
+        NOW() + ($6 || ' days')::interval
       )
       RETURNING *
       `,
       [
+        account.id,
         userId,
-        walletId,
-        wallet.type,
-        capitalAmount,
-        expectedProfit,
-        durationMonths,
+        Number(capitalAmount),
+        Number(expectedProfit),
+        Number(durationMonths),
         totalDays
       ]
     );
@@ -105,32 +103,117 @@ async function startCycle({
     await client.query('COMMIT');
 
     return rows[0];
-
   } catch (err) {
-
     await client.query('ROLLBACK');
     throw err;
-
   } finally {
-
     client.release();
-
   }
-
 }
 
+// =====================================================
+// CURRENT CYCLE
+// =====================================================
 
+async function getCurrentCycle(userId) {
+  const { rows } = await pool.query(
+    `
+    SELECT c.*
+    FROM cycles c
+    JOIN accounts a
+      ON a.id = c.account_id
+    WHERE a.user_id = $1
+      AND a.account_type = 'INVESTMENT'
+      AND c.status = 'RUNNING'
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return rows[0] || null;
+}
+
+// =====================================================
+// ACTIVE CYCLES
+// =====================================================
+
+async function getActiveCycles(userId) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      c.*,
+
+      FLOOR(
+        EXTRACT(EPOCH FROM (NOW() - c.started_at)) / 86400
+      )::int AS elapsed_days,
+
+      GREATEST(
+        CEIL(
+          EXTRACT(EPOCH FROM (c.ends_at - NOW())) / 86400
+        )::int,
+        0
+      ) AS remaining_days,
+
+      CEIL(
+        EXTRACT(EPOCH FROM (c.ends_at - c.started_at)) / 86400
+      )::int AS total_days
+
+    FROM cycles c
+    JOIN accounts a
+      ON a.id = c.account_id
+
+    WHERE a.user_id = $1
+      AND a.account_type = 'INVESTMENT'
+      AND c.status = 'RUNNING'
+
+    ORDER BY c.started_at ASC
+    `,
+    [userId]
+  );
+
+  return rows;
+}
+
+// =====================================================
+// COMPLETED CYCLES
+// =====================================================
+
+async function getCompletedCycles(userId) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      c.*,
+
+      CASE
+        WHEN c.status = 'CANCELLED'
+        THEN 'FORFEITED'
+        ELSE 'COMPLETED'
+      END AS display_status
+
+    FROM cycles c
+    JOIN accounts a
+      ON a.id = c.account_id
+
+    WHERE a.user_id = $1
+      AND a.account_type = 'INVESTMENT'
+      AND c.status IN ('COMPLETED','CANCELLED')
+
+    ORDER BY c.completed_at DESC
+    `,
+    [userId]
+  );
+
+  return rows;
+}
 
 // =====================================================
 // SETTLE COMPLETED CYCLES
 // =====================================================
 
 async function settleCompletedCycles() {
-
   const client = await pool.connect();
 
   try {
-
     await client.query('BEGIN');
 
     const { rows: cycles } = await client.query(
@@ -138,96 +221,46 @@ async function settleCompletedCycles() {
       SELECT *
       FROM cycles
       WHERE status = 'RUNNING'
-      AND ends_at <= NOW()
+        AND ends_at <= NOW()
       FOR UPDATE
       `
     );
 
     for (const cycle of cycles) {
+      const profit = Number(cycle.expected_profit_cents || 0);
 
-      const expectedProfitCents =
-        Number(cycle.expected_profit_cents || 0);
-
-      const totalReturnCents =
-        Number(cycle.capital_cents) + expectedProfitCents;
-
-      // -------------------------------------------------
-      // Lock wallet
-      // -------------------------------------------------
-
-      const walletRes = await client.query(
-        `
-        SELECT balance_cents
-        FROM wallets
-        WHERE id = $1
-        FOR UPDATE
-        `,
-        [cycle.wallet_id]
+      await unlockFunds(
+        client,
+        cycle.user_id,
+        Number(cycle.capital_cents)
       );
 
-      if (!walletRes.rows.length) {
-        throw new Error('Wallet not found');
+      if (profit > 0) {
+        await applyWalletDelta(
+          client,
+          cycle.user_id,
+          profit,
+          'CYCLE_PROFIT',
+          {
+            refType: 'CYCLE',
+            refId: cycle.id,
+            idempotencyKey: `cycle:${cycle.id}:profit`,
+            reference: `Cycle ${cycle.id} Profit`
+          }
+        );
       }
-
-      const currentBalance =
-        Number(walletRes.rows[0].balance_cents);
-
-      const newBalance =
-        currentBalance + totalReturnCents;
-
-      // -------------------------------------------------
-      // Ledger entry (trigger requires this first)
-      // -------------------------------------------------
-
-      await client.query(
-        `
-        INSERT INTO wallet_ledger
-          (wallet_id,
-           amount_cents,
-           reason,
-           balance_after_cents,
-           cycle_id)
-        VALUES ($1,$2,'CYCLE_SETTLEMENT',$3,$4)
-        `,
-        [
-          cycle.wallet_id,
-          totalReturnCents,
-          newBalance,
-          cycle.id
-        ]
-      );
-
-      // -------------------------------------------------
-      // Update wallet
-      // -------------------------------------------------
-
-      await client.query(
-        `
-        UPDATE wallets
-        SET balance_cents = $1,
-            updated_at = NOW()
-        WHERE id = $2
-        `,
-        [
-          newBalance,
-          cycle.wallet_id
-        ]
-      );
-
-      // -------------------------------------------------
-      // Mark cycle completed
-      // -------------------------------------------------
 
       await client.query(
         `
         UPDATE cycles
-        SET status = 'COMPLETED',
-            completed_at = NOW(),
-            realized_profit_cents = $1
+        SET
+          status = 'COMPLETED',
+          realized_profit_cents = $1,
+          completed_at = NOW()
         WHERE id = $2
         `,
         [
-          expectedProfitCents,
+          profit,
           cycle.id
         ]
       );
@@ -236,121 +269,83 @@ async function settleCompletedCycles() {
     await client.query('COMMIT');
 
     return cycles.length;
-
   } catch (err) {
-
     await client.query('ROLLBACK');
     throw err;
-
   } finally {
-
     client.release();
-
   }
-
 }
 
-async function stopCycle({ userId, cycleId }) {
+// =====================================================
+// FORFEIT CYCLE
+// =====================================================
 
+async function stopCycle({
+  userId,
+  cycleId
+}) {
   const client = await pool.connect();
 
   try {
-
     await client.query('BEGIN');
 
-    // lock cycle
-    const cycleRes = await client.query(
+    const { rows } = await client.query(
       `
       SELECT *
       FROM cycles
       WHERE id = $1
-      AND user_id = $2
-      AND status = 'RUNNING'
+        AND user_id = $2
+        AND status = 'RUNNING'
       FOR UPDATE
-      `,
-      [cycleId, userId]
-    );
-
-    if (!cycleRes.rows.length) {
-      throw new Error('Active cycle not found');
-    }
-
-    const cycle = cycleRes.rows[0];
-
-    // lock wallet
-    const walletRes = await client.query(
-      `
-      SELECT balance_cents
-      FROM wallets
-      WHERE id = $1
-      FOR UPDATE
-      `,
-      [cycle.wallet_id]
-    );
-
-    const currentBalance = Number(walletRes.rows[0].balance_cents);
-
-    const refundAmount = Number(cycle.capital_cents);
-
-    const newBalance = currentBalance + refundAmount;
-
-    // ledger entry
-    await client.query(
-      `
-      INSERT INTO wallet_ledger
-      (wallet_id, amount_cents, reason, balance_after_cents, cycle_id)
-      VALUES ($1,$2,'CYCLE_FORFEIT_REFUND',$3,$4)
       `,
       [
-        cycle.wallet_id,
-        refundAmount,
-        newBalance,
-        cycle.id
+        cycleId,
+        userId
       ]
     );
 
-    // update wallet
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = $1,
-          updated_at = NOW()
-      WHERE id = $2
-      `,
-      [newBalance, cycle.wallet_id]
+    if (!rows.length) {
+      throw new Error('Active cycle not found');
+    }
+
+    const cycle = rows[0];
+
+    await unlockFunds(
+      client,
+      userId,
+      Number(cycle.capital_cents)
     );
 
-    // cancel cycle
-    await client.query(
+    const result = await client.query(
       `
       UPDATE cycles
-      SET status = 'CANCELLED',
-          completed_at = NOW(),
-          realized_profit_cents = 0
+      SET
+        status = 'CANCELLED',
+        realized_profit_cents = 0,
+        completed_at = NOW()
       WHERE id = $1
+      RETURNING *
       `,
       [cycle.id]
     );
 
     await client.query('COMMIT');
 
-    return cycle;
-
+    return result.rows[0];
   } catch (err) {
-
     await client.query('ROLLBACK');
     throw err;
-
   } finally {
-
     client.release();
-
   }
-
 }
 
 module.exports = {
   startCycle,
+  getCurrentCycle,
+  getActiveCycles,
+  getCompletedCycles,
   stopCycle,
   settleCompletedCycles
 };

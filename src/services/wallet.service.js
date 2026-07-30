@@ -3,20 +3,22 @@
 /**
  * Financial engine.
  *
- * NOTE:
- * The file is still called wallet.service.js so existing imports
- * continue to work during the migration.
+ * This service now operates ONLY on INVESTMENT accounts.
+ * Referral accounts will use referralWallet.service.js.
  */
 
-async function getAccountForUpdate(client, userId) {
+async function getInvestmentAccountForUpdate(client, userId) {
   const { rows } = await client.query(
     `
     SELECT
       id,
       user_id,
-      balance_cents
+      account_type,
+      balance_cents,
+      locked_balance_cents
     FROM accounts
     WHERE user_id = $1
+      AND account_type = 'INVESTMENT'
     LIMIT 1
     FOR UPDATE
     `,
@@ -24,7 +26,7 @@ async function getAccountForUpdate(client, userId) {
   );
 
   if (!rows.length) {
-    throw new Error('Account not found');
+    throw new Error('Investment account not found');
   }
 
   return rows[0];
@@ -45,7 +47,10 @@ async function applyWalletDelta(
     throw new Error('deltaCents cannot be zero');
   }
 
-  const account = await getAccountForUpdate(client, userId);
+  const account = await getInvestmentAccountForUpdate(
+    client,
+    userId
+  );
 
   const currentBalance = Number(account.balance_cents);
   const newBalance = currentBalance + deltaCents;
@@ -54,7 +59,7 @@ async function applyWalletDelta(
     throw new Error('Insufficient balance');
   }
 
-  // Prevent duplicate balance mutations
+  // Idempotency protection
   if (reference.idempotencyKey) {
     const { rows } = await client.query(
       `
@@ -71,10 +76,12 @@ async function applyWalletDelta(
     }
   }
 
+  // Update balance
   await client.query(
     `
     UPDATE accounts
-    SET balance_cents = $1
+    SET
+      balance_cents = $1
     WHERE id = $2
     `,
     [
@@ -83,6 +90,7 @@ async function applyWalletDelta(
     ]
   );
 
+  // Immutable ledger
   await client.query(
     `
     INSERT INTO ledger
@@ -109,6 +117,7 @@ async function applyWalletDelta(
     ]
   );
 
+  // User transaction history
   await client.query(
     `
     INSERT INTO transactions
@@ -138,9 +147,10 @@ async function applyWalletDelta(
   return newBalance;
 }
 
-/*
- * Temporary compatibility functions.
- * These will be rewritten later.
+/**
+ * Placeholder compatibility functions.
+ * These will be migrated after the new account engine
+ * is fully adopted.
  */
 
 async function resetDemoWallet() {
@@ -153,6 +163,7 @@ async function creditReferralWallet() {
 
 module.exports = {
   applyWalletDelta,
+  getInvestmentAccountForUpdate,
   resetDemoWallet,
   creditReferralWallet
 };
