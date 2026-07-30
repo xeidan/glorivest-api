@@ -12,7 +12,7 @@ const routes = require('./routes');
 
 const app = express();
 
-
+console.log('DATABASE_URL:', process.env.DATABASE_URL);
 
 /* ======================================================
    CORS
@@ -73,6 +73,15 @@ app.use(globalLimiter);
 
 app.use('/api/deposit', moneyLimiter);
 app.use('/api/withdrawals', moneyLimiter);
+
+//
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Glorivest API',
+    version: '1.0.0',
+    status: 'running'
+  });
+});
 
 /* ======================================================
    API ROUTES
