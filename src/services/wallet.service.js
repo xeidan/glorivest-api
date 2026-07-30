@@ -1,166 +1,158 @@
-// src/services/wallet.service.js
 'use strict';
 
-const { pool } = require('../config/database');
-
 /**
- * Generate deterministic wallet code
+ * Financial engine.
+ *
+ * NOTE:
+ * The file is still called wallet.service.js so existing imports
+ * continue to work during the migration.
  */
-function makeWalletCode(userId, type) {
-  return `GV${userId}-${type}`;
-}
 
-/**
- * 🔒 THE ONLY FUNCTION ALLOWED TO MUTATE MONEY
- * All credits/debits must go through here.
- */
-async function applyWalletDelta(
-  client,
-  userId,
-  type,
-  deltaCents,
-  reason,
-  reference = null
-) {
-  if (!Number.isInteger(deltaCents) || deltaCents === 0) {
-    throw new Error('Invalid wallet delta');
-  }
-
+async function getAccountForUpdate(client, userId) {
   const { rows } = await client.query(
     `
-    SELECT id, balance_cents
-    FROM wallets
+    SELECT
+      id,
+      user_id,
+      balance_cents
+    FROM accounts
     WHERE user_id = $1
-      AND type = $2
-    FOR UPDATE
-    `,
-    [userId, type]
-  );
-
-  if (!rows.length) {
-    throw new Error(`${type} wallet not found`);
-  }
-
-  const walletId = rows[0].id;
-  const currentBalance = Number(rows[0].balance_cents);
-  const newBalance = currentBalance + deltaCents;
-
-  if (newBalance < 0) {
-    throw new Error('Insufficient balance');
-  }
-
-  const refType = reference?.refType || null;
-  const refId = reference?.refId || null;
-
-  await client.query(
-    `
-    INSERT INTO wallet_ledger
-      (wallet_id,
-       amount_cents,
-       reason,
-       balance_after_cents,
-       ref_type,
-       ref_id)
-    VALUES ($1,$2,$3,$4,$5,$6)
-    `,
-    [
-      walletId,
-      deltaCents,
-      reason,
-      newBalance,
-      refType,
-      refId
-    ]
-  );
-
-  await client.query(
-    `
-    UPDATE wallets
-    SET balance_cents = $1,
-        updated_at = NOW()
-    WHERE id = $2
-    `,
-    [newBalance, walletId]
-  );
-
-  return newBalance;
-}
-
-
-
-/**
- * Ensure REAL, DEMO, REFERRAL wallets exist.
- * Safe to call inside transaction.
- */
-async function ensureUserWallets(client, userId) {
-  await client.query(
-    `
-    INSERT INTO wallets (user_id, code, type, balance_cents, status)
-    VALUES
-      ($1, $2, 'REAL', 0, 'active'),
-      ($1, $3, 'DEMO', 1000000, 'active'),
-      ($1, $4, 'REFERRAL', 0, 'active')
-    ON CONFLICT (user_id, type) DO NOTHING
-    `,
-    [
-      userId,
-      makeWalletCode(userId, 'REAL'),
-      makeWalletCode(userId, 'DEMO'),
-      makeWalletCode(userId, 'REFERRAL')
-    ]
-  );
-}
-
-/**
- * Reset demo wallet to 1,000,000 cents
- */
-async function resetDemoWallet(client, userId) {
-  const { rows } = await client.query(
-    `
-    SELECT balance_cents
-    FROM wallets
-    WHERE user_id = $1
-      AND type = 'DEMO'
+    LIMIT 1
     FOR UPDATE
     `,
     [userId]
   );
 
   if (!rows.length) {
-    throw new Error('Demo wallet not found');
+    throw new Error('Account not found');
   }
 
-  const current = Number(rows[0].balance_cents);
-  const target = 1000000;
-  const delta = target - current;
-
-  if (delta === 0) return target;
-
-  return applyWalletDelta(
-    client,
-    userId,
-    'DEMO',
-    delta,
-    'DEMO_RESET'
-  );
+  return rows[0];
 }
 
-/**
- * Credit referral wallet
- */
-async function creditReferralWallet(client, userId, cents) {
-  return applyWalletDelta(
-    client,
-    userId,
-    'REFERRAL',
-    cents,
-    'REFERRAL_REWARD'
+async function applyWalletDelta(
+  client,
+  userId,
+  deltaCents,
+  type,
+  reference = {}
+) {
+  if (!Number.isInteger(deltaCents)) {
+    throw new Error('deltaCents must be an integer');
+  }
+
+  if (deltaCents === 0) {
+    throw new Error('deltaCents cannot be zero');
+  }
+
+  const account = await getAccountForUpdate(client, userId);
+
+  const currentBalance = Number(account.balance_cents);
+  const newBalance = currentBalance + deltaCents;
+
+  if (newBalance < 0) {
+    throw new Error('Insufficient balance');
+  }
+
+  // Prevent duplicate balance mutations
+  if (reference.idempotencyKey) {
+    const { rows } = await client.query(
+      `
+      SELECT id
+      FROM ledger
+      WHERE idempotency_key = $1
+      LIMIT 1
+      `,
+      [reference.idempotencyKey]
+    );
+
+    if (rows.length) {
+      return newBalance;
+    }
+  }
+
+  await client.query(
+    `
+    UPDATE accounts
+    SET balance_cents = $1
+    WHERE id = $2
+    `,
+    [
+      newBalance,
+      account.id
+    ]
   );
+
+  await client.query(
+    `
+    INSERT INTO ledger
+    (
+      user_id,
+      account_id,
+      type,
+      amount_cents,
+      ref_type,
+      ref_id,
+      idempotency_key
+    )
+    VALUES
+    ($1,$2,$3,$4,$5,$6,$7)
+    `,
+    [
+      account.user_id,
+      account.id,
+      type,
+      deltaCents,
+      reference.refType ?? null,
+      reference.refId ?? null,
+      reference.idempotencyKey ?? null
+    ]
+  );
+
+  await client.query(
+    `
+    INSERT INTO transactions
+    (
+      user_id,
+      account_id,
+      type,
+      amount_cents,
+      balance_after_cents,
+      reference,
+      meta
+    )
+    VALUES
+    ($1,$2,$3,$4,$5,$6,$7)
+    `,
+    [
+      account.user_id,
+      account.id,
+      type,
+      deltaCents,
+      newBalance,
+      reference.reference ?? null,
+      reference.meta ?? {}
+    ]
+  );
+
+  return newBalance;
+}
+
+/*
+ * Temporary compatibility functions.
+ * These will be rewritten later.
+ */
+
+async function resetDemoWallet() {
+  throw new Error('resetDemoWallet has not been migrated yet.');
+}
+
+async function creditReferralWallet() {
+  throw new Error('creditReferralWallet has not been migrated yet.');
 }
 
 module.exports = {
-  ensureUserWallets,
+  applyWalletDelta,
   resetDemoWallet,
-  creditReferralWallet,
-  applyWalletDelta
+  creditReferralWallet
 };

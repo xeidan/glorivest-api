@@ -2,7 +2,8 @@
 
 const { pool } = require('../config/database');
 const { applyWalletDelta } = require('./wallet.service');
-const { processReferralReward } = require('./referralReward.service');
+// const { processReferralReward } = require('./referralReward.service');
+// Referral rewards will be migrated after the new financial engine is complete.
 
 async function approveDeposit(depositId, adminId) {
   const client = await pool.connect();
@@ -12,12 +13,13 @@ async function approveDeposit(depositId, adminId) {
 
     const { rows } = await client.query(
       `
-      SELECT id,
-             user_id,
-             amount_exact_cents,
-             status,
-             referral_rewarded,
-             expires_at
+      SELECT
+        id,
+        user_id,
+        amount_exact_cents,
+        status,
+        expires_at,
+        reference
       FROM deposits
       WHERE id = $1
       FOR UPDATE
@@ -31,7 +33,7 @@ async function approveDeposit(depositId, adminId) {
 
     const deposit = rows[0];
 
-    // Expiry enforcement
+    // Ensure deposit has not expired
     if (deposit.expires_at && new Date(deposit.expires_at) < new Date()) {
       throw new Error('Deposit expired');
     }
@@ -40,69 +42,74 @@ async function approveDeposit(depositId, adminId) {
       throw new Error('Invalid deposit state');
     }
 
-    // 1️⃣ Credit REAL wallet (must include deposit reference internally)
+    // Credit user's investment account
     await applyWalletDelta(
       client,
       deposit.user_id,
-      'REAL',
       Number(deposit.amount_exact_cents),
       'DEPOSIT_SUCCESS',
       {
         refType: 'DEPOSIT',
-        refId: deposit.id
+        refId: deposit.id,
+        idempotencyKey: `deposit:${deposit.id}`,
+        reference: deposit.reference
       }
     );
 
-    // 2️⃣ Process referral reward (idempotent at DB level)
-    if (!deposit.referral_rewarded) {
-      await processReferralReward(
-        client,
-        deposit.user_id,
-        Number(deposit.amount_exact_cents),
-        deposit.id
-      );
+    /*
+     * Referral rewards temporarily disabled.
+     * This will be reintroduced using the new account engine
+     * instead of the legacy wallet implementation.
+     */
+    /*
+    await processReferralReward(
+      client,
+      deposit.user_id,
+      Number(deposit.amount_exact_cents),
+      deposit.id
+    );
+    */
 
-      await client.query(
-        `
-        UPDATE deposits
-        SET referral_rewarded = true
-        WHERE id = $1
-        `,
-        [depositId]
-      );
-    }
-
-    // 3️⃣ Finalize deposit status
+    // Mark deposit successful
     await client.query(
       `
       UPDATE deposits
-      SET status = 'SUCCESS'
+      SET
+        status = 'SUCCESS',
+        updated_at = NOW()
       WHERE id = $1
       `,
-      [depositId]
+      [deposit.id]
     );
 
-    // 4️⃣ First deposit concurrency-safe update
-    await client.query(
-      `
-      UPDATE users
-      SET first_deposit_done = true
-      WHERE id = $1
-        AND first_deposit_done = false
-      `,
-      [deposit.user_id]
-    );
+    /*
+     * first_deposit_done no longer exists in the schema.
+     * We'll determine first deposits from successful deposit history.
+     */
 
-    // 5️⃣ Admin audit log (atomic with approval)
+    // Admin audit log
     await client.query(
       `
       INSERT INTO admin_audit_logs
-      (admin_id, action, entity_type, entity_id, metadata)
-      VALUES ($1, 'DEPOSIT_APPROVED', 'DEPOSIT', $2, $3)
+      (
+        admin_id,
+        action,
+        entity_type,
+        entity_id,
+        metadata
+      )
+      VALUES
+      (
+        $1,
+        'DEPOSIT_APPROVED',
+        'DEPOSIT',
+        $2,
+        $3
+      )
       `,
       [
         adminId,
-        depositId,
+        deposit.id,
         JSON.stringify({
           amount_exact_cents: deposit.amount_exact_cents
         })
@@ -111,7 +118,9 @@ async function approveDeposit(depositId, adminId) {
 
     await client.query('COMMIT');
 
-    return { success: true };
+    return {
+      success: true
+    };
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -121,4 +130,6 @@ async function approveDeposit(depositId, adminId) {
   }
 }
 
-module.exports = { approveDeposit };
+module.exports = {
+  approveDeposit
+};
