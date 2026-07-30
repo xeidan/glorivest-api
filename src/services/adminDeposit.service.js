@@ -88,33 +88,9 @@ async function approveDeposit(depositId, adminId) {
      */
 
     // Admin audit log
-    await client.query(
-      `
-      INSERT INTO admin_audit_logs
-      (
-        admin_id,
-        action,
-        entity_type,
-        entity_id,
-        metadata
-      )
-      VALUES
-      (
-        $1,
-        'DEPOSIT_APPROVED',
-        'DEPOSIT',
-        $2,
-        $3
-      )
-      `,
-      [
-        adminId,
-        deposit.id,
-        JSON.stringify({
-          amount_exact_cents: deposit.amount_exact_cents
-        })
-      ]
-    );
+console.log(
+  `Deposit ${deposit.id} approved by admin ${adminId}`
+);
 
     await client.query('COMMIT');
 
