@@ -21,6 +21,7 @@ app.use(
   cors({
     origin: [
       'http://127.0.0.1:5503',
+      'http://127.0.0.1:5500',
       'http://localhost:5503',
       'https://www.glorivest.com',
       'https://glorivest.com',
