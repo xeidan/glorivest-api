@@ -283,24 +283,23 @@ const verifyOtp = async (req, res) => {
 
     const accountRes = await client.query(
       `
-      INSERT INTO accounts (
-        user_id,
-        tier_id,
-        account_code,
-        status,
-        balance_cents,
-        profit_cents,
-        created_at
-      )
-      VALUES ($1, $2, $3, 'ACTIVE', $4, 0, NOW())
-      RETURNING id
-      `,
-      [
-        user.id,
-        tier.id,
-        accountCode,
-        DEMO_BALANCE_CENTS
-      ]
+    INSERT INTO accounts (
+      user_id,
+      tier_id,
+      account_code,
+      status,
+      balance_cents,
+      profit_cents,
+      created_at
+    )
+    VALUES ($1, $2, $3, 'ACTIVE', 0, 0, NOW())
+    RETURNING id
+    `,
+    [
+      user.id,
+      tier.id,
+      accountCode
+]
     );
 
     await postTransaction(
