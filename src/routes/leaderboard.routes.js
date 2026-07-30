@@ -9,53 +9,55 @@ const router = express.Router();
 /**
  * GET /api/leaderboard
  *
- * Ranking priority:
- * 1. Users ranked by REFERRAL wallet balance (DESC)
- * 2. If all balances are 0 → fallback to newest signups
+ * Current ranking:
+ * 1. Highest account balance
+ * 2. Fallback to newest users
  */
+
 router.get('/', auth, async (req, res) => {
   try {
 
-    // Get top 10 ranked by referral wallet balance
-    const { rows } = await pool.query(
-      `
-      SELECT 
+    const { rows } = await pool.query(`
+      SELECT
         u.email,
-        COALESCE(w.balance_cents, 0) AS referral_earnings_cents
+        COALESCE(a.balance_cents, 0) AS referral_earnings_cents
       FROM users u
-      LEFT JOIN wallets w
-        ON w.user_id = u.id
-       AND w.type = 'REFERRAL'
-      ORDER BY referral_earnings_cents DESC
+      LEFT JOIN accounts a
+        ON a.user_id = u.id
+      ORDER BY
+        referral_earnings_cents DESC,
+        u.created_at DESC
       LIMIT 10
-      `
-    );
+    `);
 
-    const hasAnyEarnings = rows.some(
+    const hasAnyBalance = rows.some(
       r => Number(r.referral_earnings_cents) > 0
     );
 
-    // Fallback if nobody has earnings
-    if (!hasAnyEarnings) {
-      const fallback = await pool.query(
-        `
-        SELECT 
+    if (!hasAnyBalance) {
+
+      const { rows: fallback } = await pool.query(`
+        SELECT
           email,
           0 AS referral_earnings_cents
         FROM users
         ORDER BY created_at DESC
         LIMIT 10
-        `
-      );
+      `);
 
-      return res.json(fallback.rows);
+      return res.json(fallback);
     }
 
     return res.json(rows);
 
   } catch (err) {
+
     console.error('Leaderboard error:', err);
-    return res.status(500).json({ error: 'Leaderboard failed' });
+
+    return res.status(500).json({
+      error: 'Leaderboard failed'
+    });
+
   }
 });
 
