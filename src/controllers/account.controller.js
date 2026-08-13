@@ -25,22 +25,25 @@ exports.getMyAccounts = async (req, res) => {
     const userId = req.user.id;
 
     const q = await pool.query(
-      `SELECT 
-         a.id,
-         a.account_code,
-         a.status,
-         a.balance_cents,
-         a.profit_cents,
-         a.created_at,
-         t.id   AS tier_id,
-         t.name AS tier_name,
-         t.slug AS tier_slug
-       FROM accounts a
-       LEFT JOIN account_tiers t ON t.id = a.tier_id
-       WHERE a.user_id = $1
-       ORDER BY a.id ASC`,
-      [userId]
-    );
+  `SELECT 
+     a.id,
+     a.user_id,
+     a.account_code,
+     a.account_type,
+     a.status,
+     a.balance_cents,
+     a.profit_cents,
+     a.locked_balance_cents,
+     a.created_at,
+     t.id   AS tier_id,
+     t.name AS tier_name,
+     t.slug AS tier_slug
+   FROM accounts a
+   LEFT JOIN account_tiers t ON t.id = a.tier_id
+   WHERE a.user_id = $1
+   ORDER BY a.id ASC`,
+  [userId]
+);
 
     return res.json(q.rows);
   } catch (err) {
