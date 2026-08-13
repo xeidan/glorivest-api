@@ -25,10 +25,10 @@ router.use('/cycle', require('./cycle.routes'));
 router.use('/transfer', require('./transfer.routes'));
 router.use('/deposit', require('./deposit.routes'));
 router.use('/withdrawals', require('./withdrawal.routes'));
+router.use('/transactions', require('./transactions.routes'));
 router.use('/performance', require('./performance.routes'));
 router.use('/leaderboard', require('./leaderboard.routes'));
 router.use('/rates', require('./rates.routes'));
-
 
 
 /*
@@ -36,8 +36,12 @@ router.use('/rates', require('./rates.routes'));
 | Admin Routes
 |--------------------------------------------------------------------------
 */
-router.use('/admin', auth, requireAdmin, require('./admin.routes'));
-
+router.use(
+  '/admin',
+  auth,
+  requireAdmin,
+  require('./admin.routes')
+);
 
 
 module.exports = router;
