@@ -1,13 +1,30 @@
 'use strict';
 
 /**
- * Financial engine.
+ * Wallet Service
  *
- * This service now operates ONLY on INVESTMENT accounts.
- * Referral accounts will use referralWallet.service.js.
+ * Single financial engine for every wallet type.
+ *
+ * Supported wallet types:
+ * - INVESTMENT
+ * - REFERRAL
+ * - DEMO
+ *
+ * Responsibilities:
+ * - Credit wallet
+ * - Debit wallet
+ * - Lock funds
+ * - Unlock funds
+ * - Transfer between wallets
+ * - Immutable ledger
+ * - Transaction history
  */
 
-async function getInvestmentAccountForUpdate(client, userId) {
+async function getWalletForUpdate(
+  client,
+  userId,
+  walletType = 'INVESTMENT'
+) {
   const { rows } = await client.query(
     `
     SELECT
@@ -18,15 +35,15 @@ async function getInvestmentAccountForUpdate(client, userId) {
       locked_balance_cents
     FROM accounts
     WHERE user_id = $1
-      AND account_type = 'INVESTMENT'
+      AND account_type = $2
     LIMIT 1
     FOR UPDATE
     `,
-    [userId]
+    [userId, walletType]
   );
 
   if (!rows.length) {
-    throw new Error('Investment account not found');
+    throw new Error(`${walletType} wallet not found`);
   }
 
   return rows[0];
@@ -35,6 +52,7 @@ async function getInvestmentAccountForUpdate(client, userId) {
 async function applyWalletDelta(
   client,
   userId,
+  walletType,
   deltaCents,
   type,
   reference = {}
@@ -47,19 +65,20 @@ async function applyWalletDelta(
     throw new Error('deltaCents cannot be zero');
   }
 
-  const account = await getInvestmentAccountForUpdate(
+  const wallet = await getWalletForUpdate(
     client,
-    userId
+    userId,
+    walletType
   );
 
-  const currentBalance = Number(account.balance_cents);
+  const currentBalance = Number(wallet.balance_cents);
   const newBalance = currentBalance + deltaCents;
 
   if (newBalance < 0) {
     throw new Error('Insufficient balance');
   }
 
-  // Idempotency protection
+  // Prevent duplicate processing
   if (reference.idempotencyKey) {
     const { rows } = await client.query(
       `
@@ -76,21 +95,18 @@ async function applyWalletDelta(
     }
   }
 
-  // Update balance
   await client.query(
     `
     UPDATE accounts
-    SET
-      balance_cents = $1
+    SET balance_cents = $1
     WHERE id = $2
     `,
     [
       newBalance,
-      account.id
+      wallet.id
     ]
   );
 
-  // Immutable ledger
   await client.query(
     `
     INSERT INTO ledger
@@ -107,8 +123,8 @@ async function applyWalletDelta(
     ($1,$2,$3,$4,$5,$6,$7)
     `,
     [
-      account.user_id,
-      account.id,
+      wallet.user_id,
+      wallet.id,
       type,
       deltaCents,
       reference.refType ?? null,
@@ -117,7 +133,6 @@ async function applyWalletDelta(
     ]
   );
 
-  // User transaction history
   await client.query(
     `
     INSERT INTO transactions
@@ -134,8 +149,8 @@ async function applyWalletDelta(
     ($1,$2,$3,$4,$5,$6,$7)
     `,
     [
-      account.user_id,
-      account.id,
+      wallet.user_id,
+      wallet.id,
       type,
       deltaCents,
       newBalance,
@@ -148,22 +163,245 @@ async function applyWalletDelta(
 }
 
 /**
- * Placeholder compatibility functions.
- * These will be migrated after the new account engine
- * is fully adopted.
+ * Credit a wallet.
  */
+async function creditWallet(
+  client,
+  userId,
+  walletType,
+  amountCents,
+  type,
+  reference = {}
+) {
+  if (amountCents <= 0) {
+    throw new Error('Credit amount must be greater than zero');
+  }
 
-async function resetDemoWallet() {
-  throw new Error('resetDemoWallet has not been migrated yet.');
+  return applyWalletDelta(
+    client,
+    userId,
+    walletType,
+    amountCents,
+    type,
+    reference
+  );
 }
 
-async function creditReferralWallet() {
-  throw new Error('creditReferralWallet has not been migrated yet.');
+/**
+ * Debit a wallet.
+ */
+async function debitWallet(
+  client,
+  userId,
+  walletType,
+  amountCents,
+  type,
+  reference = {}
+) {
+  if (amountCents <= 0) {
+    throw new Error('Debit amount must be greater than zero');
+  }
+
+  return applyWalletDelta(
+    client,
+    userId,
+    walletType,
+    -amountCents,
+    type,
+    reference
+  );
+}
+
+/**
+ * Lock funds inside a wallet.
+ */
+async function lockFunds(
+  client,
+  userId,
+  walletType,
+  amountCents
+) {
+  if (amountCents <= 0) {
+    throw new Error('Invalid lock amount');
+  }
+
+  const wallet = await getWalletForUpdate(
+    client,
+    userId,
+    walletType
+  );
+
+  if (wallet.balance_cents < amountCents) {
+    throw new Error('Insufficient balance');
+  }
+
+  await client.query(
+    `
+    UPDATE accounts
+    SET
+      balance_cents = balance_cents - $1,
+      locked_balance_cents = locked_balance_cents + $1
+    WHERE id = $2
+    `,
+    [
+      amountCents,
+      wallet.id
+    ]
+  );
+}
+
+/**
+ * Unlock previously locked funds.
+ */
+async function unlockFunds(
+  client,
+  userId,
+  walletType,
+  amountCents
+) {
+  if (amountCents <= 0) {
+    throw new Error('Invalid unlock amount');
+  }
+
+  const wallet = await getWalletForUpdate(
+    client,
+    userId,
+    walletType
+  );
+
+  if (wallet.locked_balance_cents < amountCents) {
+    throw new Error('Locked balance exceeded');
+  }
+
+  await client.query(
+    `
+    UPDATE accounts
+    SET
+      balance_cents = balance_cents + $1,
+      locked_balance_cents = locked_balance_cents - $1
+    WHERE id = $2
+    `,
+    [
+      amountCents,
+      wallet.id
+    ]
+  );
+}
+
+/**
+ * Transfer funds between wallets.
+ */
+async function transferBetweenWallets(
+  client,
+  userId,
+  fromWallet,
+  toWallet,
+  amountCents,
+  reference = {}
+) {
+  if (fromWallet === toWallet) {
+    throw new Error('Cannot transfer to same wallet');
+  }
+
+  if (amountCents <= 0) {
+    throw new Error('Invalid transfer amount');
+  }
+
+  await debitWallet(
+    client,
+    userId,
+    fromWallet,
+    amountCents,
+    'WALLET_TRANSFER_OUT',
+    {
+      ...reference,
+      meta: {
+        from: fromWallet,
+        to: toWallet
+      }
+    }
+  );
+
+  await creditWallet(
+    client,
+    userId,
+    toWallet,
+    amountCents,
+    'WALLET_TRANSFER_IN',
+    {
+      ...reference,
+      meta: {
+        from: fromWallet,
+        to: toWallet
+      }
+    }
+  );
+}
+
+/**
+ * Reset a wallet to a fixed balance.
+ * Primarily used for DEMO wallets.
+ */
+async function resetWallet(
+  client,
+  userId,
+  walletType,
+  balanceCents
+) {
+  const wallet = await getWalletForUpdate(
+    client,
+    userId,
+    walletType
+  );
+
+  await client.query(
+    `
+    UPDATE accounts
+    SET
+      balance_cents = $1,
+      locked_balance_cents = 0
+    WHERE id = $2
+    `,
+    [
+      balanceCents,
+      wallet.id
+    ]
+  );
+
+  await client.query(
+    `
+    INSERT INTO transactions
+    (
+      user_id,
+      account_id,
+      type,
+      amount_cents,
+      balance_after_cents,
+      meta
+    )
+    VALUES
+    ($1,$2,'WALLET_RESET',$3,$3,$4)
+    `,
+    [
+      wallet.user_id,
+      wallet.id,
+      balanceCents,
+      {
+        walletType
+      }
+    ]
+  );
+
+  return balanceCents;
 }
 
 module.exports = {
+  getWalletForUpdate,
   applyWalletDelta,
-  getInvestmentAccountForUpdate,
-  resetDemoWallet,
-  creditReferralWallet
+  creditWallet,
+  debitWallet,
+  lockFunds,
+  unlockFunds,
+  transferBetweenWallets,
+  resetWallet
 };
