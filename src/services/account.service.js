@@ -3,17 +3,38 @@
 /**
  * Account Engine
  *
- * Single source of truth for all account operations.
- *
  * Supported account types:
- * - INVESTMENT
- * - REFERRAL
+ * - DEMO      → independent simulated trading balance
+ * - LIVE      → real user funds
+ * - REFERRAL  → referral earnings kept separate from LIVE
+ *
+ * Account balances are never mixed.
  */
 
-async function getAccount(client, userId, accountType = 'INVESTMENT') {
+async function getAccount(
+  client,
+  userId,
+  accountType
+) {
+  if (!accountType) {
+    throw new Error('accountType is required');
+  }
+
   const { rows } = await client.query(
     `
-    SELECT *
+    SELECT
+      id,
+      user_id,
+      tier_id,
+      account_code,
+      status,
+      balance_cents,
+      profit_cents,
+      bot_started_at,
+      bot_ends_at,
+      created_at,
+      account_type,
+      locked_balance_cents
     FROM accounts
     WHERE user_id = $1
       AND account_type = $2
@@ -32,11 +53,27 @@ async function getAccount(client, userId, accountType = 'INVESTMENT') {
 async function getAccountForUpdate(
   client,
   userId,
-  accountType = 'INVESTMENT'
+  accountType
 ) {
+  if (!accountType) {
+    throw new Error('accountType is required');
+  }
+
   const { rows } = await client.query(
     `
-    SELECT *
+    SELECT
+      id,
+      user_id,
+      tier_id,
+      account_code,
+      status,
+      balance_cents,
+      profit_cents,
+      bot_started_at,
+      bot_ends_at,
+      created_at,
+      account_type,
+      locked_balance_cents
     FROM accounts
     WHERE user_id = $1
       AND account_type = $2
@@ -58,6 +95,14 @@ async function updateBalance(
   accountId,
   balanceCents
 ) {
+  if (!Number.isInteger(balanceCents)) {
+    throw new Error('balanceCents must be an integer');
+  }
+
+  if (balanceCents < 0) {
+    throw new Error('Balance cannot be negative');
+  }
+
   await client.query(
     `
     UPDATE accounts
@@ -76,8 +121,16 @@ async function updateLockedBalance(
   accountId,
   lockedBalanceCents
 ) {
+  if (!Number.isInteger(lockedBalanceCents)) {
+    throw new Error(
+      'lockedBalanceCents must be an integer'
+    );
+  }
+
   if (lockedBalanceCents < 0) {
-    throw new Error('Locked balance cannot be negative');
+    throw new Error(
+      'Locked balance cannot be negative'
+    );
   }
 
   await client.query(
@@ -99,7 +152,7 @@ async function credit(
   accountType,
   amountCents
 ) {
-  if (amountCents <= 0) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error('Invalid credit amount');
   }
 
@@ -127,7 +180,7 @@ async function debit(
   accountType,
   amountCents
 ) {
-  if (amountCents <= 0) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error('Invalid debit amount');
   }
 
@@ -156,21 +209,31 @@ async function debit(
   return newBalance;
 }
 
+/**
+ * Lock LIVE funds for a cycle.
+ *
+ * IMPORTANT:
+ * balance_cents remains the user's total LIVE balance.
+ * locked_balance_cents represents capital committed
+ * to active cycles.
+ *
+ * Available:
+ * balance - locked
+ */
 async function lockFunds(
   client,
   userId,
   amountCents
 ) {
-  if (amountCents <= 0) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error('Invalid lock amount');
   }
 
-  const account =
-    await getAccountForUpdate(
-      client,
-      userId,
-      'INVESTMENT'
-    );
+  const account = await getAccountForUpdate(
+    client,
+    userId,
+    'LIVE'
+  );
 
   const balance =
     Number(account.balance_cents);
@@ -182,60 +245,84 @@ async function lockFunds(
     balance - locked;
 
   if (available < amountCents) {
-    throw new Error('Insufficient available balance');
+    throw new Error(
+      'Insufficient available LIVE balance'
+    );
   }
+
+  const newLocked =
+    locked + amountCents;
 
   await updateLockedBalance(
     client,
     account.id,
-    locked + amountCents
+    newLocked
   );
 
   return {
+    accountId: account.id,
     balance,
-    locked: locked + amountCents,
-    available: balance - (locked + amountCents)
+    locked: newLocked,
+    available: balance - newLocked
   };
 }
 
+/**
+ * Unlock LIVE funds after a cycle completes
+ * or is forfeited.
+ */
 async function unlockFunds(
   client,
   userId,
   amountCents
 ) {
-  if (amountCents <= 0) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
     throw new Error('Invalid unlock amount');
   }
 
-  const account =
-    await getAccountForUpdate(
-      client,
-      userId,
-      'INVESTMENT'
-    );
+  const account = await getAccountForUpdate(
+    client,
+    userId,
+    'LIVE'
+  );
 
   const locked =
     Number(account.locked_balance_cents);
 
   if (locked < amountCents) {
-    throw new Error('Invalid unlock amount');
+    throw new Error(
+      'Invalid unlock amount'
+    );
   }
+
+  const newLocked =
+    locked - amountCents;
 
   await updateLockedBalance(
     client,
     account.id,
-    locked - amountCents
+    newLocked
   );
 
   return {
+    accountId: account.id,
     balance: Number(account.balance_cents),
-    locked: locked - amountCents,
+    locked: newLocked,
     available:
       Number(account.balance_cents) -
-      (locked - amountCents)
+      newLocked
   };
 }
 
+/**
+ * Transfer funds between account types.
+ *
+ * Example:
+ * REFERRAL → LIVE
+ *
+ * This is the only way referral earnings
+ * become part of the LIVE balance.
+ */
 async function transfer(
   client,
   userId,
@@ -243,6 +330,30 @@ async function transfer(
   toAccountType,
   amountCents
 ) {
+  if (
+    !fromAccountType ||
+    !toAccountType
+  ) {
+    throw new Error(
+      'Source and destination account types are required'
+    );
+  }
+
+  if (
+    fromAccountType === toAccountType
+  ) {
+    throw new Error(
+      'Source and destination accounts must be different'
+    );
+  }
+
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
+    throw new Error('Invalid transfer amount');
+  }
+
   await debit(
     client,
     userId,
@@ -256,11 +367,19 @@ async function transfer(
     toAccountType,
     amountCents
   );
+
+  return {
+    amountCents,
+    fromAccountType,
+    toAccountType
+  };
 }
 
 module.exports = {
   getAccount,
   getAccountForUpdate,
+  updateBalance,
+  updateLockedBalance,
   credit,
   debit,
   lockFunds,
