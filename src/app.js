@@ -17,25 +17,60 @@ const app = express();
 /* ======================================================
    CORS
 ====================================================== */
-app.use(
-  cors({
-    origin: [
-      'http://127.0.0.1:5503',
-      'http://127.0.0.1:5500',
-      'http://localhost:5503',
-      'https://www.glorivest.com',
-      'https://glorivest.com',
-      'https://xeidan.github.io'
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'Idempotency-Key'
-    ]
-  })
-);
+const allowedOrigins = [
+  'http://127.0.0.1:5500',
+  'http://127.0.0.1:5503',
+  'http://localhost:5500',
+  'http://localhost:5503',
+  'https://www.glorivest.com',
+  'https://glorivest.com',
+  'https://xeidan.github.io'
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+
+    // Allow requests with no Origin header
+    // such as server-to-server requests.
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn(
+      '[CORS] Blocked origin:',
+      origin
+    );
+
+    return callback(
+      new Error('Not allowed by CORS')
+    );
+  },
+
+  credentials: true,
+
+  methods: [
+    'GET',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS'
+  ],
+
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Idempotency-Key'
+  ],
+
+  optionsSuccessStatus: 204
+};
+
+app.use(cors(corsOptions));
 
 /* ======================================================
    BODY PARSERS
