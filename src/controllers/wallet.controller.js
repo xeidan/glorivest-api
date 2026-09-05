@@ -1,38 +1,102 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const { resetDemoWallet, applyWalletDelta } = require('../services/wallet.service');
+
+const {
+  resetWallet,
+  transferBetweenWallets
+} = require('../services/wallet.service');
 
 const DEMO_BALANCE_CENTS = 1_000_000;
+const LIVE_WALLET_TYPE = 'LIVE';
 
 
 // ======================================================
-// GET USER WALLETS
+// GET USER WALLETS / ACCOUNTS
 // ======================================================
 
 const getWallets = async (req, res) => {
   try {
-
     const { rows } = await pool.query(
       `
-      SELECT id, code, type, balance_cents, status, demo_reset_at
-      FROM wallets
+      SELECT
+        id,
+        account_code,
+        account_type,
+        balance_cents,
+        locked_balance_cents,
+        status,
+        created_at
+      FROM accounts
       WHERE user_id = $1
       ORDER BY created_at ASC
       `,
       [req.user.id]
     );
 
-    res.json(rows);
+    /*
+     * The frontend expects:
+     *
+     * DEMO
+     * REFERRAL
+     * LIVE
+     *
+     * Internally the database uses:
+     *
+     * DEMO
+     * REFERRAL
+     * INVESTMENT
+     */
+
+    const wallets = rows.map(account => {
+      const accountType =
+        String(account.account_type || '').toUpperCase();
+
+      let type;
+
+      if (accountType === 'DEMO') {
+        type = 'DEMO';
+      } else if (accountType === 'REFERRAL') {
+        type = 'REFERRAL';
+      } else {
+        type = 'LIVE';
+      }
+
+      return {
+        id: account.id,
+
+        // Keep both names for frontend compatibility
+        code: account.account_code,
+        account_code: account.account_code,
+
+        // UI-facing wallet type
+        type,
+
+        // Database account type
+        account_type: accountType,
+
+        balance_cents: Number(account.balance_cents || 0),
+
+        locked_balance_cents: Number(
+          account.locked_balance_cents || 0
+        ),
+
+        status: account.status,
+
+        created_at: account.created_at
+      };
+    });
+
+    res.json(wallets);
 
   } catch (err) {
-
     console.error('Get wallets failed:', err);
-    res.status(500).json({ message: 'Server error' });
 
+    res.status(500).json({
+      message: 'Server error'
+    });
   }
 };
-
 
 
 // ======================================================
@@ -40,41 +104,70 @@ const getWallets = async (req, res) => {
 // ======================================================
 
 const resetDemoWalletController = async (req, res) => {
-
   const client = await pool.connect();
 
   try {
-
     const userId = req.user.id;
 
     await client.query('BEGIN');
 
-    const newBalance = await resetDemoWallet(client, userId);
+    /*
+     * Reset the DEMO account to $10,000.
+     *
+     * The wallet service works against the accounts table,
+     * so this deliberately does NOT use the old wallets table.
+     */
+    const newBalance = await resetWallet(
+      client,
+      userId,
+      'DEMO',
+      DEMO_BALANCE_CENTS
+    );
 
-    // Cancel any running demo cycles
-    await client.query(
+    /*
+     * Find the user's DEMO account.
+     */
+    const { rows: demoAccounts } = await client.query(
       `
-      UPDATE cycles
-      SET status = 'CANCELLED'
-      WHERE wallet_id = (
-        SELECT id
-        FROM wallets
-        WHERE user_id = $1
-        AND type = 'DEMO'
-      )
+      SELECT id
+      FROM accounts
+      WHERE user_id = $1
+        AND account_type = 'DEMO'
+      LIMIT 1
       `,
       [userId]
     );
 
+    const demoAccount = demoAccounts[0];
+
+/*
+ * Cancel any currently running demo cycles.
+ *
+ * cycles.account_id references the corresponding
+ * DEMO account ID.
+ */
+if (demoAccount) {
+  await client.query(
+    `
+    UPDATE cycles
+    SET status = 'CANCELLED'
+    WHERE account_id = $1
+      AND status NOT IN ('COMPLETED', 'CANCELLED')
+    `,
+    [demoAccount.id]
+  );
+}
+
     await client.query('COMMIT');
 
     res.json({
+      message: 'Demo balance reset successfully',
       balance_cents: newBalance
     });
 
   } catch (err) {
-
     await client.query('ROLLBACK');
+
     console.error('Demo reset failed:', err);
 
     res.status(500).json({
@@ -82,21 +175,18 @@ const resetDemoWalletController = async (req, res) => {
     });
 
   } finally {
-
     client.release();
-
   }
 };
 
 
-
 // ======================================================
-// TRANSFER REFERRAL → REAL WALLET
+// TRANSFER REFERRAL → LIVE ACCOUNT
 // ======================================================
 
 const transferReferralToReal = async (req, res) => {
-
   const userId = req.user.id;
+
   const amount = Number(req.body.amount_cents);
 
   if (!Number.isInteger(amount) || amount <= 0) {
@@ -108,29 +198,54 @@ const transferReferralToReal = async (req, res) => {
   const client = await pool.connect();
 
   try {
-
     await client.query('BEGIN');
 
-    // Lock wallets
-    const { rows: wallets } = await client.query(
+    /*
+     * Confirm both accounts exist and lock them.
+     */
+    const { rows: accounts } = await client.query(
       `
-      SELECT id, type, balance_cents
-      FROM wallets
+      SELECT
+        id,
+        account_type,
+        balance_cents
+      FROM accounts
       WHERE user_id = $1
-      AND type IN ('REFERRAL','REAL')
+        AND account_type IN ('REFERRAL', $2)
+      ORDER BY id
       FOR UPDATE
       `,
-      [userId]
+      [userId, LIVE_WALLET_TYPE]
     );
 
-    const referralWallet = wallets.find(w => w.type === 'REFERRAL');
-    const realWallet = wallets.find(w => w.type === 'REAL');
+    const referralAccount = accounts.find(
+      account => account.account_type === 'REFERRAL'
+    );
 
-    if (!referralWallet || !realWallet) {
-      throw new Error('Required wallets not found');
+    const liveAccount = accounts.find(
+      account => account.account_type === LIVE_WALLET_TYPE
+    );
+
+    if (!referralAccount) {
+      await client.query('ROLLBACK');
+
+      return res.status(404).json({
+        message: 'Referral account not found'
+      });
     }
 
-    if (Number(referralWallet.balance_cents) < amount) {
+    if (!liveAccount) {
+      await client.query('ROLLBACK');
+
+      return res.status(404).json({
+        message: 'Live account not found'
+      });
+    }
+
+    /*
+     * Check referral balance before transferring.
+     */
+    if (Number(referralAccount.balance_cents) < amount) {
       await client.query('ROLLBACK');
 
       return res.status(400).json({
@@ -138,56 +253,35 @@ const transferReferralToReal = async (req, res) => {
       });
     }
 
-    // --------------------------------------------------
-    // Ledger-safe balance updates
-    // --------------------------------------------------
-
-    await applyWalletDelta(
+    /*
+     * Use the wallet service for the actual transfer.
+     *
+     * This keeps the debit, credit, ledger and transaction
+     * records inside the same financial engine.
+     */
+    await transferBetweenWallets(
       client,
       userId,
       'REFERRAL',
-      -amount,
-      'REFERRAL_TRANSFER_OUT'
-    );
-
-    await applyWalletDelta(
-      client,
-      userId,
-      'REAL',
+      LIVE_WALLET_TYPE,
       amount,
-      'REFERRAL_TRANSFER_IN'
-    );
-
-    // Transaction log
-    await client.query(
-      `
-      INSERT INTO transactions (
-        user_id,
-        type,
-        amount_cents,
-        meta
-      )
-      VALUES (
-        $1,
-        'referral_transfer',
-        $2,
-        jsonb_build_object(
-          'from_wallet','REFERRAL',
-          'to_wallet','REAL'
-        )
-      )
-      `,
-      [userId, amount]
+      {
+        reference: 'REFERRAL_TRANSFER',
+        meta: {
+          from_wallet: 'REFERRAL',
+          to_wallet: LIVE_WALLET_TYPE
+        }
+      }
     );
 
     await client.query('COMMIT');
 
     res.json({
-      message: 'Transfer successful'
+      message: 'Transfer successful',
+      amount_cents: amount
     });
 
   } catch (err) {
-
     await client.query('ROLLBACK');
 
     console.error('Referral transfer error:', err);
@@ -197,14 +291,13 @@ const transferReferralToReal = async (req, res) => {
     });
 
   } finally {
-
     client.release();
-
   }
 };
 
 
-
+// ======================================================
+// EXPORTS
 // ======================================================
 
 module.exports = {
