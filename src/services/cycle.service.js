@@ -1,16 +1,46 @@
 'use strict';
 
+/**
+ * Cycle Service
+ *
+ * Database source of truth:
+ *   accounts
+ *
+ * Trading cycles use:
+ *   LIVE accounts only.
+ *
+ * Financial model:
+ *
+ * LIVE balance:
+ *   Total LIVE capital owned by the user.
+ *
+ * LIVE locked_balance_cents:
+ *   Capital currently committed to running cycles.
+ *
+ * Available LIVE balance:
+ *   balance_cents - locked_balance_cents
+ *
+ * DEMO accounts are NOT used by this service.
+ * REFERRAL accounts are NOT used by this service.
+ */
+
 const { pool } = require('../config/database');
 
 const {
   lockFunds,
   unlockFunds,
-  getAccountForUpdate
-} = require('./account.service');
-
-const {
   applyWalletDelta
 } = require('./wallet.service');
+
+
+// =====================================================
+// CONSTANTS
+// =====================================================
+
+const LIVE_ACCOUNT_TYPE = 'LIVE';
+
+const VALID_DURATIONS = [1, 3, 6];
+
 
 // =====================================================
 // START CYCLE
@@ -31,12 +61,20 @@ async function startCycle({
     const profitCents = Number(expectedProfit);
     const duration = Number(durationMonths);
 
+    // ---------------------------------------------------
+    // Validate capital
+    // ---------------------------------------------------
+
     if (
       !Number.isInteger(capitalCents) ||
       capitalCents <= 0
     ) {
       throw new Error('Invalid capital amount');
     }
+
+    // ---------------------------------------------------
+    // Validate expected profit
+    // ---------------------------------------------------
 
     if (
       !Number.isInteger(profitCents) ||
@@ -45,20 +83,60 @@ async function startCycle({
       throw new Error('Invalid expected profit');
     }
 
-    if (![1, 3, 6].includes(duration)) {
+    // ---------------------------------------------------
+    // Validate duration
+    // ---------------------------------------------------
+
+    if (!VALID_DURATIONS.includes(duration)) {
       throw new Error('Invalid duration');
     }
 
-    // Cycles always use the user's LIVE account.
-    const account = await getAccountForUpdate(
-      client,
-      userId,
-      'LIVE'
+    // ---------------------------------------------------
+    // Get LIVE account and lock it
+    // ---------------------------------------------------
+
+    const { rows: accountRows } = await client.query(
+      `
+      SELECT
+        id,
+        user_id,
+        account_code,
+        account_type,
+        status,
+        balance_cents,
+        locked_balance_cents,
+        profit_cents
+      FROM accounts
+      WHERE user_id = $1
+        AND account_type = $2
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [
+        userId,
+        LIVE_ACCOUNT_TYPE
+      ]
     );
 
-    if (account.status !== 'ACTIVE') {
+    if (!accountRows.length) {
+      throw new Error('LIVE account not found');
+    }
+
+    const account = accountRows[0];
+
+    // ---------------------------------------------------
+    // Account must be active
+    // ---------------------------------------------------
+
+    if (
+      String(account.status).toUpperCase() !== 'ACTIVE'
+    ) {
       throw new Error('LIVE account is not active');
     }
+
+    // ---------------------------------------------------
+    // Only one running cycle per LIVE account
+    // ---------------------------------------------------
 
     const running = await client.query(
       `
@@ -73,21 +151,46 @@ async function startCycle({
     );
 
     if (running.rows.length) {
-      throw new Error('An active cycle already exists');
+      throw new Error(
+        'An active cycle already exists'
+      );
     }
 
-    // Lock the requested LIVE capital.
+    // ---------------------------------------------------
+    // Lock requested LIVE capital
+    //
+    // IMPORTANT:
+    // wallet.service expects:
+    //
+    // lockFunds(
+    //   client,
+    //   userId,
+    //   walletType,
+    //   amountCents
+    // )
+    // ---------------------------------------------------
+
     const lockResult = await lockFunds(
       client,
       userId,
+      LIVE_ACCOUNT_TYPE,
       capitalCents
     );
 
+    // ---------------------------------------------------
+    // Calculate cycle duration
+    // ---------------------------------------------------
+
     const totalDays = duration * 30;
+
+    // ---------------------------------------------------
+    // Create cycle
+    // ---------------------------------------------------
 
     const { rows } = await client.query(
       `
-      INSERT INTO cycles (
+      INSERT INTO cycles
+      (
         account_id,
         user_id,
         capital_cents,
@@ -98,7 +201,8 @@ async function startCycle({
         started_at,
         ends_at
       )
-      VALUES (
+      VALUES
+      (
         $1,
         $2,
         $3,
@@ -123,72 +227,107 @@ async function startCycle({
 
     await client.query('COMMIT');
 
+    const cycle = rows[0];
+
     return {
-      ...rows[0],
-      account_type: account.account_type,
+      ...cycle,
+
+      account_type: LIVE_ACCOUNT_TYPE,
       account_code: account.account_code,
-      locked_balance_cents: lockResult.locked,
-      available_balance_cents: lockResult.available
+
+      balance_cents:
+        Number(lockResult.balance),
+
+      locked_balance_cents:
+        Number(lockResult.locked),
+
+      available_balance_cents:
+        Number(lockResult.available)
     };
 
   } catch (err) {
+
     await client.query('ROLLBACK');
+
     throw err;
 
   } finally {
+
     client.release();
+
   }
 }
+
 
 // =====================================================
 // CURRENT CYCLE
 // =====================================================
 
 async function getCurrentCycle(userId) {
-  const { rows } = await pool.query(
-    `
-    SELECT
-      c.*,
-      a.account_code,
-      a.account_type
-    FROM cycles c
-    JOIN accounts a
-      ON a.id = c.account_id
-    WHERE c.user_id = $1
-      AND a.user_id = $1
-      AND a.account_type = 'LIVE'
-      AND c.status = 'RUNNING'
-    ORDER BY c.started_at DESC
-    LIMIT 1
-    `,
-    [userId]
-  );
 
-  return rows[0] || null;
-}
-
-// =====================================================
-// ACTIVE CYCLES
-// =====================================================
-
-async function getActiveCycles(userId) {
   const { rows } = await pool.query(
     `
     SELECT
       c.*,
       a.account_code,
       a.account_type,
+      a.balance_cents,
+      a.locked_balance_cents,
+      a.profit_cents
+
+    FROM cycles c
+
+    INNER JOIN accounts a
+      ON a.id = c.account_id
+
+    WHERE c.user_id = $1
+      AND a.user_id = $1
+      AND a.account_type = $2
+      AND c.status = 'RUNNING'
+
+    ORDER BY c.started_at DESC
+
+    LIMIT 1
+    `,
+    [
+      userId,
+      LIVE_ACCOUNT_TYPE
+    ]
+  );
+
+  return rows[0] || null;
+}
+
+
+// =====================================================
+// ACTIVE CYCLES
+// =====================================================
+
+async function getActiveCycles(userId) {
+
+  const { rows } = await pool.query(
+    `
+    SELECT
+      c.*,
+
+      a.account_code,
+      a.account_type,
+      a.balance_cents,
+      a.locked_balance_cents,
+      a.profit_cents,
 
       FLOOR(
         EXTRACT(
-          EPOCH FROM (NOW() - c.started_at)
+          EPOCH FROM
+          (NOW() - c.started_at)
         ) / 86400
       )::int AS elapsed_days,
 
       GREATEST(
         CEIL(
           EXTRACT(
-            EPOCH FROM (c.ends_at - NOW())
+            EPOCH FROM
+            (c.ends_at - NOW())
           ) / 86400
         )::int,
         0
@@ -196,119 +335,180 @@ async function getActiveCycles(userId) {
 
       CEIL(
         EXTRACT(
-          EPOCH FROM (c.ends_at - c.started_at)
+          EPOCH FROM
+          (c.ends_at - c.started_at)
         ) / 86400
       )::int AS total_days
 
     FROM cycles c
 
-    JOIN accounts a
+    INNER JOIN accounts a
       ON a.id = c.account_id
 
     WHERE c.user_id = $1
       AND a.user_id = $1
-      AND a.account_type = 'LIVE'
+      AND a.account_type = $2
       AND c.status = 'RUNNING'
 
     ORDER BY c.started_at ASC
     `,
-    [userId]
+    [
+      userId,
+      LIVE_ACCOUNT_TYPE
+    ]
   );
 
   return rows;
 }
 
+
 // =====================================================
-// COMPLETED CYCLES
+// COMPLETED / CANCELLED CYCLES
 // =====================================================
 
 async function getCompletedCycles(userId) {
+
   const { rows } = await pool.query(
     `
     SELECT
       c.*,
+
       a.account_code,
       a.account_type,
 
       CASE
         WHEN c.status = 'CANCELLED'
-        THEN 'FORFEITED'
-        ELSE 'COMPLETED'
+          THEN 'FORFEITED'
+
+        WHEN c.status = 'COMPLETED'
+          THEN 'COMPLETED'
+
+        ELSE c.status
       END AS display_status
 
     FROM cycles c
 
-    JOIN accounts a
+    INNER JOIN accounts a
       ON a.id = c.account_id
 
     WHERE c.user_id = $1
       AND a.user_id = $1
-      AND a.account_type = 'LIVE'
+      AND a.account_type = $2
       AND c.status IN (
         'COMPLETED',
         'CANCELLED'
       )
 
-    ORDER BY c.completed_at DESC
+    ORDER BY c.completed_at DESC NULLS LAST
     `,
-    [userId]
+    [
+      userId,
+      LIVE_ACCOUNT_TYPE
+    ]
   );
 
   return rows;
 }
+
 
 // =====================================================
 // SETTLE COMPLETED CYCLES
 // =====================================================
 
 async function settleCompletedCycles() {
+
   const client = await pool.connect();
 
   try {
+
     await client.query('BEGIN');
+
+    /*
+     * Find every LIVE cycle whose
+     * end time has passed.
+     */
 
     const { rows: cycles } = await client.query(
       `
       SELECT
-        c.*
+        c.*,
+        a.account_code,
+        a.account_type,
+        a.locked_balance_cents
+
       FROM cycles c
-      JOIN accounts a
+
+      INNER JOIN accounts a
         ON a.id = c.account_id
+
       WHERE c.status = 'RUNNING'
         AND c.ends_at <= NOW()
-        AND a.account_type = 'LIVE'
-      FOR UPDATE
-      `
+        AND a.account_type = $1
+
+      FOR UPDATE OF c
+      `,
+      [LIVE_ACCOUNT_TYPE]
     );
 
     for (const cycle of cycles) {
-      const profit =
+
+      const capitalCents =
+        Number(cycle.capital_cents || 0);
+
+      const profitCents =
         Number(cycle.expected_profit_cents || 0);
 
-      // Unlock the original LIVE capital.
+      // -------------------------------------------------
+      // Release locked capital
+      // -------------------------------------------------
+
       await unlockFunds(
         client,
         cycle.user_id,
-        Number(cycle.capital_cents)
+        LIVE_ACCOUNT_TYPE,
+        capitalCents
       );
 
-      // Credit realized profit to LIVE.
-      if (profit > 0) {
+      // -------------------------------------------------
+      // Credit profit to LIVE
+      // -------------------------------------------------
+
+      if (profitCents > 0) {
+
         await applyWalletDelta(
           client,
+
           cycle.user_id,
-          profit,
+
+          LIVE_ACCOUNT_TYPE,
+
+          profitCents,
+
           'CYCLE_PROFIT',
+
           {
             refType: 'CYCLE',
             refId: cycle.id,
+
             idempotencyKey:
               `cycle:${cycle.id}:profit`,
+
             reference:
-              `Cycle ${cycle.id} Profit`
+              `Cycle ${cycle.id} Profit`,
+
+            meta: {
+              cycle_id: cycle.id,
+              account_type: LIVE_ACCOUNT_TYPE,
+              capital_cents: capitalCents,
+              profit_cents: profitCents
+            }
           }
         );
       }
+
+      // -------------------------------------------------
+      // Mark cycle completed
+      // -------------------------------------------------
 
       await client.query(
         `
@@ -316,11 +516,13 @@ async function settleCompletedCycles() {
         SET
           status = 'COMPLETED',
           realized_profit_cents = $1,
-          completed_at = NOW()
+          completed_at = NOW(),
+          updated_at = NOW()
+
         WHERE id = $2
         `,
         [
-          profit,
+          profitCents,
           cycle.id
         ]
       );
@@ -331,69 +533,105 @@ async function settleCompletedCycles() {
     return cycles.length;
 
   } catch (err) {
+
     await client.query('ROLLBACK');
+
     throw err;
 
   } finally {
+
     client.release();
+
   }
 }
 
+
 // =====================================================
-// FORFEIT CYCLE
+// FORFEIT / STOP CYCLE
 // =====================================================
 
 async function stopCycle({
   userId,
   cycleId
 }) {
+
   const client = await pool.connect();
 
   try {
+
     await client.query('BEGIN');
+
+    // ---------------------------------------------------
+    // Lock cycle + verify ownership
+    // ---------------------------------------------------
 
     const { rows } = await client.query(
       `
       SELECT
         c.*,
-        a.account_type
+        a.account_type,
+        a.account_code
+
       FROM cycles c
-      JOIN accounts a
+
+      INNER JOIN accounts a
         ON a.id = c.account_id
+
       WHERE c.id = $1
         AND c.user_id = $2
         AND a.user_id = $2
-        AND a.account_type = 'LIVE'
+        AND a.account_type = $3
         AND c.status = 'RUNNING'
+
       FOR UPDATE
       `,
       [
         cycleId,
-        userId
+        userId,
+        LIVE_ACCOUNT_TYPE
       ]
     );
 
     if (!rows.length) {
-      throw new Error('Active cycle not found');
+      throw new Error(
+        'Active cycle not found'
+      );
     }
 
     const cycle = rows[0];
 
-    // Release the capital locked by this cycle.
+    const capitalCents =
+      Number(cycle.capital_cents || 0);
+
+    // ---------------------------------------------------
+    // Release locked capital
+    // ---------------------------------------------------
+
     await unlockFunds(
       client,
       userId,
-      Number(cycle.capital_cents)
+      LIVE_ACCOUNT_TYPE,
+      capitalCents
     );
+
+    // ---------------------------------------------------
+    // Mark cycle forfeited
+    //
+    // No profit is paid when manually stopped.
+    // ---------------------------------------------------
 
     const result = await client.query(
       `
       UPDATE cycles
+
       SET
         status = 'CANCELLED',
         realized_profit_cents = 0,
-        completed_at = NOW()
+        completed_at = NOW(),
+        updated_at = NOW()
+
       WHERE id = $1
+
       RETURNING *
       `,
       [cycle.id]
@@ -404,13 +642,22 @@ async function stopCycle({
     return result.rows[0];
 
   } catch (err) {
+
     await client.query('ROLLBACK');
+
     throw err;
 
   } finally {
+
     client.release();
+
   }
 }
+
+
+// =====================================================
+// EXPORTS
+// =====================================================
 
 module.exports = {
   startCycle,

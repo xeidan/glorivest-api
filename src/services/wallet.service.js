@@ -1,30 +1,47 @@
 'use strict';
 
 /**
- * Wallet Service
+ * Account / Wallet Financial Service
  *
- * Single financial engine for every wallet type.
+ * Database source of truth:
+ *   accounts
  *
- * Supported wallet types:
- * - INVESTMENT
- * - REFERRAL
- * - DEMO
+ * Supported account types:
+ *   DEMO
+ *   LIVE
+ *   REFERRAL
+ *
+ * The frontend may call these "wallets",
+ * but the database uses accounts.
+ *
+ * Financial values are stored in cents.
  *
  * Responsibilities:
- * - Credit wallet
- * - Debit wallet
+ * - Read and lock accounts
+ * - Credit accounts
+ * - Debit accounts
  * - Lock funds
  * - Unlock funds
- * - Transfer between wallets
- * - Immutable ledger
- * - Transaction history
+ * - Transfer between accounts
+ * - Reset DEMO account
+ * - Write ledger entries
+ * - Write transaction history
  */
+
+
+// ======================================================
+// GET ACCOUNT FOR UPDATE
+// ======================================================
 
 async function getWalletForUpdate(
   client,
   userId,
-  walletType = 'INVESTMENT'
+  walletType
 ) {
+  if (!walletType) {
+    throw new Error('accountType is required');
+  }
+
   const { rows } = await client.query(
     `
     SELECT
@@ -32,7 +49,9 @@ async function getWalletForUpdate(
       user_id,
       account_type,
       balance_cents,
-      locked_balance_cents
+      locked_balance_cents,
+      profit_cents,
+      status
     FROM accounts
     WHERE user_id = $1
       AND account_type = $2
@@ -43,11 +62,16 @@ async function getWalletForUpdate(
   );
 
   if (!rows.length) {
-    throw new Error(`${walletType} wallet not found`);
+    throw new Error(`${walletType} account not found`);
   }
 
   return rows[0];
 }
+
+
+// ======================================================
+// APPLY BALANCE CHANGE
+// ======================================================
 
 async function applyWalletDelta(
   client,
@@ -65,20 +89,16 @@ async function applyWalletDelta(
     throw new Error('deltaCents cannot be zero');
   }
 
-  const wallet = await getWalletForUpdate(
+  const account = await getWalletForUpdate(
     client,
     userId,
     walletType
   );
 
-  const currentBalance = Number(wallet.balance_cents);
-  const newBalance = currentBalance + deltaCents;
-
-  if (newBalance < 0) {
-    throw new Error('Insufficient balance');
-  }
-
-  // Prevent duplicate processing
+  /*
+   * Idempotency check must happen BEFORE
+   * calculating/updating the balance.
+   */
   if (reference.idempotencyKey) {
     const { rows } = await client.query(
       `
@@ -91,10 +111,23 @@ async function applyWalletDelta(
     );
 
     if (rows.length) {
-      return newBalance;
+      return Number(account.balance_cents);
     }
   }
 
+  const currentBalance =
+    Number(account.balance_cents);
+
+  const newBalance =
+    currentBalance + deltaCents;
+
+  if (newBalance < 0) {
+    throw new Error('Insufficient balance');
+  }
+
+  /*
+   * Update account balance.
+   */
   await client.query(
     `
     UPDATE accounts
@@ -103,10 +136,13 @@ async function applyWalletDelta(
     `,
     [
       newBalance,
-      wallet.id
+      account.id
     ]
   );
 
+  /*
+   * Immutable ledger entry.
+   */
   await client.query(
     `
     INSERT INTO ledger
@@ -123,8 +159,8 @@ async function applyWalletDelta(
     ($1,$2,$3,$4,$5,$6,$7)
     `,
     [
-      wallet.user_id,
-      wallet.id,
+      account.user_id,
+      account.id,
       type,
       deltaCents,
       reference.refType ?? null,
@@ -133,6 +169,9 @@ async function applyWalletDelta(
     ]
   );
 
+  /*
+   * Transaction history.
+   */
   await client.query(
     `
     INSERT INTO transactions
@@ -149,8 +188,8 @@ async function applyWalletDelta(
     ($1,$2,$3,$4,$5,$6,$7)
     `,
     [
-      wallet.user_id,
-      wallet.id,
+      account.user_id,
+      account.id,
       type,
       deltaCents,
       newBalance,
@@ -162,9 +201,11 @@ async function applyWalletDelta(
   return newBalance;
 }
 
-/**
- * Credit a wallet.
- */
+
+// ======================================================
+// CREDIT ACCOUNT
+// ======================================================
+
 async function creditWallet(
   client,
   userId,
@@ -173,8 +214,13 @@ async function creditWallet(
   type,
   reference = {}
 ) {
-  if (amountCents <= 0) {
-    throw new Error('Credit amount must be greater than zero');
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
+    throw new Error(
+      'Credit amount must be greater than zero'
+    );
   }
 
   return applyWalletDelta(
@@ -187,9 +233,11 @@ async function creditWallet(
   );
 }
 
-/**
- * Debit a wallet.
- */
+
+// ======================================================
+// DEBIT ACCOUNT
+// ======================================================
+
 async function debitWallet(
   client,
   userId,
@@ -198,8 +246,13 @@ async function debitWallet(
   type,
   reference = {}
 ) {
-  if (amountCents <= 0) {
-    throw new Error('Debit amount must be greater than zero');
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
+    throw new Error(
+      'Debit amount must be greater than zero'
+    );
   }
 
   return applyWalletDelta(
@@ -212,85 +265,136 @@ async function debitWallet(
   );
 }
 
-/**
- * Lock funds inside a wallet.
- */
+
+// ======================================================
+// LOCK FUNDS
+// ======================================================
+
 async function lockFunds(
   client,
   userId,
   walletType,
   amountCents
 ) {
-  if (amountCents <= 0) {
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
     throw new Error('Invalid lock amount');
   }
 
-  const wallet = await getWalletForUpdate(
+  const account = await getWalletForUpdate(
     client,
     userId,
     walletType
   );
 
-  if (wallet.balance_cents < amountCents) {
-    throw new Error('Insufficient balance');
+  const balance =
+    Number(account.balance_cents);
+
+  const locked =
+    Number(account.locked_balance_cents);
+
+  /*
+   * Available funds are:
+   *
+   * balance - locked
+   */
+  const available =
+    balance - locked;
+
+  if (available < amountCents) {
+    throw new Error(
+      `Insufficient available ${walletType} balance`
+    );
   }
+
+  const newLocked =
+    locked + amountCents;
 
   await client.query(
     `
     UPDATE accounts
-    SET
-      balance_cents = balance_cents - $1,
-      locked_balance_cents = locked_balance_cents + $1
+    SET locked_balance_cents = $1
     WHERE id = $2
     `,
     [
-      amountCents,
-      wallet.id
+      newLocked,
+      account.id
     ]
   );
+
+  return {
+    accountId: account.id,
+    balance,
+    locked: newLocked,
+    available: balance - newLocked
+  };
 }
 
-/**
- * Unlock previously locked funds.
- */
+
+// ======================================================
+// UNLOCK FUNDS
+// ======================================================
+
 async function unlockFunds(
   client,
   userId,
   walletType,
   amountCents
 ) {
-  if (amountCents <= 0) {
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
     throw new Error('Invalid unlock amount');
   }
 
-  const wallet = await getWalletForUpdate(
+  const account = await getWalletForUpdate(
     client,
     userId,
     walletType
   );
 
-  if (wallet.locked_balance_cents < amountCents) {
-    throw new Error('Locked balance exceeded');
+  const locked =
+    Number(account.locked_balance_cents);
+
+  if (locked < amountCents) {
+    throw new Error(
+      'Locked balance exceeded'
+    );
   }
+
+  const newLocked =
+    locked - amountCents;
 
   await client.query(
     `
     UPDATE accounts
-    SET
-      balance_cents = balance_cents + $1,
-      locked_balance_cents = locked_balance_cents - $1
+    SET locked_balance_cents = $1
     WHERE id = $2
     `,
     [
-      amountCents,
-      wallet.id
+      newLocked,
+      account.id
     ]
   );
+
+  return {
+    accountId: account.id,
+    balance: Number(account.balance_cents),
+    locked: newLocked,
+    available:
+      Number(account.balance_cents) -
+      newLocked
+  };
 }
 
-/**
- * Transfer funds between wallets.
- */
+
+// ======================================================
+// TRANSFER BETWEEN ACCOUNTS
+// ======================================================
+
 async function transferBetweenWallets(
   client,
   userId,
@@ -300,13 +404,23 @@ async function transferBetweenWallets(
   reference = {}
 ) {
   if (fromWallet === toWallet) {
-    throw new Error('Cannot transfer to same wallet');
+    throw new Error(
+      'Cannot transfer to same account'
+    );
   }
 
-  if (amountCents <= 0) {
-    throw new Error('Invalid transfer amount');
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
+    throw new Error(
+      'Invalid transfer amount'
+    );
   }
 
+  /*
+   * Debit source.
+   */
   await debitWallet(
     client,
     userId,
@@ -316,12 +430,16 @@ async function transferBetweenWallets(
     {
       ...reference,
       meta: {
-        from: fromWallet,
-        to: toWallet
+        ...(reference.meta || {}),
+        from_account: fromWallet,
+        to_account: toWallet
       }
     }
   );
 
+  /*
+   * Credit destination.
+   */
   await creditWallet(
     client,
     userId,
@@ -331,43 +449,67 @@ async function transferBetweenWallets(
     {
       ...reference,
       meta: {
-        from: fromWallet,
-        to: toWallet
+        ...(reference.meta || {}),
+        from_account: fromWallet,
+        to_account: toWallet
       }
     }
   );
+
+  return {
+    amountCents,
+    fromWallet,
+    toWallet
+  };
 }
 
-/**
- * Reset a wallet to a fixed balance.
- * Primarily used for DEMO wallets.
- */
+
+// ======================================================
+// RESET ACCOUNT
+// ======================================================
+
 async function resetWallet(
   client,
   userId,
   walletType,
   balanceCents
 ) {
-  const wallet = await getWalletForUpdate(
+  if (
+    !Number.isInteger(balanceCents) ||
+    balanceCents < 0
+  ) {
+    throw new Error(
+      'Invalid reset balance'
+    );
+  }
+
+  const account = await getWalletForUpdate(
     client,
     userId,
     walletType
   );
 
+  /*
+   * Reset balance and clear locked capital.
+   */
   await client.query(
     `
     UPDATE accounts
     SET
       balance_cents = $1,
-      locked_balance_cents = 0
+      locked_balance_cents = 0,
+      profit_cents = 0
     WHERE id = $2
     `,
     [
       balanceCents,
-      wallet.id
+      account.id
     ]
   );
 
+  /*
+   * Record reset in transaction history.
+   */
   await client.query(
     `
     INSERT INTO transactions
@@ -383,17 +525,24 @@ async function resetWallet(
     ($1,$2,'WALLET_RESET',$3,$3,$4)
     `,
     [
-      wallet.user_id,
-      wallet.id,
+      account.user_id,
+      account.id,
       balanceCents,
       {
-        walletType
+        walletType,
+        accountType: walletType,
+        resetBalanceCents: balanceCents
       }
     ]
   );
 
   return balanceCents;
 }
+
+
+// ======================================================
+// EXPORTS
+// ======================================================
 
 module.exports = {
   getWalletForUpdate,

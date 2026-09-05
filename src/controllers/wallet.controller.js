@@ -34,19 +34,6 @@ const getWallets = async (req, res) => {
       [req.user.id]
     );
 
-    /*
-     * The frontend expects:
-     *
-     * DEMO
-     * REFERRAL
-     * LIVE
-     *
-     * Internally the database uses:
-     *
-     * DEMO
-     * REFERRAL
-     * INVESTMENT
-     */
 
     const wallets = rows.map(account => {
       const accountType =

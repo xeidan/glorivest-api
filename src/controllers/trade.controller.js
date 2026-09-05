@@ -1,454 +1,450 @@
 'use strict';
 
 const { pool } = require('../config/database');
-const { getTier, getRoiPercent } = require('../utils/roi');
+
+const {
+  startCycle,
+  getCurrentCycle,
+  getActiveCycles,
+  getCompletedCycles,
+  stopCycle
+} = require('../services/cycle.service');
+
+const {
+  getTier,
+  getRoiPercent
+} = require('../utils/roi');
 
 
+// =====================================================
+// START TRADE
+// =====================================================
 
-const BOT_FEE_CENTS = 500; // $5
-
-/**
- * START TRADE CYCLE
- */
 const startTrade = async (req, res) => {
   const userId = req.user.id;
-  const { amount_cents, wallet_type, duration_months } = req.body;
 
-  // ---------------------------
-  // 1️⃣ Validate inputs
-  // ---------------------------
-  if (!amount_cents || Number(amount_cents) <= 0) {
-    return res.status(400).json({ message: 'Invalid amount' });
-  }
-
-  if (![1, 3, 6].includes(Number(duration_months))) {
-    return res.status(400).json({ message: 'Invalid duration' });
-  }
-
-  if (!['REAL', 'DEMO'].includes(wallet_type)) {
-    return res.status(400).json({ message: 'Invalid wallet type' });
-  }
+  const {
+    amount_cents,
+    wallet_type,
+    duration_months
+  } = req.body;
 
   const capital = Number(amount_cents);
+  const duration = Number(duration_months);
 
-  // ---------------------------
-  // 2️⃣ Determine tier + ROI (LOCK CONTRACT)
-  // ---------------------------
-  let tier, roiPercent;
+  // ---------------------------------------------------
+  // Validate wallet type
+  //
+  // Current system supports:
+  //   LIVE
+  //   DEMO
+  //   REFERRAL
+  //
+  // Trading cycles currently use LIVE only.
+  // ---------------------------------------------------
+
+  if (!['LIVE', 'DEMO'].includes(wallet_type)) {
+    return res.status(400).json({
+      message: 'Invalid wallet type'
+    });
+  }
+
+  /*
+   * The cycle engine currently operates on LIVE.
+   *
+   * DEMO trading should only be enabled once the cycle
+   * engine is explicitly designed to use DEMO accounts.
+   */
+  if (wallet_type !== 'LIVE') {
+    return res.status(400).json({
+      message: 'Trading cycles currently use the LIVE account'
+    });
+  }
+
+  // ---------------------------------------------------
+  // Validate capital
+  // ---------------------------------------------------
+
+  if (
+    !Number.isInteger(capital) ||
+    capital <= 0
+  ) {
+    return res.status(400).json({
+      message: 'Invalid amount'
+    });
+  }
+
+  // ---------------------------------------------------
+  // Validate duration
+  // ---------------------------------------------------
+
+  if (![1, 3, 6].includes(duration)) {
+    return res.status(400).json({
+      message: 'Invalid duration'
+    });
+  }
+
+  // ---------------------------------------------------
+  // Determine tier + ROI
+  // ---------------------------------------------------
+
+  let tier;
+  let roiPercent;
+
   try {
     tier = getTier(capital);
-    roiPercent = getRoiPercent(tier, Number(duration_months));
+
+    roiPercent = getRoiPercent(
+      tier,
+      duration
+    );
+
   } catch (err) {
-    return res.status(400).json({ message: err.message });
+    return res.status(400).json({
+      message: err.message
+    });
   }
 
   const expectedProfitCents = Math.floor(
     capital * (roiPercent / 100)
   );
 
-  const client = await pool.connect();
+  // ---------------------------------------------------
+  // Start cycle through cycle service
+  // ---------------------------------------------------
 
   try {
-    await client.query('BEGIN');
+    const cycle = await startCycle({
+      userId,
+      capitalAmount: capital,
+      expectedProfit: expectedProfitCents,
+      durationMonths: duration
+    });
 
-    // ---------------------------
-    // 3️⃣ Lock wallet
-    // ---------------------------
-    const { rows } = await client.query(
-      `
-      SELECT id, balance_cents
-      FROM wallets
-      WHERE user_id = $1
-        AND type = $2
-      FOR UPDATE
-      `,
-      [userId, wallet_type]
-    );
-
-    if (!rows.length) {
-      throw new Error('Wallet not found');
-    }
-
-    const wallet = rows[0];
-
-    if (Number(wallet.balance_cents) < capital) {
-      throw new Error('Insufficient balance');
-    }
-
-    // ---------------------------
-    // 4️⃣ Deduct capital
-    // ---------------------------
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents - $1
-      WHERE id = $2
-      `,
-      [capital, wallet.id]
-    );
-
-    // ---------------------------
-    // 5️⃣ Create trading cycle (ALL TERMS FIXED)
-    // ---------------------------
-    const { rows: cycleRows } = await client.query(
-      `
-      INSERT INTO trading_cycles (
-        user_id,
-        wallet_type,
-        capital_cents,
+    return res.status(201).json({
+      message: 'Trading cycle started',
+      cycle: {
+        ...cycle,
         tier,
-        duration_months,
-        roi_percent,
-        expected_profit_cents,
-        status,
-        started_at,
-        completes_at
-      )
-      VALUES (
-        $1, $2, $3,
-        $4, $5, $6, $7,
-        'RUNNING',
-        NOW(),
-        NOW() + make_interval(months => $5)
-      )
-      RETURNING *
-      `,
-      [
-        userId,
-        wallet_type,
-        capital,
-        tier,
-        duration_months,
-        roiPercent,
-        expectedProfitCents
-      ]
-    );
-
-    await client.query('COMMIT');
-
-    return res.json({ cycle: cycleRows[0] });
+        roi_percent: roiPercent
+      }
+    });
 
   } catch (err) {
-    await client.query('ROLLBACK');
-    return res.status(400).json({ message: err.message });
-  } finally {
-    client.release();
+
+    console.error(
+      'startTrade error:',
+      err
+    );
+
+    return res.status(400).json({
+      message: err.message
+    });
   }
 };
 
 
+// =====================================================
+// GET CURRENT TRADE
+// =====================================================
 
-/**
- * COMPLETE TRADE CYCLE (SYSTEM-ONLY)
- * ❗ NOT CALLED BY CLIENT DIRECTLY
- */
-const completeCycle = async (cycleId, client) => {
-  const { rows } = await client.query(
-    `
-    SELECT *
-    FROM trading_cycles
-    WHERE id = $1
-      AND status = 'RUNNING'
-    FOR UPDATE
-    `,
-    [cycleId]
-  );
+const getCurrentTrade = async (req, res) => {
+  try {
+    const cycle = await getCurrentCycle(
+      req.user.id
+    );
 
-  if (!rows.length) return; // idempotent exit
+    return res.json({
+      cycle
+    });
 
-  const c = rows[0];
+  } catch (err) {
 
-  const profitCents = c.expected_profit_cents;
+    console.error(
+      'getCurrentTrade error:',
+      err
+    );
 
-  // 1️⃣ Mark cycle completed
-  await client.query(
-    `
-    UPDATE trading_cycles
-    SET
-      status = 'COMPLETED',
-      completed_at = NOW(),
-      profit_cents = $2
-    WHERE id = $1
-    `,
-    [cycleId, profitCents]
-  );
-
-  // ❗ DO NOT TOUCH WALLET HERE
+    return res.status(500).json({
+      message: 'Failed to load current trade'
+    });
+  }
 };
 
 
+// =====================================================
+// GET ACTIVE TRADE CYCLES
+// =====================================================
 
-/**
- * GET TRADE SUMMARY (Overview tab)
- */
-const getTradeSummary = async (req, res) => {
-  const userId = req.user.id;
-
-  const { rows } = await pool.query(
-    `
-    SELECT
-      COALESCE(SUM(capital_cents),0) AS total_active_capital_cents,
-      COUNT(*) AS active_cycle_count
-    FROM trading_cycles
-    WHERE user_id = $1
-      AND status = 'RUNNING'
-    `,
-    [userId]
-  );
-
-  const { rows: profitRows } = await pool.query(
-    `
-    SELECT
-      COALESCE(SUM(profit_cents),0) AS total_realized_profit_cents
-    FROM trading_cycles
-    WHERE user_id = $1
-      AND status = 'COMPLETED'
-    `,
-    [userId]
-  );
-
-  res.json({
-    total_active_capital_cents: Number(rows[0].total_active_capital_cents),
-    active_cycle_count: Number(rows[0].active_cycle_count),
-    total_realized_profit_cents: Number(profitRows[0].total_realized_profit_cents)
-  });
-};
-
-
-
-
-/**
- * GET ACTIVE TRADE CYCLES
- */
 const getActiveTrades = async (req, res) => {
+  try {
+    const cycles = await getActiveCycles(
+      req.user.id
+    );
+
+    return res.json(cycles);
+
+  } catch (err) {
+
+    console.error(
+      'getActiveTrades error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load active trades'
+    });
+  }
+};
+
+
+// =====================================================
+// GET TRADE HISTORY
+// =====================================================
+
+const getTradeHistory = async (req, res) => {
+  try {
+    const cycles = await getCompletedCycles(
+      req.user.id
+    );
+
+    return res.json(cycles);
+
+  } catch (err) {
+
+    console.error(
+      'getTradeHistory error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load trade history'
+    });
+  }
+};
+
+
+// =====================================================
+// STOP TRADE CYCLE
+// =====================================================
+
+const stopTrade = async (req, res) => {
   const userId = req.user.id;
+
+  const cycleId = Number(
+    req.body.cycle_id ??
+    req.body.trade_cycle_id
+  );
+
+  if (
+    !Number.isInteger(cycleId) ||
+    cycleId <= 0
+  ) {
+    return res.status(400).json({
+      message: 'Invalid cycle ID'
+    });
+  }
 
   try {
+
+    const cycle = await stopCycle({
+      userId,
+      cycleId
+    });
+
+    return res.json({
+      message: 'Cycle stopped',
+      cycle
+    });
+
+  } catch (err) {
+
+    console.error(
+      'stopTrade error:',
+      err
+    );
+
+    return res.status(400).json({
+      message: err.message
+    });
+  }
+};
+
+
+// =====================================================
+// GET TRADE SUMMARY
+// =====================================================
+
+const getTradeSummary = async (req, res) => {
+  try {
+
     const { rows } = await pool.query(
       `
       SELECT
-        tc.id,
-        tc.tier,
-        tc.capital_cents,
-        tc.duration_months,
-        tc.roi_percent,
-        tc.expected_profit_cents,
-        tc.started_at,
-        tc.ends_at,
+        COUNT(*) FILTER (
+          WHERE status = 'RUNNING'
+        ) AS active_cycle_count,
 
-        GREATEST(
-          0,
-          LEAST(
-            100,
-            ROUND(
-              (
-                EXTRACT(EPOCH FROM (NOW() - tc.started_at)) /
-                EXTRACT(EPOCH FROM (tc.ends_at - tc.started_at))
-              ) * 100
-            )
-          )
-        ) AS progress_percent,
+        COALESCE(
+          SUM(capital_cents)
+          FILTER (
+            WHERE status = 'RUNNING'
+          ),
+          0
+        ) AS total_active_capital_cents,
 
-        FLOOR(
-          EXTRACT(EPOCH FROM (NOW() - tc.started_at)) / 86400
-        ) AS days_run
+        COALESCE(
+          SUM(realized_profit_cents)
+          FILTER (
+            WHERE status = 'COMPLETED'
+          ),
+          0
+        ) AS total_realized_profit_cents
 
-      FROM trade_cycles tc
-      WHERE tc.user_id = $1
-        AND tc.status = 'ACTIVE'
-      ORDER BY tc.started_at DESC
-      `,
-      [userId]
-    );
+      FROM cycles
 
-    return res.json(rows);
-  } catch (err) {
-    console.error('Active trades error:', err);
-    return res.status(500).json({ message: 'Failed to load active trades' });
-  }
-};
-
-
-/**
- * STOP TRADE CYCLE EARLY (FORFEIT PROFITS)
- */
-const stopTrade = async (req, res) => {
-  const userId = req.user.id;
-  const { trade_cycle_id } = req.body;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const { rows } = await client.query(
-      `
-      SELECT id
-      FROM trading_cycles
-      WHERE id = $1
-        AND user_id = $2
-        AND status = 'RUNNING'
-      FOR UPDATE
-      `,
-      [trade_cycle_id, userId]
-    );
-
-    if (!rows.length) throw new Error('Cycle not found');
-
-    await client.query(
-      `
-      UPDATE trading_cycles
-      SET status = 'STOPPED',
-          stopped_early = true,
-          completed_at = NOW()
-      WHERE id = $1
-      `,
-      [trade_cycle_id]
-    );
-
-    await client.query('COMMIT');
-    res.json({ message: 'Cycle stopped' });
-
-  } catch (e) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ message: e.message });
-  } finally {
-    client.release();
-  }
-};
-
-
-
-
-
-const transferTradeProfits = async (req, res) => {
-  const userId = req.user.id;
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // 🔒 Lock all transferable profits
-    const { rows } = await client.query(
-      `
-      SELECT id, profit_cents
-      FROM trading_cycles
       WHERE user_id = $1
-        AND status = 'COMPLETED'
-        AND profit_cents > 0
-        AND profit_transferred = false
-      FOR UPDATE
       `,
-      [userId]
+      [req.user.id]
     );
 
-    if (!rows.length) {
-      await client.query('COMMIT');
-      return res.json({ transferred_cents: 0 });
-    }
+    const row = rows[0];
 
-    const totalProfit = rows.reduce(
-      (sum, r) => sum + Number(r.profit_cents),
-      0
-    );
+    return res.json({
+      total_active_capital_cents:
+        Number(row.total_active_capital_cents),
 
-    // 1️⃣ Credit REAL wallet
-    await client.query(
-      `
-      UPDATE wallets
-      SET balance_cents = balance_cents + $1
-      WHERE user_id = $2
-        AND type = 'REAL'
-      `,
-      [totalProfit, userId]
-    );
+      active_cycle_count:
+        Number(row.active_cycle_count),
 
-    // 2️⃣ Mark profits as transferred
-    await client.query(
-      `
-      UPDATE trading_cycles
-      SET profit_transferred = true
-      WHERE id = ANY($1::int[])
-      `,
-      [rows.map(r => r.id)]
-    );
-
-    await client.query('COMMIT');
-    return res.json({ transferred_cents: totalProfit });
+      total_realized_profit_cents:
+        Number(row.total_realized_profit_cents)
+    });
 
   } catch (err) {
-    await client.query('ROLLBACK');
-    return res.status(500).json({ message: 'Transfer failed' });
-  } finally {
-    client.release();
+
+    console.error(
+      'getTradeSummary error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load trade summary'
+    });
   }
 };
 
 
+// =====================================================
+// GET TRADE OVERVIEW
+// =====================================================
 
-
-
-const getTradeHistory = async (req, res) => {
-  const userId = req.user.id;
-
-  const { rows } = await pool.query(
-    `
-    SELECT
-      id,
-      capital_cents,
-      profit_cents,
-      duration_months,
-      roi_percent,
-      status,
-      stopped_early,
-      started_at,
-      completed_at
-    FROM trading_cycles
-    WHERE user_id = $1
-      AND status IN ('COMPLETED','STOPPED')
-    ORDER BY completed_at DESC
-    LIMIT 100
-    `,
-    [userId]
-  );
-
-  res.json(rows);
-};
-
-
-const getTransferableProfits = async (req, res) => {
-  const userId = req.user.id;
-
-  const { rows } = await pool.query(
-    `
-    SELECT id, profit_cents
-    FROM trading_cycles
-    WHERE user_id = $1
-      AND status = 'COMPLETED'
-      AND profit_cents > 0
-      AND profit_transferred = false
-    ORDER BY completed_at ASC
-    `,
-    [userId]
-  );
-
-  res.json(rows);
-};
-
-
-
-
-/**
- * GET POSITIONS (OPEN + CLOSED)
- */
-const getPositions = async (req, res) => {
-  const userId = req.user.id;
-
+const getTradeOverview = async (req, res) => {
   try {
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+
+        COUNT(*) FILTER (
+          WHERE status = 'RUNNING'
+        ) AS active_cycles,
+
+        COALESCE(
+          SUM(capital_cents)
+          FILTER (
+            WHERE status = 'RUNNING'
+          ),
+          0
+        ) AS total_invested_cents,
+
+        COALESCE(
+          SUM(expected_profit_cents)
+          FILTER (
+            WHERE status = 'RUNNING'
+          ),
+          0
+        ) AS expected_profit_cents,
+
+        COALESCE(
+          SUM(realized_profit_cents)
+          FILTER (
+            WHERE status = 'COMPLETED'
+          ),
+          0
+        ) AS realized_profit_cents
+
+      FROM cycles
+
+      WHERE user_id = $1
+      `,
+      [req.user.id]
+    );
+
+    const row = rows[0];
+
+    const totalInvested =
+      Number(row.total_invested_cents);
+
+    const expectedProfit =
+      Number(row.expected_profit_cents);
+
+    const realizedProfit =
+      Number(row.realized_profit_cents);
+
+    const roiPercent =
+      totalInvested > 0
+        ? Number(
+            (
+              (realizedProfit / totalInvested) *
+              100
+            ).toFixed(2)
+          )
+        : 0;
+
+    return res.json({
+      active_cycles:
+        Number(row.active_cycles),
+
+      total_invested_cents:
+        totalInvested,
+
+      expected_profit_cents:
+        expectedProfit,
+
+      realized_profit_cents:
+        realizedProfit,
+
+      roi_percent:
+        roiPercent
+    });
+
+  } catch (err) {
+
+    console.error(
+      'getTradeOverview error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load trade overview'
+    });
+  }
+};
+
+
+// =====================================================
+// GET POSITIONS
+// =====================================================
+
+const getPositions = async (req, res) => {
+  try {
+
     const { rows } = await pool.query(
       `
       SELECT
         id,
-        trading_cycle_id,
+        cycle_id,
         symbol,
         side,
         volume,
@@ -458,119 +454,153 @@ const getPositions = async (req, res) => {
         pnl_cents,
         opened_at,
         closed_at
+
       FROM bot_positions
+
       WHERE user_id = $1
+
       ORDER BY opened_at DESC
       `,
-      [userId]
+      [req.user.id]
     );
 
-    res.json({ positions: rows });
+    return res.json({
+      positions: rows
+    });
+
   } catch (err) {
-    console.error('Positions error:', err);
-    res.status(500).json({ message: 'Failed to load positions' });
+
+    console.error(
+      'getPositions error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load positions'
+    });
   }
 };
 
 
+// =====================================================
+// GET TRANSFERABLE PROFITS
+// =====================================================
+//
+// IMPORTANT:
+// Profit is now credited to LIVE automatically when
+// settleCompletedCycles() runs.
+//
+// Therefore there is NO separate profit-transfer
+// operation anymore.
+//
+// This endpoint is retained only for frontend
+// compatibility and reports zero transferable profit.
+// =====================================================
 
-const getTradeOverview = async (req, res) => {
-  const userId = req.user.id;
+const getTransferableProfits = async (req, res) => {
+  return res.json([]);
+};
+
+
+// =====================================================
+// GET TRADE PROFITS
+// =====================================================
+
+const getTradeProfits = async (req, res) => {
 
   try {
+
     const { rows } = await pool.query(
-  `
-  SELECT
-    COUNT(*) FILTER (WHERE status = 'RUNNING') AS active_cycles,
-    COALESCE(SUM(capital_cents), 0) AS total_invested_cents,
-    COALESCE(
-      SUM(expected_profit_cents)
-      FILTER (WHERE status = 'RUNNING'),
-      0
-    ) AS expected_profit_cents,
-    COALESCE(
-      SUM(profit_cents)
-      FILTER (WHERE status = 'COMPLETED'),
-      0
-    ) AS realized_profit_cents
-  FROM trading_cycles
-  WHERE user_id = $1
-  `,
-  [userId]
-);
+      `
+      SELECT
+        id,
+        realized_profit_cents AS profit_cents,
+        completed_at
 
+      FROM cycles
 
-    const row = rows[0];
+      WHERE user_id = $1
+        AND status = 'COMPLETED'
+        AND realized_profit_cents > 0
 
-    const totalInvested = Number(row.total_invested_cents);
-    const realizedProfit = Number(row.realized_profit_cents);
+      ORDER BY completed_at ASC
+      `,
+      [req.user.id]
+    );
 
-    const roiPercent =
-      totalInvested > 0
-        ? Number(((realizedProfit / totalInvested) * 100).toFixed(2))
-        : 0;
+    return res.json(rows);
 
-    return res.json({
-      active_cycles: Number(row.active_cycles),
-      total_invested_cents: totalInvested,
-      expected_profit_cents: Number(row.expected_profit_cents),
-      realized_profit_cents: realizedProfit,
-      roi_percent: roiPercent
-    });
   } catch (err) {
-    console.error('getTradeOverview error:', err);
-    return res.status(500).json({ message: 'Failed to load trade overview' });
+
+    console.error(
+      'getTradeProfits error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load trade profits'
+    });
   }
 };
 
 
+// =====================================================
+// TRANSFER TRADE PROFITS
+// =====================================================
+//
+// Deprecated under the new financial model.
+//
+// settleCompletedCycles() already credits profits
+// directly into LIVE.
+//
+// We return zero instead of performing a second
+// transfer and risking double-crediting.
+// =====================================================
 
-/**
- * ===============================
- * GET TRADE PROFITS
- * ===============================
- * - Returns completed cycle profits
- * - Excludes zero / forfeited profits
- * - Ordered newest → oldest
- */
-const getTradeProfits = async (req, res) => {
-  const userId = req.user.id;
-
-  const { rows } = await pool.query(
-    `
-    SELECT
-      id,
-      profit_cents,
-      completed_at
-    FROM trading_cycles
-    WHERE user_id = $1
-      AND status = 'COMPLETED'
-      AND profit_cents > 0
-      AND profit_transferred = false
-    ORDER BY completed_at ASC
-    `,
-    [userId]
-  );
-
-  res.json(rows);
+const transferTradeProfits = async (req, res) => {
+  return res.json({
+    transferred_cents: 0,
+    message: 'Cycle profits are credited to LIVE automatically'
+  });
 };
 
 
+// =====================================================
+// COMPLETE CYCLE
+// =====================================================
+//
+// Completion is now handled by cycle.service.js.
+//
+// This controller intentionally does not expose
+// client-side cycle completion.
+// =====================================================
+
+const completeCycle = async () => {
+  throw new Error(
+    'Cycle completion is system-controlled'
+  );
+};
 
 
-
+// =====================================================
+// EXPORTS
+// =====================================================
 
 module.exports = {
   startTrade,
-  getTradeSummary,
-  stopTrade,
-  transferTradeProfits,
-  completeCycle,
+  getCurrentTrade,
+  getActiveTrades,
   getTradeHistory,
-  getTransferableProfits,
+  stopTrade,
+
+  getTradeSummary,
   getTradeOverview,
+
   getPositions,
-  getTradeProfits
+
+  getTransferableProfits,
+  getTradeProfits,
+
+  transferTradeProfits,
+  completeCycle
 };
-
-
