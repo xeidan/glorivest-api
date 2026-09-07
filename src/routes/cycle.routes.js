@@ -11,12 +11,25 @@ const cycleService = require('../controllers/cycle.controller');
  */
 router.get('/current', auth, async (req, res) => {
   try {
-    const cycle = await cycleService.getCurrentCycle(req.user.id);
+    const accountType =
+      String(
+        req.query.accountType || 'DEMO'
+      ).toUpperCase();
+
+    const cycle =
+      await cycleService.getCurrentCycle(
+        req.user.id,
+        accountType
+      );
 
     return res.json({ cycle });
 
   } catch (err) {
-    console.error('GET CURRENT CYCLE ERROR:', err);
+    console.error(
+      'GET CURRENT CYCLE ERROR:',
+      err
+    );
+
     return res.status(500).json({
       message: err.message || 'Server error'
     });
@@ -32,20 +45,27 @@ router.post('/start', auth, async (req, res) => {
     const {
       capitalAmount,
       expectedProfit,
-      durationMonths
+      durationMonths,
+      accountType
     } = req.body;
 
-    const cycle = await cycleService.startCycle({
-      userId: req.user.id,
-      capitalAmount,
-      expectedProfit,
-      durationMonths
-    });
+    const cycle =
+      await cycleService.startCycle({
+        userId: req.user.id,
+        capitalAmount,
+        expectedProfit,
+        durationMonths,
+        accountType
+      });
 
     return res.json({ cycle });
 
   } catch (err) {
-    console.error('START CYCLE ERROR:', err);
+    console.error(
+      'START CYCLE ERROR:',
+      err
+    );
+
     return res.status(400).json({
       message: err.message
     });
@@ -58,14 +78,25 @@ router.post('/start', auth, async (req, res) => {
  */
 router.get('/active', auth, async (req, res) => {
   try {
-    const cycles = await cycleService.getActiveCycles(
-      req.user.id
-    );
+    const accountType =
+      String(
+        req.query.accountType || 'DEMO'
+      ).toUpperCase();
+
+    const cycles =
+      await cycleService.getActiveCycles(
+        req.user.id,
+        accountType
+      );
 
     return res.json({ cycles });
 
   } catch (err) {
-    console.error('GET ACTIVE CYCLES ERROR:', err);
+    console.error(
+      'GET ACTIVE CYCLES ERROR:',
+      err
+    );
+
     return res.status(500).json({
       message: err.message || 'Server error'
     });
@@ -80,15 +111,20 @@ router.post('/forfeit', auth, async (req, res) => {
   try {
     const { cycleId } = req.body;
 
-    const cycle = await cycleService.stopCycle({
-      userId: req.user.id,
-      cycleId
-    });
+    const cycle =
+      await cycleService.stopCycle({
+        userId: req.user.id,
+        cycleId
+      });
 
     return res.json({ cycle });
 
   } catch (err) {
-    console.error('FORFEIT CYCLE ERROR:', err);
+    console.error(
+      'FORFEIT CYCLE ERROR:',
+      err
+    );
+
     return res.status(400).json({
       message: err.message
     });
@@ -101,18 +137,24 @@ router.post('/forfeit', auth, async (req, res) => {
  */
 router.get('/completed', auth, async (req, res) => {
   try {
-    const cycles = await cycleService.getCompletedCycles(
-      req.user.id
-    );
+    const cycles =
+      await cycleService.getCompletedCycles(
+        req.user.id
+      );
 
     return res.json({ cycles });
 
   } catch (err) {
-    console.error('GET COMPLETED CYCLES ERROR:', err);
+    console.error(
+      'GET COMPLETED CYCLES ERROR:',
+      err
+    );
+
     return res.status(500).json({
       message: err.message || 'Server error'
     });
   }
 });
+
 
 module.exports = router;
