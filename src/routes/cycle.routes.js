@@ -42,25 +42,39 @@ router.get('/current', auth, async (req, res) => {
  */
 router.post('/start', auth, async (req, res) => {
   try {
+
     const {
+      walletId,
       capitalAmount,
       expectedProfit,
-      durationMonths,
-      accountType
+      durationMonths
     } = req.body;
+
+    const accountType =
+      String(
+        req.body.accountType || ''
+      ).toUpperCase();
+
+    if (!['DEMO', 'LIVE'].includes(accountType)) {
+      return res.status(400).json({
+        message: 'Invalid account type'
+      });
+    }
 
     const cycle =
       await cycleService.startCycle({
         userId: req.user.id,
+        walletId,
+        accountType,
         capitalAmount,
         expectedProfit,
-        durationMonths,
-        accountType
+        durationMonths
       });
 
     return res.json({ cycle });
 
   } catch (err) {
+
     console.error(
       'START CYCLE ERROR:',
       err
