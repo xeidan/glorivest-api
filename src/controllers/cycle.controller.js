@@ -8,12 +8,14 @@ const cycleService = require('../services/cycle.service');
 
 async function startCycle({
   userId,
+  walletId,
   capitalAmount,
   expectedProfit,
   durationMonths
 }) {
   return cycleService.startCycle({
     userId,
+    walletId,
     capitalAmount,
     expectedProfit,
     durationMonths
@@ -24,24 +26,42 @@ async function startCycle({
 // GET CURRENT CYCLE
 // =====================================================
 
-async function getCurrentCycle(userId) {
-  return cycleService.getCurrentCycle(userId);
+async function getCurrentCycle(
+  userId,
+  accountType
+) {
+  return cycleService.getCurrentCycle(
+    userId,
+    accountType
+  );
 }
 
 // =====================================================
 // GET ACTIVE CYCLES
 // =====================================================
 
-async function getActiveCycles(userId) {
-  return cycleService.getActiveCycles(userId);
+async function getActiveCycles(
+  userId,
+  accountType
+) {
+  return cycleService.getActiveCycles(
+    userId,
+    accountType
+  );
 }
 
 // =====================================================
 // GET COMPLETED CYCLES
 // =====================================================
 
-async function getCompletedCycles(userId) {
-  return cycleService.getCompletedCycles(userId);
+async function getCompletedCycles(
+  userId,
+  accountType
+) {
+  return cycleService.getCompletedCycles(
+    userId,
+    accountType
+  );
 }
 
 // =====================================================

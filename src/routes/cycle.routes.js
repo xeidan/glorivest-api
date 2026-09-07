@@ -42,7 +42,6 @@ router.get('/current', auth, async (req, res) => {
  */
 router.post('/start', auth, async (req, res) => {
   try {
-
     const {
       walletId,
       capitalAmount,
@@ -50,14 +49,9 @@ router.post('/start', auth, async (req, res) => {
       durationMonths
     } = req.body;
 
-    const accountType =
-      String(
-        req.body.accountType || ''
-      ).toUpperCase();
-
-    if (!['DEMO', 'LIVE'].includes(accountType)) {
+    if (!walletId) {
       return res.status(400).json({
-        message: 'Invalid account type'
+        message: 'walletId is required'
       });
     }
 
@@ -65,7 +59,6 @@ router.post('/start', auth, async (req, res) => {
       await cycleService.startCycle({
         userId: req.user.id,
         walletId,
-        accountType,
         capitalAmount,
         expectedProfit,
         durationMonths
@@ -74,14 +67,13 @@ router.post('/start', auth, async (req, res) => {
     return res.json({ cycle });
 
   } catch (err) {
-
     console.error(
       'START CYCLE ERROR:',
       err
     );
 
     return res.status(400).json({
-      message: err.message
+      message: err.message || 'Unable to start cycle'
     });
   }
 });
@@ -96,6 +88,12 @@ router.get('/active', auth, async (req, res) => {
       String(
         req.query.accountType || 'DEMO'
       ).toUpperCase();
+
+    if (!['DEMO', 'LIVE'].includes(accountType)) {
+      return res.status(400).json({
+        message: 'Invalid account type'
+      });
+    }
 
     const cycles =
       await cycleService.getActiveCycles(
@@ -125,6 +123,12 @@ router.post('/forfeit', auth, async (req, res) => {
   try {
     const { cycleId } = req.body;
 
+    if (!cycleId) {
+      return res.status(400).json({
+        message: 'cycleId is required'
+      });
+    }
+
     const cycle =
       await cycleService.stopCycle({
         userId: req.user.id,
@@ -140,7 +144,7 @@ router.post('/forfeit', auth, async (req, res) => {
     );
 
     return res.status(400).json({
-      message: err.message
+      message: err.message || 'Unable to forfeit cycle'
     });
   }
 });
@@ -151,9 +155,21 @@ router.post('/forfeit', auth, async (req, res) => {
  */
 router.get('/completed', auth, async (req, res) => {
   try {
+    const accountType =
+      String(
+        req.query.accountType || 'DEMO'
+      ).toUpperCase();
+
+    if (!['DEMO', 'LIVE'].includes(accountType)) {
+      return res.status(400).json({
+        message: 'Invalid account type'
+      });
+    }
+
     const cycles =
       await cycleService.getCompletedCycles(
-        req.user.id
+        req.user.id,
+        accountType
       );
 
     return res.json({ cycles });
