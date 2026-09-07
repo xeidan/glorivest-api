@@ -3,31 +3,25 @@
 /**
  * Account / Wallet Financial Service
  *
- * Database source of truth:
+ * DATABASE SOURCE OF TRUTH:
  *   accounts
  *
- * Supported account types:
+ * ACCOUNT TYPES:
  *   DEMO
  *   LIVE
  *   REFERRAL
  *
- * The frontend may call these "wallets",
- * but the database uses accounts.
- *
  * Financial values are stored in cents.
  *
- * Responsibilities:
- * - Read and lock accounts
- * - Credit accounts
- * - Debit accounts
- * - Lock funds
- * - Unlock funds
- * - Transfer between accounts
- * - Reset DEMO account
- * - Write ledger entries
- * - Write transaction history
+ * balance_cents:
+ *   Available balance.
+ *
+ * locked_balance_cents:
+ *   Capital currently committed to active cycles.
+ *
+ * Portfolio value:
+ *   balance_cents + locked_balance_cents + applicable profit.
  */
-
 
 // ======================================================
 // GET ACCOUNT FOR UPDATE
@@ -96,8 +90,8 @@ async function applyWalletDelta(
   );
 
   /*
-   * Idempotency check must happen BEFORE
-   * calculating/updating the balance.
+   * Idempotency must be checked before
+   * changing the balance.
    */
   if (reference.idempotencyKey) {
     const { rows } = await client.query(
@@ -125,9 +119,6 @@ async function applyWalletDelta(
     throw new Error('Insufficient balance');
   }
 
-  /*
-   * Update account balance.
-   */
   await client.query(
     `
     UPDATE accounts
@@ -140,9 +131,6 @@ async function applyWalletDelta(
     ]
   );
 
-  /*
-   * Immutable ledger entry.
-   */
   await client.query(
     `
     INSERT INTO ledger
@@ -169,9 +157,6 @@ async function applyWalletDelta(
     ]
   );
 
-  /*
-   * Transaction history.
-   */
   await client.query(
     `
     INSERT INTO transactions
@@ -203,7 +188,7 @@ async function applyWalletDelta(
 
 
 // ======================================================
-// CREDIT ACCOUNT
+// CREDIT
 // ======================================================
 
 async function creditWallet(
@@ -235,7 +220,7 @@ async function creditWallet(
 
 
 // ======================================================
-// DEBIT ACCOUNT
+// DEBIT
 // ======================================================
 
 async function debitWallet(
@@ -295,19 +280,14 @@ async function lockFunds(
   const locked =
     Number(account.locked_balance_cents);
 
-  /*
-   * Available funds are:
-   *
-   * balance - locked
-   */
-  const available =
-    balance - locked;
-
-  if (available < amountCents) {
+  if (balance < amountCents) {
     throw new Error(
       `Insufficient available ${walletType} balance`
     );
   }
+
+  const newBalance =
+    balance - amountCents;
 
   const newLocked =
     locked + amountCents;
@@ -315,10 +295,13 @@ async function lockFunds(
   await client.query(
     `
     UPDATE accounts
-    SET locked_balance_cents = $1
-    WHERE id = $2
+    SET
+      balance_cents = $1,
+      locked_balance_cents = $2
+    WHERE id = $3
     `,
     [
+      newBalance,
       newLocked,
       account.id
     ]
@@ -326,9 +309,9 @@ async function lockFunds(
 
   return {
     accountId: account.id,
-    balance,
+    balance: newBalance,
     locked: newLocked,
-    available: balance - newLocked
+    available: newBalance
   };
 }
 
@@ -368,13 +351,19 @@ async function unlockFunds(
   const newLocked =
     locked - amountCents;
 
+  const newBalance =
+    Number(account.balance_cents) + amountCents;
+
   await client.query(
     `
     UPDATE accounts
-    SET locked_balance_cents = $1
-    WHERE id = $2
+    SET
+      balance_cents = $1,
+      locked_balance_cents = $2
+    WHERE id = $3
     `,
     [
+      newBalance,
       newLocked,
       account.id
     ]
@@ -382,17 +371,15 @@ async function unlockFunds(
 
   return {
     accountId: account.id,
-    balance: Number(account.balance_cents),
+    balance: newBalance,
     locked: newLocked,
-    available:
-      Number(account.balance_cents) -
-      newLocked
+    available: newBalance
   };
 }
 
 
 // ======================================================
-// TRANSFER BETWEEN ACCOUNTS
+// TRANSFER
 // ======================================================
 
 async function transferBetweenWallets(
@@ -418,9 +405,6 @@ async function transferBetweenWallets(
     );
   }
 
-  /*
-   * Debit source.
-   */
   await debitWallet(
     client,
     userId,
@@ -437,9 +421,6 @@ async function transferBetweenWallets(
     }
   );
 
-  /*
-   * Credit destination.
-   */
   await creditWallet(
     client,
     userId,
@@ -489,9 +470,6 @@ async function resetWallet(
     walletType
   );
 
-  /*
-   * Reset balance and clear locked capital.
-   */
   await client.query(
     `
     UPDATE accounts
@@ -507,9 +485,6 @@ async function resetWallet(
     ]
   );
 
-  /*
-   * Record reset in transaction history.
-   */
   await client.query(
     `
     INSERT INTO transactions

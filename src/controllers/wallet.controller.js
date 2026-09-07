@@ -136,10 +136,8 @@ const resetDemoWalletController = async (req, res) => {
 if (demoAccount) {
   await client.query(
     `
-    UPDATE cycles
-    SET status = 'CANCELLED'
+    DELETE FROM cycles
     WHERE account_id = $1
-      AND status NOT IN ('COMPLETED', 'CANCELLED')
     `,
     [demoAccount.id]
   );

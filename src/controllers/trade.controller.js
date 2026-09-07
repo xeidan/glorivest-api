@@ -17,6 +17,43 @@ const {
 
 
 // =====================================================
+// ACCOUNT TYPE
+// =====================================================
+
+function resolveAccountType(value) {
+  const type = String(value || '').toUpperCase();
+
+  /*
+   * Frontend may still send REAL.
+   * Database uses LIVE.
+   */
+  if (type === 'REAL') {
+    return 'LIVE';
+  }
+
+  if (type === 'LIVE') {
+    return 'LIVE';
+  }
+
+  if (type === 'DEMO') {
+    return 'DEMO';
+  }
+
+  return null;
+}
+
+
+function getRequestedAccountType(req) {
+  return resolveAccountType(
+    req.query.account_type ||
+    req.query.wallet_type ||
+    req.body?.account_type ||
+    req.body?.wallet_type
+  );
+}
+
+
+// =====================================================
 // START TRADE
 // =====================================================
 
@@ -26,38 +63,34 @@ const startTrade = async (req, res) => {
   const {
     amount_cents,
     wallet_type,
+    account_type,
     duration_months
   } = req.body;
+
+  const selectedType = resolveAccountType(
+    account_type || wallet_type
+  );
 
   const capital = Number(amount_cents);
   const duration = Number(duration_months);
 
   // ---------------------------------------------------
-  // Validate wallet type
-  //
-  // Current system supports:
-  //   LIVE
-  //   DEMO
-  //   REFERRAL
-  //
-  // Trading cycles currently use LIVE only.
+  // Validate account type
   // ---------------------------------------------------
 
-  if (!['LIVE', 'DEMO'].includes(wallet_type)) {
+  if (!selectedType) {
     return res.status(400).json({
-      message: 'Invalid wallet type'
+      message: 'Invalid account type'
     });
   }
 
   /*
-   * The cycle engine currently operates on LIVE.
-   *
-   * DEMO trading should only be enabled once the cycle
-   * engine is explicitly designed to use DEMO accounts.
+   * REFERRAL accounts can receive referral earnings
+   * but cannot be used for trading cycles.
    */
-  if (wallet_type !== 'LIVE') {
+  if (selectedType === 'REFERRAL') {
     return res.status(400).json({
-      message: 'Trading cycles currently use the LIVE account'
+      message: 'Referral account cannot be used for trading'
     });
   }
 
@@ -110,23 +143,25 @@ const startTrade = async (req, res) => {
   );
 
   // ---------------------------------------------------
-  // Start cycle through cycle service
+  // START CYCLE
   // ---------------------------------------------------
 
   try {
     const cycle = await startCycle({
       userId,
+      accountType: selectedType,
       capitalAmount: capital,
       expectedProfit: expectedProfitCents,
       durationMonths: duration
     });
 
     return res.status(201).json({
-      message: 'Trading cycle started',
+      message: `${selectedType} trading cycle started`,
       cycle: {
         ...cycle,
         tier,
-        roi_percent: roiPercent
+        roi_percent: roiPercent,
+        account_type: selectedType
       }
     });
 
@@ -150,8 +185,25 @@ const startTrade = async (req, res) => {
 
 const getCurrentTrade = async (req, res) => {
   try {
+
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
+    if (accountType === 'REFERRAL') {
+      return res.json({
+        cycle: null
+      });
+    }
+
     const cycle = await getCurrentCycle(
-      req.user.id
+      req.user.id,
+      accountType
     );
 
     return res.json({
@@ -178,8 +230,23 @@ const getCurrentTrade = async (req, res) => {
 
 const getActiveTrades = async (req, res) => {
   try {
+
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
+    if (accountType === 'REFERRAL') {
+      return res.json([]);
+    }
+
     const cycles = await getActiveCycles(
-      req.user.id
+      req.user.id,
+      accountType
     );
 
     return res.json(cycles);
@@ -204,8 +271,23 @@ const getActiveTrades = async (req, res) => {
 
 const getTradeHistory = async (req, res) => {
   try {
+
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
+    if (accountType === 'REFERRAL') {
+      return res.json([]);
+    }
+
     const cycles = await getCompletedCycles(
-      req.user.id
+      req.user.id,
+      accountType
     );
 
     return res.json(cycles);
@@ -278,34 +360,59 @@ const stopTrade = async (req, res) => {
 const getTradeSummary = async (req, res) => {
   try {
 
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
+    if (accountType === 'REFERRAL') {
+      return res.json({
+        total_active_capital_cents: 0,
+        active_cycle_count: 0,
+        total_realized_profit_cents: 0
+      });
+    }
+
     const { rows } = await pool.query(
       `
       SELECT
         COUNT(*) FILTER (
-          WHERE status = 'RUNNING'
+          WHERE c.status = 'RUNNING'
         ) AS active_cycle_count,
 
         COALESCE(
-          SUM(capital_cents)
+          SUM(c.capital_cents)
           FILTER (
-            WHERE status = 'RUNNING'
+            WHERE c.status = 'RUNNING'
           ),
           0
         ) AS total_active_capital_cents,
 
         COALESCE(
-          SUM(realized_profit_cents)
+          SUM(c.realized_profit_cents)
           FILTER (
-            WHERE status = 'COMPLETED'
+            WHERE c.status = 'COMPLETED'
           ),
           0
         ) AS total_realized_profit_cents
 
-      FROM cycles
+      FROM cycles c
 
-      WHERE user_id = $1
+      JOIN accounts a
+        ON a.id = c.account_id
+
+      WHERE c.user_id = $1
+        AND a.user_id = $1
+        AND a.account_type = $2
       `,
-      [req.user.id]
+      [
+        req.user.id,
+        accountType
+      ]
     );
 
     const row = rows[0];
@@ -342,43 +449,70 @@ const getTradeSummary = async (req, res) => {
 const getTradeOverview = async (req, res) => {
   try {
 
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
+    if (accountType === 'REFERRAL') {
+      return res.json({
+        active_cycles: 0,
+        total_invested_cents: 0,
+        expected_profit_cents: 0,
+        realized_profit_cents: 0,
+        roi_percent: 0
+      });
+    }
+
     const { rows } = await pool.query(
       `
       SELECT
 
         COUNT(*) FILTER (
-          WHERE status = 'RUNNING'
+          WHERE c.status = 'RUNNING'
         ) AS active_cycles,
 
         COALESCE(
-          SUM(capital_cents)
+          SUM(c.capital_cents)
           FILTER (
-            WHERE status = 'RUNNING'
+            WHERE c.status = 'RUNNING'
           ),
           0
         ) AS total_invested_cents,
 
         COALESCE(
-          SUM(expected_profit_cents)
+          SUM(c.expected_profit_cents)
           FILTER (
-            WHERE status = 'RUNNING'
+            WHERE c.status = 'RUNNING'
           ),
           0
         ) AS expected_profit_cents,
 
         COALESCE(
-          SUM(realized_profit_cents)
+          SUM(c.realized_profit_cents)
           FILTER (
-            WHERE status = 'COMPLETED'
+            WHERE c.status = 'COMPLETED'
           ),
           0
         ) AS realized_profit_cents
 
-      FROM cycles
+      FROM cycles c
 
-      WHERE user_id = $1
+      JOIN accounts a
+        ON a.id = c.account_id
+
+      WHERE c.user_id = $1
+        AND a.user_id = $1
+        AND a.account_type = $2
       `,
-      [req.user.id]
+      [
+        req.user.id,
+        accountType
+      ]
     );
 
     const row = rows[0];
@@ -403,6 +537,8 @@ const getTradeOverview = async (req, res) => {
         : 0;
 
     return res.json({
+      account_type: accountType,
+
       active_cycles:
         Number(row.active_cycles),
 
@@ -440,28 +576,49 @@ const getTradeOverview = async (req, res) => {
 const getPositions = async (req, res) => {
   try {
 
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
     const { rows } = await pool.query(
       `
       SELECT
-        id,
-        cycle_id,
-        symbol,
-        side,
-        volume,
-        entry_price,
-        exit_price,
-        status,
-        pnl_cents,
-        opened_at,
-        closed_at
+        p.id,
+        p.cycle_id,
+        p.symbol,
+        p.side,
+        p.volume,
+        p.entry_price,
+        p.exit_price,
+        p.status,
+        p.pnl_cents,
+        p.opened_at,
+        p.closed_at
 
-      FROM bot_positions
+      FROM bot_positions p
 
-      WHERE user_id = $1
+      JOIN cycles c
+        ON c.id = p.cycle_id
 
-      ORDER BY opened_at DESC
+      JOIN accounts a
+        ON a.id = c.account_id
+
+      WHERE p.user_id = $1
+        AND c.user_id = $1
+        AND a.user_id = $1
+        AND a.account_type = $2
+
+      ORDER BY p.opened_at DESC
       `,
-      [req.user.id]
+      [
+        req.user.id,
+        accountType
+      ]
     );
 
     return res.json({
@@ -485,17 +642,6 @@ const getPositions = async (req, res) => {
 // =====================================================
 // GET TRANSFERABLE PROFITS
 // =====================================================
-//
-// IMPORTANT:
-// Profit is now credited to LIVE automatically when
-// settleCompletedCycles() runs.
-//
-// Therefore there is NO separate profit-transfer
-// operation anymore.
-//
-// This endpoint is retained only for frontend
-// compatibility and reports zero transferable profit.
-// =====================================================
 
 const getTransferableProfits = async (req, res) => {
   return res.json([]);
@@ -510,22 +656,39 @@ const getTradeProfits = async (req, res) => {
 
   try {
 
+    const accountType =
+      getRequestedAccountType(req);
+
+    if (!accountType) {
+      return res.status(400).json({
+        message: 'account_type is required'
+      });
+    }
+
     const { rows } = await pool.query(
       `
       SELECT
-        id,
-        realized_profit_cents AS profit_cents,
-        completed_at
+        c.id,
+        c.realized_profit_cents AS profit_cents,
+        c.completed_at
 
-      FROM cycles
+      FROM cycles c
 
-      WHERE user_id = $1
-        AND status = 'COMPLETED'
-        AND realized_profit_cents > 0
+      JOIN accounts a
+        ON a.id = c.account_id
 
-      ORDER BY completed_at ASC
+      WHERE c.user_id = $1
+        AND a.user_id = $1
+        AND a.account_type = $2
+        AND c.status = 'COMPLETED'
+        AND c.realized_profit_cents > 0
+
+      ORDER BY c.completed_at ASC
       `,
-      [req.user.id]
+      [
+        req.user.id,
+        accountType
+      ]
     );
 
     return res.json(rows);
@@ -547,32 +710,18 @@ const getTradeProfits = async (req, res) => {
 // =====================================================
 // TRANSFER TRADE PROFITS
 // =====================================================
-//
-// Deprecated under the new financial model.
-//
-// settleCompletedCycles() already credits profits
-// directly into LIVE.
-//
-// We return zero instead of performing a second
-// transfer and risking double-crediting.
-// =====================================================
 
 const transferTradeProfits = async (req, res) => {
   return res.json({
     transferred_cents: 0,
-    message: 'Cycle profits are credited to LIVE automatically'
+    message:
+      'Cycle profits are credited to the trading account automatically'
   });
 };
 
 
 // =====================================================
 // COMPLETE CYCLE
-// =====================================================
-//
-// Completion is now handled by cycle.service.js.
-//
-// This controller intentionally does not expose
-// client-side cycle completion.
 // =====================================================
 
 const completeCycle = async () => {

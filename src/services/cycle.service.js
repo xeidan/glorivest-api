@@ -1,45 +1,76 @@
 'use strict';
 
 /**
- * Cycle Service
+ * CYCLE SERVICE
  *
  * Database source of truth:
  *   accounts
  *
- * Trading cycles use:
- *   LIVE accounts only.
+ * Supported cycle accounts:
+ *   DEMO
+ *   LIVE
  *
- * Financial model:
+ * DEMO:
+ *   - Capital is deducted from available balance.
+ *   - Capital is placed in locked_balance_cents.
+ *   - On completion, capital + profit return to balance.
  *
- * LIVE balance:
- *   Total LIVE capital owned by the user.
+ * LIVE:
+ *   - Capital remains inside balance_cents.
+ *   - Capital is committed through locked_balance_cents.
+ *   - On completion, capital is unlocked and profit is credited.
  *
- * LIVE locked_balance_cents:
- *   Capital currently committed to running cycles.
- *
- * Available LIVE balance:
- *   balance_cents - locked_balance_cents
- *
- * DEMO accounts are NOT used by this service.
- * REFERRAL accounts are NOT used by this service.
+ * REFERRAL accounts cannot run cycles.
  */
 
 const { pool } = require('../config/database');
 
 const {
-  lockFunds,
-  unlockFunds,
-  applyWalletDelta
-} = require('./wallet.service');
+  getAccountForUpdate,
+  updateBalance,
+  updateLockedBalance,
+  credit,
+  debit
+} = require('./account.service');
 
 
 // =====================================================
-// CONSTANTS
+// VALIDATION
 // =====================================================
 
-const LIVE_ACCOUNT_TYPE = 'LIVE';
+function validateCycleInput({
+  capitalAmount,
+  expectedProfit,
+  durationMonths
+}) {
+  const capitalCents = Number(capitalAmount);
+  const profitCents = Number(expectedProfit || 0);
+  const duration = Number(durationMonths);
 
-const VALID_DURATIONS = [1, 3, 6];
+  if (
+    !Number.isInteger(capitalCents) ||
+    capitalCents <= 0
+  ) {
+    throw new Error('Invalid capital amount');
+  }
+
+  if (
+    !Number.isInteger(profitCents) ||
+    profitCents < 0
+  ) {
+    throw new Error('Invalid expected profit');
+  }
+
+  if (![1, 3, 6].includes(duration)) {
+    throw new Error('Invalid duration');
+  }
+
+  return {
+    capitalCents,
+    profitCents,
+    duration
+  };
+}
 
 
 // =====================================================
@@ -50,93 +81,52 @@ async function startCycle({
   userId,
   capitalAmount,
   expectedProfit = 0,
-  durationMonths
+  durationMonths,
+  accountType = 'DEMO'
 }) {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    const capitalCents = Number(capitalAmount);
-    const profitCents = Number(expectedProfit);
-    const duration = Number(durationMonths);
+    const normalizedType =
+      String(accountType).toUpperCase();
 
-    // ---------------------------------------------------
-    // Validate capital
-    // ---------------------------------------------------
-
-    if (
-      !Number.isInteger(capitalCents) ||
-      capitalCents <= 0
-    ) {
-      throw new Error('Invalid capital amount');
+    if (!['DEMO', 'LIVE'].includes(normalizedType)) {
+      throw new Error(
+        'Cycles are only available for DEMO and LIVE accounts'
+      );
     }
 
-    // ---------------------------------------------------
-    // Validate expected profit
-    // ---------------------------------------------------
+    const {
+      capitalCents,
+      profitCents,
+      duration
+    } = validateCycleInput({
+      capitalAmount,
+      expectedProfit,
+      durationMonths
+    });
 
-    if (
-      !Number.isInteger(profitCents) ||
-      profitCents < 0
-    ) {
-      throw new Error('Invalid expected profit');
-    }
+    // -------------------------------------------------
+    // Get and lock account
+    // -------------------------------------------------
 
-    // ---------------------------------------------------
-    // Validate duration
-    // ---------------------------------------------------
-
-    if (!VALID_DURATIONS.includes(duration)) {
-      throw new Error('Invalid duration');
-    }
-
-    // ---------------------------------------------------
-    // Get LIVE account and lock it
-    // ---------------------------------------------------
-
-    const { rows: accountRows } = await client.query(
-      `
-      SELECT
-        id,
-        user_id,
-        account_code,
-        account_type,
-        status,
-        balance_cents,
-        locked_balance_cents,
-        profit_cents
-      FROM accounts
-      WHERE user_id = $1
-        AND account_type = $2
-      LIMIT 1
-      FOR UPDATE
-      `,
-      [
-        userId,
-        LIVE_ACCOUNT_TYPE
-      ]
+    const account = await getAccountForUpdate(
+      client,
+      userId,
+      normalizedType
     );
 
-    if (!accountRows.length) {
-      throw new Error('LIVE account not found');
+    if (String(account.status).toUpperCase() !== 'ACTIVE') {
+      throw new Error(
+        `${normalizedType} account is not active`
+      );
     }
 
-    const account = accountRows[0];
-
-    // ---------------------------------------------------
-    // Account must be active
-    // ---------------------------------------------------
-
-    if (
-      String(account.status).toUpperCase() !== 'ACTIVE'
-    ) {
-      throw new Error('LIVE account is not active');
-    }
-
-    // ---------------------------------------------------
-    // Only one running cycle per LIVE account
-    // ---------------------------------------------------
+    // -------------------------------------------------
+    // Prevent multiple active cycles
+    // -------------------------------------------------
 
     const running = await client.query(
       `
@@ -156,41 +146,84 @@ async function startCycle({
       );
     }
 
-    // ---------------------------------------------------
-    // Lock requested LIVE capital
+    const currentBalance =
+      Number(account.balance_cents);
+
+    const currentLocked =
+      Number(account.locked_balance_cents || 0);
+
+    // -------------------------------------------------
+    // DEMO
     //
-    // IMPORTANT:
-    // wallet.service expects:
+    // Deduct capital from available balance AND
+    // move it into locked capital.
+    // -------------------------------------------------
+
+    if (normalizedType === 'DEMO') {
+
+      if (currentBalance < capitalCents) {
+        throw new Error(
+          'Insufficient DEMO balance'
+        );
+      }
+
+      const newBalance =
+        currentBalance - capitalCents;
+
+      const newLocked =
+        currentLocked + capitalCents;
+
+      await updateBalance(
+        client,
+        account.id,
+        newBalance
+      );
+
+      await updateLockedBalance(
+        client,
+        account.id,
+        newLocked
+      );
+    }
+
+    // -------------------------------------------------
+    // LIVE
     //
-    // lockFunds(
-    //   client,
-    //   userId,
-    //   walletType,
-    //   amountCents
-    // )
-    // ---------------------------------------------------
+    // LIVE balance remains unchanged.
+    // Only locked capital increases.
+    // -------------------------------------------------
 
-    const lockResult = await lockFunds(
-      client,
-      userId,
-      LIVE_ACCOUNT_TYPE,
-      capitalCents
-    );
+    if (normalizedType === 'LIVE') {
 
-    // ---------------------------------------------------
-    // Calculate cycle duration
-    // ---------------------------------------------------
+      const available =
+        currentBalance - currentLocked;
 
-    const totalDays = duration * 30;
+      if (available < capitalCents) {
+        throw new Error(
+          'Insufficient available LIVE balance'
+        );
+      }
 
-    // ---------------------------------------------------
+      const newLocked =
+        currentLocked + capitalCents;
+
+      await updateLockedBalance(
+        client,
+        account.id,
+        newLocked
+      );
+    }
+
+    // -------------------------------------------------
     // Create cycle
-    // ---------------------------------------------------
+    // -------------------------------------------------
+
+    const totalDays =
+      duration * 30;
 
     const { rows } = await client.query(
       `
-      INSERT INTO cycles
-      (
+      INSERT INTO cycles (
         account_id,
         user_id,
         capital_cents,
@@ -201,8 +234,7 @@ async function startCycle({
         started_at,
         ends_at
       )
-      VALUES
-      (
+      VALUES (
         $1,
         $2,
         $3,
@@ -227,34 +259,41 @@ async function startCycle({
 
     await client.query('COMMIT');
 
-    const cycle = rows[0];
+    const newBalance =
+      normalizedType === 'DEMO'
+        ? currentBalance - capitalCents
+        : currentBalance;
+
+    const newLocked =
+      currentLocked + capitalCents;
 
     return {
-      ...cycle,
+      ...rows[0],
 
-      account_type: LIVE_ACCOUNT_TYPE,
-      account_code: account.account_code,
+      account_type:
+        normalizedType,
+
+      account_code:
+        account.account_code,
 
       balance_cents:
-        Number(lockResult.balance),
+        newBalance,
 
       locked_balance_cents:
-        Number(lockResult.locked),
+        newLocked,
 
       available_balance_cents:
-        Number(lockResult.available)
+        normalizedType === 'DEMO'
+          ? newBalance
+          : newBalance - newLocked
     };
 
   } catch (err) {
-
     await client.query('ROLLBACK');
-
     throw err;
 
   } finally {
-
     client.release();
-
   }
 }
 
@@ -263,7 +302,12 @@ async function startCycle({
 // CURRENT CYCLE
 // =====================================================
 
-async function getCurrentCycle(userId) {
+async function getCurrentCycle(
+  userId,
+  accountType = 'DEMO'
+) {
+  const normalizedType =
+    String(accountType).toUpperCase();
 
   const { rows } = await pool.query(
     `
@@ -272,26 +316,20 @@ async function getCurrentCycle(userId) {
       a.account_code,
       a.account_type,
       a.balance_cents,
-      a.locked_balance_cents,
-      a.profit_cents
-
+      a.locked_balance_cents
     FROM cycles c
-
-    INNER JOIN accounts a
+    JOIN accounts a
       ON a.id = c.account_id
-
     WHERE c.user_id = $1
       AND a.user_id = $1
       AND a.account_type = $2
       AND c.status = 'RUNNING'
-
     ORDER BY c.started_at DESC
-
     LIMIT 1
     `,
     [
       userId,
-      LIVE_ACCOUNT_TYPE
+      normalizedType
     ]
   );
 
@@ -303,31 +341,32 @@ async function getCurrentCycle(userId) {
 // ACTIVE CYCLES
 // =====================================================
 
-async function getActiveCycles(userId) {
+async function getActiveCycles(
+  userId,
+  accountType = 'DEMO'
+) {
+  const normalizedType =
+    String(accountType).toUpperCase();
 
   const { rows } = await pool.query(
     `
     SELECT
       c.*,
-
       a.account_code,
       a.account_type,
       a.balance_cents,
       a.locked_balance_cents,
-      a.profit_cents,
 
       FLOOR(
         EXTRACT(
-          EPOCH FROM
-          (NOW() - c.started_at)
+          EPOCH FROM (NOW() - c.started_at)
         ) / 86400
       )::int AS elapsed_days,
 
       GREATEST(
         CEIL(
           EXTRACT(
-            EPOCH FROM
-            (c.ends_at - NOW())
+            EPOCH FROM (c.ends_at - NOW())
           ) / 86400
         )::int,
         0
@@ -335,14 +374,13 @@ async function getActiveCycles(userId) {
 
       CEIL(
         EXTRACT(
-          EPOCH FROM
-          (c.ends_at - c.started_at)
+          EPOCH FROM (c.ends_at - c.started_at)
         ) / 86400
       )::int AS total_days
 
     FROM cycles c
 
-    INNER JOIN accounts a
+    JOIN accounts a
       ON a.id = c.account_id
 
     WHERE c.user_id = $1
@@ -354,7 +392,7 @@ async function getActiveCycles(userId) {
     `,
     [
       userId,
-      LIVE_ACCOUNT_TYPE
+      normalizedType
     ]
   );
 
@@ -363,32 +401,32 @@ async function getActiveCycles(userId) {
 
 
 // =====================================================
-// COMPLETED / CANCELLED CYCLES
+// COMPLETED CYCLES
 // =====================================================
 
-async function getCompletedCycles(userId) {
+async function getCompletedCycles(
+  userId,
+  accountType = 'DEMO'
+) {
+  const normalizedType =
+    String(accountType).toUpperCase();
 
   const { rows } = await pool.query(
     `
     SELECT
       c.*,
-
       a.account_code,
       a.account_type,
 
       CASE
         WHEN c.status = 'CANCELLED'
-          THEN 'FORFEITED'
-
-        WHEN c.status = 'COMPLETED'
-          THEN 'COMPLETED'
-
-        ELSE c.status
+        THEN 'FORFEITED'
+        ELSE 'COMPLETED'
       END AS display_status
 
     FROM cycles c
 
-    INNER JOIN accounts a
+    JOIN accounts a
       ON a.id = c.account_id
 
     WHERE c.user_id = $1
@@ -399,11 +437,12 @@ async function getCompletedCycles(userId) {
         'CANCELLED'
       )
 
-    ORDER BY c.completed_at DESC NULLS LAST
+    ORDER BY
+      COALESCE(c.completed_at, c.created_at) DESC
     `,
     [
       userId,
-      LIVE_ACCOUNT_TYPE
+      normalizedType
     ]
   );
 
@@ -416,99 +455,112 @@ async function getCompletedCycles(userId) {
 // =====================================================
 
 async function settleCompletedCycles() {
-
   const client = await pool.connect();
 
   try {
-
     await client.query('BEGIN');
-
-    /*
-     * Find every LIVE cycle whose
-     * end time has passed.
-     */
 
     const { rows: cycles } = await client.query(
       `
       SELECT
         c.*,
-        a.account_code,
         a.account_type,
+        a.balance_cents,
         a.locked_balance_cents
-
       FROM cycles c
 
-      INNER JOIN accounts a
+      JOIN accounts a
         ON a.id = c.account_id
 
       WHERE c.status = 'RUNNING'
         AND c.ends_at <= NOW()
-        AND a.account_type = $1
+        AND a.account_type IN ('DEMO', 'LIVE')
+
+      ORDER BY c.id ASC
 
       FOR UPDATE OF c
-      `,
-      [LIVE_ACCOUNT_TYPE]
+      `
     );
 
     for (const cycle of cycles) {
 
-      const capitalCents =
-        Number(cycle.capital_cents || 0);
+      const accountType =
+        String(cycle.account_type).toUpperCase();
 
-      const profitCents =
+      const capital =
+        Number(cycle.capital_cents);
+
+      const profit =
         Number(cycle.expected_profit_cents || 0);
 
-      // -------------------------------------------------
-      // Release locked capital
-      // -------------------------------------------------
-
-      await unlockFunds(
-        client,
-        cycle.user_id,
-        LIVE_ACCOUNT_TYPE,
-        capitalCents
-      );
-
-      // -------------------------------------------------
-      // Credit profit to LIVE
-      // -------------------------------------------------
-
-      if (profitCents > 0) {
-
-        await applyWalletDelta(
+      const account =
+        await getAccountForUpdate(
           client,
-
           cycle.user_id,
+          accountType
+        );
 
-          LIVE_ACCOUNT_TYPE,
+      const locked =
+        Number(account.locked_balance_cents || 0);
 
-          profitCents,
-
-          'CYCLE_PROFIT',
-
-          {
-            refType: 'CYCLE',
-            refId: cycle.id,
-
-            idempotencyKey:
-              `cycle:${cycle.id}:profit`,
-
-            reference:
-              `Cycle ${cycle.id} Profit`,
-
-            meta: {
-              cycle_id: cycle.id,
-              account_type: LIVE_ACCOUNT_TYPE,
-              capital_cents: capitalCents,
-              profit_cents: profitCents
-            }
-          }
+      if (locked < capital) {
+        throw new Error(
+          `Locked balance is insufficient for cycle ${cycle.id}`
         );
       }
 
-      // -------------------------------------------------
-      // Mark cycle completed
-      // -------------------------------------------------
+      // ------------------------------------------------
+      // Remove this cycle's capital from locked balance
+      // ------------------------------------------------
+
+      const newLocked =
+        locked - capital;
+
+      await updateLockedBalance(
+        client,
+        account.id,
+        newLocked
+      );
+
+      // ------------------------------------------------
+      // DEMO
+      //
+      // Capital was originally deducted.
+      // Return capital + profit.
+      // ------------------------------------------------
+
+      if (accountType === 'DEMO') {
+
+        await credit(
+          client,
+          cycle.user_id,
+          'DEMO',
+          capital + profit
+        );
+      }
+
+      // ------------------------------------------------
+      // LIVE
+      //
+      // Capital never left balance.
+      // Only return the profit.
+      // ------------------------------------------------
+
+      if (
+        accountType === 'LIVE' &&
+        profit > 0
+      ) {
+        await credit(
+          client,
+          cycle.user_id,
+          'LIVE',
+          profit
+        );
+      }
+
+      // ------------------------------------------------
+      // Mark completed
+      // ------------------------------------------------
 
       await client.query(
         `
@@ -518,11 +570,10 @@ async function settleCompletedCycles() {
           realized_profit_cents = $1,
           completed_at = NOW(),
           updated_at = NOW()
-
         WHERE id = $2
         `,
         [
-          profitCents,
+          profit,
           cycle.id
         ]
       );
@@ -533,15 +584,11 @@ async function settleCompletedCycles() {
     return cycles.length;
 
   } catch (err) {
-
     await client.query('ROLLBACK');
-
     throw err;
 
   } finally {
-
     client.release();
-
   }
 }
 
@@ -554,41 +601,32 @@ async function stopCycle({
   userId,
   cycleId
 }) {
-
   const client = await pool.connect();
 
   try {
-
     await client.query('BEGIN');
-
-    // ---------------------------------------------------
-    // Lock cycle + verify ownership
-    // ---------------------------------------------------
 
     const { rows } = await client.query(
       `
       SELECT
         c.*,
-        a.account_type,
-        a.account_code
-
+        a.account_type
       FROM cycles c
 
-      INNER JOIN accounts a
+      JOIN accounts a
         ON a.id = c.account_id
 
       WHERE c.id = $1
         AND c.user_id = $2
         AND a.user_id = $2
-        AND a.account_type = $3
+        AND a.account_type IN ('DEMO', 'LIVE')
         AND c.status = 'RUNNING'
 
       FOR UPDATE
       `,
       [
         cycleId,
-        userId,
-        LIVE_ACCOUNT_TYPE
+        userId
       ]
     );
 
@@ -600,38 +638,72 @@ async function stopCycle({
 
     const cycle = rows[0];
 
-    const capitalCents =
-      Number(cycle.capital_cents || 0);
+    const accountType =
+      String(cycle.account_type).toUpperCase();
 
-    // ---------------------------------------------------
-    // Release locked capital
-    // ---------------------------------------------------
+    const capital =
+      Number(cycle.capital_cents);
 
-    await unlockFunds(
+    const account =
+      await getAccountForUpdate(
+        client,
+        userId,
+        accountType
+      );
+
+    const locked =
+      Number(account.locked_balance_cents || 0);
+
+    if (locked < capital) {
+      throw new Error(
+        'Locked balance is insufficient'
+      );
+    }
+
+    // ------------------------------------------------
+    // Remove capital from locked balance
+    // ------------------------------------------------
+
+    await updateLockedBalance(
       client,
-      userId,
-      LIVE_ACCOUNT_TYPE,
-      capitalCents
+      account.id,
+      locked - capital
     );
 
-    // ---------------------------------------------------
-    // Mark cycle forfeited
+    // ------------------------------------------------
+    // DEMO
     //
-    // No profit is paid when manually stopped.
-    // ---------------------------------------------------
+    // Capital was deducted at cycle start,
+    // therefore return it when cycle is stopped.
+    //
+    // No profit is paid.
+    // ------------------------------------------------
+
+    if (accountType === 'DEMO') {
+
+      await credit(
+        client,
+        userId,
+        'DEMO',
+        capital
+      );
+    }
+
+    // ------------------------------------------------
+    // LIVE
+    //
+    // Capital was never deducted, so only unlock it.
+    // ------------------------------------------------
 
     const result = await client.query(
       `
       UPDATE cycles
-
       SET
         status = 'CANCELLED',
         realized_profit_cents = 0,
         completed_at = NOW(),
         updated_at = NOW()
-
       WHERE id = $1
-
       RETURNING *
       `,
       [cycle.id]
@@ -642,15 +714,11 @@ async function stopCycle({
     return result.rows[0];
 
   } catch (err) {
-
     await client.query('ROLLBACK');
-
     throw err;
 
   } finally {
-
     client.release();
-
   }
 }
 

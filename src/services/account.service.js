@@ -223,35 +223,43 @@ async function debit(
 async function lockFunds(
   client,
   userId,
+  accountType,
   amountCents
 ) {
-  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
     throw new Error('Invalid lock amount');
+  }
+
+  if (!['DEMO', 'LIVE'].includes(accountType)) {
+    throw new Error(
+      'Invalid account type for cycle'
+    );
   }
 
   const account = await getAccountForUpdate(
     client,
     userId,
-    'LIVE'
+    accountType
   );
 
   const balance =
     Number(account.balance_cents);
 
-  const locked =
-    Number(account.locked_balance_cents);
-
   const available =
-    balance - locked;
+    balance - Number(account.locked_balance_cents);
 
   if (available < amountCents) {
     throw new Error(
-      'Insufficient available LIVE balance'
+      `Insufficient available ${accountType} balance`
     );
   }
 
   const newLocked =
-    locked + amountCents;
+    Number(account.locked_balance_cents) +
+    amountCents;
 
   await updateLockedBalance(
     client,
@@ -261,6 +269,7 @@ async function lockFunds(
 
   return {
     accountId: account.id,
+    accountType,
     balance,
     locked: newLocked,
     available: balance - newLocked
@@ -274,16 +283,26 @@ async function lockFunds(
 async function unlockFunds(
   client,
   userId,
+  accountType,
   amountCents
 ) {
-  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+  if (
+    !Number.isInteger(amountCents) ||
+    amountCents <= 0
+  ) {
     throw new Error('Invalid unlock amount');
+  }
+
+  if (!['DEMO', 'LIVE'].includes(accountType)) {
+    throw new Error(
+      'Invalid account type for cycle'
+    );
   }
 
   const account = await getAccountForUpdate(
     client,
     userId,
-    'LIVE'
+    accountType
   );
 
   const locked =
@@ -291,7 +310,7 @@ async function unlockFunds(
 
   if (locked < amountCents) {
     throw new Error(
-      'Invalid unlock amount'
+      `Cannot unlock more than locked ${accountType} capital`
     );
   }
 
@@ -306,6 +325,7 @@ async function unlockFunds(
 
   return {
     accountId: account.id,
+    accountType,
     balance: Number(account.balance_cents),
     locked: newLocked,
     available:

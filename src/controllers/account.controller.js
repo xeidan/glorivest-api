@@ -167,35 +167,92 @@ exports.createAccount = async (req, res) => {
 ========================================================= */
 exports.resetDemo = async (req, res) => {
   const client = await pool.connect();
+
   try {
     const account = req.account;
+
     requireDemoAccount(account);
 
     const DEFAULT = 1_000_000;
-    const diff = DEFAULT - account.balance_cents;
-
-    if (diff === 0) {
-      return res.json({ success: true });
-    }
 
     await client.query('BEGIN');
 
-    await postTransaction({
-      userId: req.user.id,
-      accountId: account.id,
-      type: 'demo_reset',
-      amountCents: diff
-    }, client);
+    // -----------------------------------------------------
+    // 1. Clear all DEMO cycle history for this account
+    // -----------------------------------------------------
+    await client.query(
+      `
+      DELETE FROM cycles
+      WHERE account_id = $1
+        AND user_id = $2
+      `,
+      [
+        account.id,
+        req.user.id
+      ]
+    );
+
+    // -----------------------------------------------------
+    // 2. Reset locked DEMO capital
+    // -----------------------------------------------------
+    await client.query(
+      `
+      UPDATE accounts
+      SET
+        balance_cents = $1,
+        locked_balance_cents = 0,
+        profit_cents = 0,
+        updated_at = NOW()
+      WHERE id = $2
+        AND user_id = $3
+        AND account_type = 'DEMO'
+      `,
+      [
+        DEFAULT,
+        account.id,
+        req.user.id
+      ]
+    );
+
+    // -----------------------------------------------------
+    // 3. Record the reset in the ledger
+    // -----------------------------------------------------
+    const diff =
+      DEFAULT - Number(account.balance_cents || 0);
+
+    if (diff !== 0) {
+      await postTransaction(
+        {
+          userId: req.user.id,
+          accountId: account.id,
+          type: 'demo_reset',
+          amountCents: diff
+        },
+        client
+      );
+    }
 
     await client.query('COMMIT');
-    res.json({ success: true });
+
+    return res.json({
+      success: true,
+      balance_cents: DEFAULT
+    });
 
   } catch (err) {
+
     await client.query('ROLLBACK');
-    console.error(err);
-    res.status(500).json({ message: 'Demo reset failed' });
+
+    console.error(
+      'resetDemo error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Demo reset failed'
+    });
+
   } finally {
     client.release();
   }
 };
-
