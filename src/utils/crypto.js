@@ -3,9 +3,10 @@
 
 const crypto = require('crypto');
 
-const ENC_KEY_HEX = process.env.ENCRYPTION_KEY; // 32-byte hex
+const { ENCRYPTION_KEY: ENC_KEY_HEX } = require('../config/env');
+
 if (!ENC_KEY_HEX || ENC_KEY_HEX.length !== 64) {
-  console.error('❌ ENCRYPTION_KEY missing or invalid. Generate using: openssl rand -hex 32');
+  console.error('❌ ENCRYPTION_KEY missing or invalid.');
   process.exit(1);
 }
 
