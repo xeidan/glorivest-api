@@ -7,7 +7,7 @@ function generateReference() {
   return `GV-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 }
 
-/* ================= CREATE ================= */
+/* ================= CREATE DEPOSIT ================= */
 
 exports.createDeposit = async (req, res) => {
   try {
@@ -22,17 +22,19 @@ exports.createDeposit = async (req, res) => {
     } = req.body;
 
     // ==========================
-    // Validation
+    // Validate amount
     // ==========================
 
-    if (!Number.isFinite(Number(amount_cents))) {
+    const amountCents = Number(amount_cents);
+
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
       return res.status(400).json({
         message: 'Invalid amount'
       });
     }
 
-    const amountCents = Number(amount_cents);
-
+    // Keep current minimum for now.
+    // We can change this separately later.
     if (amountCents < 5000) {
       return res.status(400).json({
         message: 'Minimum deposit is $50'
@@ -42,32 +44,59 @@ exports.createDeposit = async (req, res) => {
     const depositMethod = String(method || 'BANK').toUpperCase();
 
     // ==========================
-    // CRYPTO FLOW
+    // CRYPTO DEPOSIT
     // ==========================
 
     if (depositMethod === 'CRYPTO') {
+      try {
+        const wallet =
+          await depositService.getOrCreateCryptoWallet(userId);
 
-      const wallet =
-        await depositService.getOrCreateCryptoWallet(userId);
+        if (!wallet || !wallet.address) {
+          return res.status(500).json({
+            message: 'Crypto wallet unavailable'
+          });
+        }
 
-      return res.json({
-        id: null,
-        method: 'CRYPTO',
+        return res.json({
+          id: null,
+          method: 'CRYPTO',
 
-        address: wallet.address,
+          address: wallet.address,
 
-        network: 'TRON',
+          network: 'TRON',
 
-        token: 'USDT',
+          token: 'USDT',
 
-        amount_cents: amountCents,
+          amount_cents: amountCents,
 
-        amount: amountCents / 100
+          amount: amountCents / 100
+        });
+
+      } catch (err) {
+        console.error(
+          'CRYPTO DEPOSIT ERROR:',
+          err
+        );
+
+        return res.status(400).json({
+          message: err.message || 'Unable to load crypto wallet'
+        });
+      }
+    }
+
+    // ==========================
+    // BANK DEPOSIT
+    // ==========================
+
+    if (depositMethod !== 'BANK') {
+      return res.status(400).json({
+        message: 'Unsupported deposit method'
       });
     }
 
     // ==========================
-    // BANK FLOW
+    // Bank details validation
     // ==========================
 
     if (
@@ -80,7 +109,7 @@ exports.createDeposit = async (req, res) => {
       });
     }
 
-    if (!/^\d{10}$/.test(sender_account_number)) {
+    if (!/^\d{10}$/.test(String(sender_account_number))) {
       return res.status(400).json({
         message: 'Invalid account number'
       });
@@ -108,7 +137,7 @@ exports.createDeposit = async (req, res) => {
     }
 
     // ==========================
-    // Calculations
+    // Calculate NGN amount
     // ==========================
 
     const usd = amountCents / 100;
@@ -117,7 +146,7 @@ exports.createDeposit = async (req, res) => {
     const reference = generateReference();
 
     // ==========================
-    // Create Bank Deposit
+    // Create bank deposit
     // ==========================
 
     const { rows: depositRows } = await pool.query(
@@ -169,8 +198,10 @@ exports.createDeposit = async (req, res) => {
     return res.json(depositRows[0]);
 
   } catch (err) {
-
-    console.error('CREATE DEPOSIT ERROR:', err);
+    console.error(
+      'CREATE DEPOSIT ERROR:',
+      err
+    );
 
     return res.status(500).json({
       message: err.message || 'Deposit failed'
@@ -182,7 +213,6 @@ exports.createDeposit = async (req, res) => {
 
 exports.markPaid = async (req, res) => {
   try {
-
     await depositService.markDepositPaid(
       req.user.id,
       req.params.depositId
@@ -193,13 +223,14 @@ exports.markPaid = async (req, res) => {
     });
 
   } catch (err) {
-
-    console.error(err);
+    console.error(
+      'MARK DEPOSIT PAID ERROR:',
+      err
+    );
 
     return res.status(400).json({
-      message: err.message
+      message: err.message || 'Unable to mark deposit as paid'
     });
-
   }
 };
 
@@ -207,7 +238,6 @@ exports.markPaid = async (req, res) => {
 
 exports.cancelDeposit = async (req, res) => {
   try {
-
     await depositService.cancelDeposit(
       req.user.id,
       req.params.depositId
@@ -218,13 +248,14 @@ exports.cancelDeposit = async (req, res) => {
     });
 
   } catch (err) {
-
-    console.error(err);
+    console.error(
+      'CANCEL DEPOSIT ERROR:',
+      err
+    );
 
     return res.status(400).json({
-      message: err.message
+      message: err.message || 'Unable to cancel deposit'
     });
-
   }
 };
 
@@ -232,18 +263,21 @@ exports.cancelDeposit = async (req, res) => {
 
 exports.listUserDeposits = async (req, res) => {
   try {
-
-    const deposits = await depositService.listUserDeposits(req.user.id);
+    const deposits =
+      await depositService.listUserDeposits(
+        req.user.id
+      );
 
     return res.json(deposits);
 
   } catch (err) {
-
-    console.error(err);
+    console.error(
+      'LIST DEPOSITS ERROR:',
+      err
+    );
 
     return res.status(400).json({
-      message: err.message
+      message: err.message || 'Unable to load deposits'
     });
-
   }
 };
