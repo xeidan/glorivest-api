@@ -23,14 +23,14 @@ async function getUserPerformance(req, res) {
         id,
         symbol,
         side,
-        size,
+        qty AS size,
         entry_price,
         exit_price,
         CASE
           WHEN side IN ('LONG','BUY')
-            THEN (exit_price - entry_price) * size
+            THEN (exit_price - entry_price) * qty
           WHEN side IN ('SHORT','SELL')
-            THEN (entry_price - exit_price) * size
+            THEN (entry_price - exit_price) * qty
           ELSE 0
         END AS pnl,
         status,
