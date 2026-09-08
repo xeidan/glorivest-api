@@ -29,10 +29,9 @@ exports.createTronWallet = async (userId, accountId) => {
       sweep_enabled,
       created_at
     FROM wallets
-    WHERE user_id = $1
-      AND account_id = $2
-      AND network = 'tron'
-      AND token = 'USDT'
+      WHERE user_id = $1
+        AND network = 'tron'
+        AND token = 'USDT'
     LIMIT 1
     `,
     [userId, accountId]
@@ -161,20 +160,41 @@ exports.sweepWallet = async (walletRow) => {
 // BULK SWEEP WORKER
 // ===================
 exports.sweepAll = async () => {
-  // wallets table (per your schema) has columns: id, account_id, network, address, private_key, created_at, updated_at, user_id
   const { rows } = await pool.query(
-    `SELECT id, user_id, address, private_key
-     FROM wallets
-     WHERE network = 'tron' AND (private_key IS NOT NULL AND private_key <> '')
-     ORDER BY id ASC
-     LIMIT 200`
+    `
+    SELECT
+      w.id,
+      w.user_id,
+      w.address,
+      w.priv_enc
+    FROM wallets w
+    WHERE w.network = 'tron'
+      AND w.token = 'USDT'
+      AND w.sweep_enabled = true
+      AND w.priv_enc IS NOT NULL
+      AND w.priv_enc <> ''
+      AND EXISTS (
+        SELECT 1
+        FROM deposits d
+        WHERE d.to_addr = w.address
+          AND d.network = 'tron'
+          AND d.token = 'USDT'
+          AND COALESCE(d.swept, false) = false
+      )
+    ORDER BY w.id ASC
+    LIMIT 200
+    `
   );
 
   for (const row of rows) {
     try {
       await exports.sweepWallet(row);
     } catch (err) {
-      console.error('sweep error walletId', row.id, (err && err.message) || err);
+      console.error(
+        'sweep error walletId',
+        row.id,
+        err?.message || err
+      );
     }
   }
 };
