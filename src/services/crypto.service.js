@@ -165,14 +165,13 @@ exports.sweepAll = async () => {
     SELECT
       w.id,
       w.user_id,
+      w.account_id,
       w.address,
-      w.priv_enc
+      w.private_key
     FROM wallets w
     WHERE w.network = 'tron'
-      AND w.token = 'USDT'
-      AND w.sweep_enabled = true
-      AND w.priv_enc IS NOT NULL
-      AND w.priv_enc <> ''
+      AND w.private_key IS NOT NULL
+      AND w.private_key <> ''
       AND EXISTS (
         SELECT 1
         FROM deposits d
