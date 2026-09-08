@@ -14,11 +14,12 @@ exports.createDeposit = async (req, res) => {
     const userId = req.user.id;
 
     const {
-      amount_cents,
-      sender_account_name,
-      sender_account_number,
-      sender_bank_name
-    } = req.body;
+  amount_cents,
+  method,
+  sender_account_name,
+  sender_account_number,
+  sender_bank_name
+} = req.body;
 
     // ==========================
     // Validation
@@ -36,21 +37,23 @@ exports.createDeposit = async (req, res) => {
       });
     }
 
-    if (
-      !sender_account_name ||
-      !sender_account_number ||
-      !sender_bank_name
-    ) {
-      return res.status(400).json({
-        message: 'Missing bank details'
-      });
-    }
+    if (method !== 'CRYPTO') {
+  if (
+    !sender_account_name ||
+    !sender_account_number ||
+    !sender_bank_name
+  ) {
+    return res.status(400).json({
+      message: 'Missing bank details'
+    });
+  }
 
-    if (!/^\d{10}$/.test(sender_account_number)) {
-      return res.status(400).json({
-        message: 'Invalid account number'
-      });
-    }
+  if (!/^\d{10}$/.test(sender_account_number)) {
+    return res.status(400).json({
+      message: 'Invalid account number'
+    });
+  }
+}
 
     // ==========================
     // Get exchange rate

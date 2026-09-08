@@ -80,6 +80,199 @@ exports.createTronWallet = async (userId, accountId) => {
   return rows[0];
 };
 
+// ==================
+// CREATE BALANCE
+// ==================
+exports.createDeposit = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const {
+      amount_cents,
+      method,
+      sender_account_name,
+      sender_account_number,
+      sender_bank_name
+    } = req.body;
+
+    // ==========================
+    // Validation
+    // ==========================
+
+    if (!Number.isFinite(amount_cents)) {
+      return res.status(400).json({
+        message: 'Invalid amount'
+      });
+    }
+
+    if (amount_cents < 5000) {
+      return res.status(400).json({
+        message: 'Minimum deposit is $50'
+      });
+    }
+
+    const depositMethod =
+      String(method || 'BANK').toUpperCase();
+
+    // ==========================
+    // CRYPTO DEPOSIT
+    // ==========================
+
+    if (depositMethod === 'CRYPTO') {
+
+      const cryptoService = require('../services/crypto.service');
+
+      // Get user's LIVE financial account
+      const { rows: accounts } = await pool.query(
+        `
+        SELECT id
+        FROM accounts
+        WHERE user_id = $1
+          AND account_type = 'LIVE'
+          AND status = 'ACTIVE'
+        LIMIT 1
+        `,
+        [userId]
+      );
+
+      if (!accounts.length) {
+        return res.status(400).json({
+          message: 'Live account not found'
+        });
+      }
+
+      const accountId = accounts[0].id;
+
+      // Get or create the user's unique TRON USDT wallet
+      const wallet =
+        await cryptoService.createTronWallet(
+          userId,
+          accountId
+        );
+
+      return res.json({
+        method: 'CRYPTO',
+        network: 'tron',
+        token: 'USDT',
+        address: wallet.address,
+        account_id: accountId,
+        wallet_id: wallet.id,
+        amount_cents
+      });
+    }
+
+    // ==========================
+    // BANK VALIDATION
+    // ==========================
+
+    if (
+      !sender_account_name ||
+      !sender_account_number ||
+      !sender_bank_name
+    ) {
+      return res.status(400).json({
+        message: 'Missing bank details'
+      });
+    }
+
+    if (!/^\d{10}$/.test(sender_account_number)) {
+      return res.status(400).json({
+        message: 'Invalid account number'
+      });
+    }
+
+    // ==========================
+    // Get exchange rate
+    // ==========================
+
+    const { rows } = await pool.query(
+      `
+      SELECT value
+      FROM settings
+      WHERE key = 'USDT_NGN_RATE'
+      LIMIT 1
+      `
+    );
+
+    const rate = Number(rows[0]?.value);
+
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return res.status(500).json({
+        message: 'Invalid exchange rate configuration'
+      });
+    }
+
+    // ==========================
+    // Calculations
+    // ==========================
+
+    const usd = amount_cents / 100;
+    const ngn = Math.round(usd * rate);
+
+    const reference = generateReference();
+
+    // ==========================
+    // Create BANK Deposit
+    // ==========================
+
+    const { rows: depositRows } = await pool.query(
+      `
+      INSERT INTO deposits (
+        user_id,
+        amount_requested_cents,
+        amount_exact_cents,
+        amount_cents,
+        amount,
+        fx_rate,
+        reference,
+        status,
+        method,
+        expires_at,
+        sender_account_name,
+        sender_account_number,
+        sender_bank_name
+      )
+      VALUES (
+        $1,
+        $2,
+        $2,
+        $2,
+        $3,
+        $4,
+        $5,
+        'AWAITING_PAYMENT',
+        'BANK',
+        NOW() + INTERVAL '30 minutes',
+        $6,
+        $7,
+        $8
+      )
+      RETURNING *
+      `,
+      [
+        userId,
+        amount_cents,
+        ngn,
+        rate,
+        reference,
+        sender_account_name,
+        sender_account_number,
+        sender_bank_name
+      ]
+    );
+
+    return res.json(depositRows[0]);
+
+  } catch (err) {
+
+    console.error('CREATE DEPOSIT ERROR:', err);
+
+    return res.status(500).json({
+      message: 'Deposit failed'
+    });
+  }
+};
+
 // ===================
 // GET BALANCE
 // ===================
