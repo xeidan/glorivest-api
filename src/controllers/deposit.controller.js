@@ -14,46 +14,77 @@ exports.createDeposit = async (req, res) => {
     const userId = req.user.id;
 
     const {
-  amount_cents,
-  method,
-  sender_account_name,
-  sender_account_number,
-  sender_bank_name
-} = req.body;
+      amount_cents,
+      method,
+      sender_account_name,
+      sender_account_number,
+      sender_bank_name
+    } = req.body;
 
     // ==========================
     // Validation
     // ==========================
 
-    if (!Number.isFinite(amount_cents)) {
+    if (!Number.isFinite(Number(amount_cents))) {
       return res.status(400).json({
         message: 'Invalid amount'
       });
     }
 
-    if (amount_cents < 5000) {
+    const amountCents = Number(amount_cents);
+
+    if (amountCents < 5000) {
       return res.status(400).json({
         message: 'Minimum deposit is $50'
       });
     }
 
-    if (method !== 'CRYPTO') {
-  if (
-    !sender_account_name ||
-    !sender_account_number ||
-    !sender_bank_name
-  ) {
-    return res.status(400).json({
-      message: 'Missing bank details'
-    });
-  }
+    const depositMethod = String(method || 'BANK').toUpperCase();
 
-  if (!/^\d{10}$/.test(sender_account_number)) {
-    return res.status(400).json({
-      message: 'Invalid account number'
-    });
-  }
-}
+    // ==========================
+    // CRYPTO FLOW
+    // ==========================
+
+    if (depositMethod === 'CRYPTO') {
+
+      const wallet =
+        await depositService.getOrCreateCryptoWallet(userId);
+
+      return res.json({
+        id: null,
+        method: 'CRYPTO',
+
+        address: wallet.address,
+
+        network: 'TRON',
+
+        token: 'USDT',
+
+        amount_cents: amountCents,
+
+        amount: amountCents / 100
+      });
+    }
+
+    // ==========================
+    // BANK FLOW
+    // ==========================
+
+    if (
+      !sender_account_name ||
+      !sender_account_number ||
+      !sender_bank_name
+    ) {
+      return res.status(400).json({
+        message: 'Missing bank details'
+      });
+    }
+
+    if (!/^\d{10}$/.test(sender_account_number)) {
+      return res.status(400).json({
+        message: 'Invalid account number'
+      });
+    }
 
     // ==========================
     // Get exchange rate
@@ -80,13 +111,13 @@ exports.createDeposit = async (req, res) => {
     // Calculations
     // ==========================
 
-    const usd = amount_cents / 100;
+    const usd = amountCents / 100;
     const ngn = Math.round(usd * rate);
 
     const reference = generateReference();
 
     // ==========================
-    // Create Deposit
+    // Create Bank Deposit
     // ==========================
 
     const { rows: depositRows } = await pool.query(
@@ -125,7 +156,7 @@ exports.createDeposit = async (req, res) => {
       `,
       [
         userId,
-        amount_cents,
+        amountCents,
         ngn,
         rate,
         reference,
@@ -142,9 +173,8 @@ exports.createDeposit = async (req, res) => {
     console.error('CREATE DEPOSIT ERROR:', err);
 
     return res.status(500).json({
-      message: 'Deposit failed'
+      message: err.message || 'Deposit failed'
     });
-
   }
 };
 

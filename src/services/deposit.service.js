@@ -1,6 +1,7 @@
 'use strict';
 
 const { pool } = require('../config/database');
+const cryptoService = require('./crypto.service');
 
 // =========================
 // Create Bank Deposit
@@ -293,10 +294,72 @@ async function listUserDeposits(userId) {
   return rows;
 }
 
+// =========================
+// Get/Create User Crypto Wallet
+// =========================
+async function getOrCreateCryptoWallet(userId) {
+  // Find the user's active LIVE account
+  const { rows: accounts } = await pool.query(
+    `
+    SELECT id
+    FROM accounts
+    WHERE user_id = $1
+      AND account_type = 'LIVE'
+      AND status = 'ACTIVE'
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  if (!accounts.length) {
+    throw new Error('Live account not found');
+  }
+
+  const accountId = accounts[0].id;
+
+  // Check for existing TRON/USDT wallet
+  const { rows: wallets } = await pool.query(
+    `
+    SELECT
+      id,
+      user_id,
+      account_id,
+      network,
+      address,
+      created_at
+    FROM wallets
+    WHERE user_id = $1
+      AND account_id = $2
+      AND network = 'tron'
+    LIMIT 1
+    `,
+    [userId, accountId]
+  );
+
+  if (wallets.length) {
+    return {
+      ...wallets[0],
+      token: 'USDT'
+    };
+  }
+
+  // Create a wallet if one does not exist
+  const wallet = await cryptoService.createTronWallet(
+    userId,
+    accountId
+  );
+
+  return {
+    ...wallet,
+    token: 'USDT'
+  };
+}
+
 module.exports = {
   createBankDeposit,
   markDepositPaid,
   cancelDeposit,
   approveDeposit,
-  listUserDeposits
+  listUserDeposits,
+  getOrCreateCryptoWallet
 };

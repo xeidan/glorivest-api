@@ -17,25 +17,23 @@ exports.createTronWallet = async (userId, accountId) => {
   }
 
   // Check whether this account already has a TRON/USDT wallet.
-  const { rows: existing } = await pool.query(
-    `
-    SELECT
-      id,
-      user_id,
-      account_id,
-      network,
-      token,
-      address,
-      sweep_enabled,
-      created_at
-    FROM wallets
+    const { rows: existing } = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        account_id,
+        network,
+        address,
+        created_at
+      FROM wallets
       WHERE user_id = $1
+        AND account_id = $2
         AND network = 'tron'
-        AND token = 'USDT'
-    LIMIT 1
-    `,
-    [userId, accountId]
-  );
+      LIMIT 1
+      `,
+      [userId, accountId]
+    );
 
   if (existing.length) {
     return existing[0];
@@ -52,21 +50,17 @@ exports.createTronWallet = async (userId, accountId) => {
       user_id,
       account_id,
       network,
-      token,
       address,
-      priv_enc,
-      sweep_enabled
+      private_key
     )
     VALUES
-    ($1, $2, 'tron', 'USDT', $3, $4, true)
+    ($1, $2, 'tron', $3, $4)
     RETURNING
       id,
       user_id,
       account_id,
       network,
-      token,
       address,
-      sweep_enabled,
       created_at
     `,
     [
@@ -77,8 +71,8 @@ exports.createTronWallet = async (userId, accountId) => {
     ]
   );
 
-  return rows[0];
-};
+    return rows[0];
+  };
 
 // ==================
 // CREATE BALANCE
