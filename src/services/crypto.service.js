@@ -7,8 +7,78 @@ const { pool } = require('../config/database');
 // ===================
 // WALLET GENERATION
 // ===================
-exports.createTronWallet = async () => {
-  return await tron.createWallet(); // returns { address, privEnc } (unchanged)
+exports.createTronWallet = async (userId, accountId) => {
+  if (!userId) {
+    throw new Error('userId is required');
+  }
+
+  if (!accountId) {
+    throw new Error('accountId is required');
+  }
+
+  // Check whether this account already has a TRON/USDT wallet.
+  const { rows: existing } = await pool.query(
+    `
+    SELECT
+      id,
+      user_id,
+      account_id,
+      network,
+      token,
+      address,
+      sweep_enabled,
+      created_at
+    FROM wallets
+    WHERE user_id = $1
+      AND account_id = $2
+      AND network = 'tron'
+      AND token = 'USDT'
+    LIMIT 1
+    `,
+    [userId, accountId]
+  );
+
+  if (existing.length) {
+    return existing[0];
+  }
+
+  // Generate a new blockchain wallet.
+  const wallet = await tron.createWallet();
+
+  // Persist it against the user's LIVE financial account.
+  const { rows } = await pool.query(
+    `
+    INSERT INTO wallets
+    (
+      user_id,
+      account_id,
+      network,
+      token,
+      address,
+      priv_enc,
+      sweep_enabled
+    )
+    VALUES
+    ($1, $2, 'tron', 'USDT', $3, $4, true)
+    RETURNING
+      id,
+      user_id,
+      account_id,
+      network,
+      token,
+      address,
+      sweep_enabled,
+      created_at
+    `,
+    [
+      userId,
+      accountId,
+      wallet.address,
+      wallet.privEnc
+    ]
+  );
+
+  return rows[0];
 };
 
 // ===================

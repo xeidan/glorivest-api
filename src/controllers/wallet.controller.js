@@ -7,6 +7,8 @@ const {
   transferBetweenWallets
 } = require('../services/wallet.service');
 
+const cryptoService = require('../services/crypto.service');
+
 const DEMO_BALANCE_CENTS = 1_000_000;
 const LIVE_WALLET_TYPE = 'LIVE';
 
@@ -81,6 +83,52 @@ const getWallets = async (req, res) => {
 
     res.status(500).json({
       message: 'Server error'
+    });
+  }
+};
+
+
+// ======================================================
+// GET / CREATE TRON USDT DEPOSIT WALLET
+// ======================================================
+
+const getCryptoDepositWallet = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { rows } = await pool.query(
+      `
+      SELECT id
+      FROM accounts
+      WHERE user_id = $1
+        AND account_type = 'LIVE'
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        message: 'Live account not found'
+      });
+    }
+
+    const wallet = await cryptoService.createTronWallet(
+      userId,
+      rows[0].id
+    );
+
+    return res.json({
+      network: wallet.network,
+      token: wallet.token,
+      address: wallet.address
+    });
+
+  } catch (err) {
+    console.error('Get crypto deposit wallet failed:', err);
+
+    return res.status(500).json({
+      message: 'Unable to create crypto deposit wallet'
     });
   }
 };
@@ -288,5 +336,6 @@ const transferReferralToReal = async (req, res) => {
 module.exports = {
   getWallets,
   resetDemoWalletController,
-  transferReferralToReal
+  transferReferralToReal,
+  getCryptoDepositWallet
 };
