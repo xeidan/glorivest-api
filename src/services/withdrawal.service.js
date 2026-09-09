@@ -193,6 +193,10 @@ async function createWithdrawalRequest(
 // CANCEL WITHDRAWAL
 // ======================================================
 
+// ======================================================
+// CANCEL WITHDRAWAL
+// ======================================================
+
 async function cancelWithdrawal(
   userId,
   withdrawalId
@@ -202,68 +206,103 @@ async function cancelWithdrawal(
   try {
     await client.query('BEGIN');
 
+    const id = Number(withdrawalId);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid withdrawal ID');
+    }
+
     // ==================================================
-    // LOCK WITHDRAWAL
+    // LOCK WITHDRAWAL + VERIFY OWNERSHIP
     // ==================================================
 
     const {
-      rows
+      rows: [withdrawal]
     } = await client.query(
       `
       SELECT
-        id,
-        user_id,
-        wallet_id,
-        amount_cents,
-        status
-      FROM withdrawals
-      WHERE id = $1
-        AND user_id = $2
+        w.id,
+        w.user_id,
+        w.wallet_id,
+        w.amount_cents,
+        w.status,
+        a.account_type,
+        a.status AS account_status
+      FROM withdrawals w
+      INNER JOIN accounts a
+        ON a.id = w.wallet_id
+      WHERE w.id = $1
+        AND w.user_id = $2
+        AND a.account_type = 'LIVE'
       FOR UPDATE
       `,
-      [
-        withdrawalId,
-        userId
-      ]
+      [id, userId]
     );
 
-    if (!rows.length) {
+    if (!withdrawal) {
       throw new Error('Withdrawal not found');
     }
 
-    const withdrawal = rows[0];
+    // ==================================================
+    // ONLY PENDING WITHDRAWALS CAN BE CANCELLED
+    // ==================================================
 
-    // Already cancelled
     if (withdrawal.status === 'CANCELLED') {
       await client.query('COMMIT');
 
       return {
-        success: true
+        success: true,
+        message: 'Withdrawal already cancelled'
       };
     }
 
     if (withdrawal.status !== 'PENDING') {
       throw new Error(
-        'Withdrawal cannot be cancelled'
+        `Withdrawal cannot be cancelled from status ${withdrawal.status}`
       );
     }
 
+    if (withdrawal.account_status !== 'ACTIVE') {
+      throw new Error('Live wallet is not active');
+    }
+
+    const amountCents =
+      Number(withdrawal.amount_cents);
+
+    if (
+      !Number.isInteger(amountCents) ||
+      amountCents <= 0
+    ) {
+      throw new Error('Invalid withdrawal amount');
+    }
+
     // ==================================================
-    // RELEASE LOCKED FUNDS
+    // RELEASE THE RESERVED FUNDS
+    //
+    // balance:
+    //   15,000 -> 20,000
+    //
+    // locked:
+    //   5,000 -> 0
+    //
+    // available:
+    //   10,000 -> 20,000
     // ==================================================
 
     await unlockFunds(
       client,
       userId,
       'LIVE',
-      Number(withdrawal.amount_cents)
+      amountCents
     );
 
     // ==================================================
-    // CANCEL WITHDRAWAL
+    // MARK WITHDRAWAL CANCELLED
     // ==================================================
 
-    await client.query(
+    const {
+      rows: [updatedWithdrawal]
+    } = await client.query(
       `
       UPDATE withdrawals
       SET
@@ -271,14 +310,24 @@ async function cancelWithdrawal(
         cancelled_at = now(),
         updated_at = now()
       WHERE id = $1
+        AND user_id = $2
+        AND status = 'PENDING'
+      RETURNING *
       `,
-      [withdrawalId]
+      [id, userId]
     );
+
+    if (!updatedWithdrawal) {
+      throw new Error(
+        'Withdrawal status changed before cancellation'
+      );
+    }
 
     await client.query('COMMIT');
 
     return {
-      success: true
+      success: true,
+      withdrawal: updatedWithdrawal
     };
 
   } catch (err) {
