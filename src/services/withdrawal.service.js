@@ -24,49 +24,89 @@ async function createWithdrawalRequest(
     throw new Error('Invalid destination');
   }
 
+  if (!['BANK', 'CRYPTO'].includes(method)) {
+    throw new Error('Invalid withdrawal method');
+  }
+
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // 🔒 Lock wallet row
+    // =========================
+    // Lock LIVE account
+    // =========================
     const { rows } = await client.query(
       `
-      SELECT balance_cents
-      FROM wallets
+      SELECT
+        id,
+        user_id,
+        account_type,
+        balance_cents,
+        locked_balance_cents,
+        status
+      FROM accounts
       WHERE id = $1
         AND user_id = $2
+        AND account_type = 'LIVE'
       FOR UPDATE
       `,
       [walletId, userId]
     );
 
     if (!rows.length) {
-      throw new Error('Wallet not found');
+      throw new Error('Live wallet not found');
     }
 
-    const balance = Number(rows[0].balance_cents);
+    const account = rows[0];
 
-    if (balance < amountCents) {
+    const balance = Number(account.balance_cents || 0);
+    const lockedBalance = Number(account.locked_balance_cents || 0);
+
+    // =========================
+    // Calculate available balance
+    // =========================
+    const availableBalance = balance - lockedBalance;
+
+    if (availableBalance < amountCents) {
       throw new Error('Insufficient balance');
     }
 
+    // =========================
+    // Create withdrawal request
+    // =========================
     const { rows: [withdrawal] } = await client.query(
       `
       INSERT INTO withdrawals
-        (user_id, wallet_id, amount_cents, destination, method, status)
-      VALUES ($1,$2,$3,$4,$5,'PENDING')
+        (
+          user_id,
+          wallet_id,
+          amount_cents,
+          destination,
+          method,
+          status
+        )
+      VALUES
+        ($1, $2, $3, $4, $5, 'PENDING')
       RETURNING *
       `,
-      [userId, walletId, amountCents, destination, method]
+      [
+        userId,
+        account.id,
+        amountCents,
+        destination,
+        method
+      ]
     );
 
     await client.query('COMMIT');
+
     return withdrawal;
 
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
+
   } finally {
     client.release();
   }
