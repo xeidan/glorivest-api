@@ -82,18 +82,20 @@ async function createWithdrawalRequest(
           user_id,
           wallet_id,
           amount_cents,
+          currency,
           destination,
           method,
           status
         )
       VALUES
-        ($1, $2, $3, $4, $5, 'PENDING')
+        ($1, $2, $3, $4, $5, $6, 'PENDING')
       RETURNING *
       `,
       [
         userId,
-        account.id,
+        walletId,
         amountCents,
+        'USD',
         destination,
         method
       ]
