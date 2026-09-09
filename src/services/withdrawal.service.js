@@ -24,7 +24,7 @@ async function createWithdrawalRequest(
   );
 
   if (
-    !Number.isFinite(amountCents) ||
+    !Number.isInteger(amountCents) ||
     amountCents <= 0
   ) {
     throw new Error('Invalid amount');
@@ -47,7 +47,7 @@ async function createWithdrawalRequest(
     await client.query('BEGIN');
 
     // ==================================================
-    // VERIFY LIVE ACCOUNT
+    // LOCK THE LIVE ACCOUNT
     // ==================================================
 
     const { rows } = await client.query(
@@ -81,36 +81,62 @@ async function createWithdrawalRequest(
     const balanceCents =
       Number(account.balance_cents || 0);
 
+    const lockedBalanceCents =
+      Number(account.locked_balance_cents || 0);
+
     // ==================================================
-    // IMPORTANT:
+    // AVAILABLE BALANCE
     //
-    // balance_cents is the AVAILABLE balance.
+    // Total balance stays unchanged.
     //
-    // locked_balance_cents is already separated from
-    // the available balance.
+    // Available =
+    // balance - already locked funds
     // ==================================================
 
-    if (balanceCents < amountCents) {
-      throw new Error('Insufficient balance');
+    const availableCents =
+      balanceCents - lockedBalanceCents;
+
+    if (availableCents < amountCents) {
+      throw new Error('Insufficient available balance');
     }
 
     // ==================================================
-    // LOCK THE WITHDRAWAL AMOUNT
+    // LOCK WITHDRAWAL FUNDS
     //
-    // This prevents the same funds from being used
-    // for another withdrawal or investment while
-    // this request is pending.
+    // IMPORTANT:
+    //
+    // balance_cents DOES NOT change here.
+    //
+    // Example:
+    //
+    // balance:  25000
+    // locked:       0
+    //
+    // Withdraw 5000
+    //
+    // balance:  25000
+    // locked:    5000
+    // available: 20000
     // ==================================================
 
-    await lockFunds(
-      client,
-      userId,
-      'LIVE',
-      amountCents
+    const newLockedBalance =
+      lockedBalanceCents + amountCents;
+
+    await client.query(
+      `
+      UPDATE accounts
+      SET
+        locked_balance_cents = $1
+      WHERE id = $2
+      `,
+      [
+        newLockedBalance,
+        account.id
+      ]
     );
 
     // ==================================================
-    // CREATE WITHDRAWAL
+    // CREATE WITHDRAWAL REQUEST
     // ==================================================
 
     const {
@@ -303,14 +329,10 @@ async function listUserWithdrawals(userId) {
 
 
 
-// ======================================================
-// APPROVE WITHDRAWAL - ADMIN
-// ======================================================
-
-async function approveWithdrawal(
-  withdrawalId,
-  adminId
-) {
+// =========================
+// Approve Withdrawal (Admin)
+// =========================
+async function approveWithdrawal(withdrawalId, adminId) {
   const client = await pool.connect();
 
   try {
@@ -320,15 +342,14 @@ async function approveWithdrawal(
     // LOCK WITHDRAWAL
     // ==================================================
 
-    const {
-      rows
-    } = await client.query(
+    const { rows } = await client.query(
       `
       SELECT
         id,
         user_id,
         wallet_id,
         amount_cents,
+        method,
         status
       FROM withdrawals
       WHERE id = $1
@@ -347,33 +368,36 @@ async function approveWithdrawal(
     // IDEMPOTENCY
     // ==================================================
 
-    if (
-      withdrawal.status === 'APPROVED' ||
-      withdrawal.status === 'COMPLETED'
-    ) {
+    if (withdrawal.status === 'APPROVED') {
       await client.query('COMMIT');
 
       return {
-        success: true
+        success: true,
+        message: 'Withdrawal already approved'
       };
     }
 
     if (withdrawal.status !== 'PENDING') {
       throw new Error(
-        'Withdrawal cannot be approved'
+        `Withdrawal cannot be approved from status ${withdrawal.status}`
       );
     }
 
     const amountCents =
       Number(withdrawal.amount_cents);
 
+    if (
+      !Number.isInteger(amountCents) ||
+      amountCents <= 0
+    ) {
+      throw new Error('Invalid withdrawal amount');
+    }
+
     // ==================================================
-    // VERIFY LIVE ACCOUNT
+    // LOCK LIVE ACCOUNT
     // ==================================================
 
-    const {
-      rows: accountRows
-    } = await client.query(
+    const { rows: accountRows } = await client.query(
       `
       SELECT
         id,
@@ -416,16 +440,12 @@ async function approveWithdrawal(
     }
 
     // ==================================================
-    // RELEASE THE RESERVED FUNDS
+    // RELEASE RESERVED FUNDS
     //
-    // unlockFunds:
+    // Example:
     //
     // balance:  15,000 -> 20,000
-    // locked:   5,000  -> 0
-    //
-    // Then debit:
-    //
-    // balance:  20,000 -> 15,000
+    // locked:   15,000 -> 10,000
     // ==================================================
 
     await unlockFunds(
@@ -436,9 +456,14 @@ async function approveWithdrawal(
     );
 
     // ==================================================
-    // ACTUAL WALLET DEBIT
+    // ACTUAL WITHDRAWAL DEBIT
     //
-    // This creates the financial transaction.
+    // Example:
+    //
+    // balance:  20,000 -> 15,000
+    //
+    // This creates:
+    // WITHDRAWAL_APPROVED
     // ==================================================
 
     await applyWalletDelta(
@@ -454,7 +479,8 @@ async function approveWithdrawal(
         meta: {
           withdrawal_id: withdrawal.id,
           method: withdrawal.method || null,
-          wallet_id: withdrawal.wallet_id
+          wallet_id: withdrawal.wallet_id,
+          approved_by: adminId
         }
       }
     );
@@ -463,7 +489,7 @@ async function approveWithdrawal(
     // UPDATE WITHDRAWAL
     // ==================================================
 
-    await client.query(
+    const { rows: updatedRows } = await client.query(
       `
       UPDATE withdrawals
       SET
@@ -471,56 +497,20 @@ async function approveWithdrawal(
         approved_at = now(),
         updated_at = now()
       WHERE id = $1
+      RETURNING *
       `,
       [withdrawalId]
-    );
-
-    // ==================================================
-    // ADMIN AUDIT
-    // ==================================================
-
-    await client.query(
-      `
-      INSERT INTO admin_audit_logs
-      (
-        admin_id,
-        action,
-        entity_type,
-        entity_id,
-        metadata
-      )
-      VALUES
-      (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5
-      )
-      `,
-      [
-        adminId,
-        'APPROVE_WITHDRAWAL',
-        'withdrawal',
-        withdrawalId,
-        JSON.stringify({
-          user_id: withdrawal.user_id,
-          wallet_id: withdrawal.wallet_id,
-          amount_cents: amountCents
-        })
-      ]
     );
 
     await client.query('COMMIT');
 
     return {
-      success: true
+      success: true,
+      withdrawal: updatedRows[0]
     };
 
   } catch (err) {
-
     await client.query('ROLLBACK');
-
     throw err;
 
   } finally {

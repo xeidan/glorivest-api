@@ -14,13 +14,38 @@
  * Financial values are stored in cents.
  *
  * balance_cents:
- *   Available balance.
+ *   TOTAL account balance.
  *
  * locked_balance_cents:
- *   Capital currently committed to active cycles.
+ *   Portion of the balance currently reserved/committed.
  *
- * Portfolio value:
- *   balance_cents + locked_balance_cents + applicable profit.
+ * available balance:
+ *   balance_cents - locked_balance_cents
+ *
+ * IMPORTANT:
+ *   Locking funds does NOT reduce balance_cents.
+ *   Unlocking funds does NOT increase balance_cents.
+ *
+ * Example:
+ *
+ *   balance = 25,000
+ *   locked  =  5,000
+ *   available = 20,000
+ *
+ * After locking another 5,000:
+ *
+ *   balance = 25,000
+ *   locked  = 10,000
+ *   available = 15,000
+ *
+ * After unlocking 5,000:
+ *
+ *   balance = 25,000
+ *   locked  =  5,000
+ *   available = 20,000
+ *
+ * Actual financial movement is performed through
+ * applyWalletDelta().
  */
 
 // ======================================================
@@ -52,11 +77,16 @@ async function getWalletForUpdate(
     LIMIT 1
     FOR UPDATE
     `,
-    [userId, walletType]
+    [
+      userId,
+      walletType
+    ]
   );
 
   if (!rows.length) {
-    throw new Error(`${walletType} account not found`);
+    throw new Error(
+      `${walletType} account not found`
+    );
   }
 
   return rows[0];
@@ -65,6 +95,17 @@ async function getWalletForUpdate(
 
 // ======================================================
 // APPLY BALANCE CHANGE
+// ======================================================
+//
+// This changes the REAL account balance.
+//
+// Positive delta:
+//   CREDIT
+//
+// Negative delta:
+//   DEBIT
+//
+// Locked funds cannot be spent by a normal debit.
 // ======================================================
 
 async function applyWalletDelta(
@@ -76,53 +117,98 @@ async function applyWalletDelta(
   reference = {}
 ) {
   if (!Number.isInteger(deltaCents)) {
-    throw new Error('deltaCents must be an integer');
+    throw new Error(
+      'deltaCents must be an integer'
+    );
   }
 
   if (deltaCents === 0) {
-    throw new Error('deltaCents cannot be zero');
+    throw new Error(
+      'deltaCents cannot be zero'
+    );
   }
 
-  const account = await getWalletForUpdate(
-    client,
-    userId,
-    walletType
-  );
-
-  /*
-   * Idempotency must be checked before
-   * changing the balance.
-   */
-  if (reference.idempotencyKey) {
-    const { rows } = await client.query(
-      `
-      SELECT id
-      FROM ledger
-      WHERE idempotency_key = $1
-      LIMIT 1
-      `,
-      [reference.idempotencyKey]
+  const account =
+    await getWalletForUpdate(
+      client,
+      userId,
+      walletType
     );
 
+  // ==================================================
+  // IDEMPOTENCY
+  // ==================================================
+
+  if (reference.idempotencyKey) {
+    const { rows } =
+      await client.query(
+        `
+        SELECT id
+        FROM ledger
+        WHERE idempotency_key = $1
+        LIMIT 1
+        `,
+        [
+          reference.idempotencyKey
+        ]
+      );
+
     if (rows.length) {
-      return Number(account.balance_cents);
+      return Number(
+        account.balance_cents
+      );
     }
   }
 
   const currentBalance =
     Number(account.balance_cents);
 
+  const lockedBalance =
+    Number(
+      account.locked_balance_cents || 0
+    );
+
+  const availableBalance =
+    currentBalance - lockedBalance;
+
+  // ==================================================
+  // DEBIT SAFETY
+  // ==================================================
+  //
+  // A debit must never consume locked funds.
+  //
+  // Example:
+  //
+  // balance = 25,000
+  // locked  = 10,000
+  // available = 15,000
+  //
+  // A 20,000 debit must fail.
+  // ==================================================
+
+  if (
+    deltaCents < 0 &&
+    availableBalance < Math.abs(deltaCents)
+  ) {
+    throw new Error(
+      'Insufficient available balance'
+    );
+  }
+
   const newBalance =
     currentBalance + deltaCents;
 
   if (newBalance < 0) {
-    throw new Error('Insufficient balance');
+    throw new Error(
+      'Insufficient balance'
+    );
   }
 
   await client.query(
     `
     UPDATE accounts
-    SET balance_cents = $1
+    SET
+      balance_cents = $1
     WHERE id = $2
     `,
     [
@@ -130,6 +216,10 @@ async function applyWalletDelta(
       account.id
     ]
   );
+
+  // ==================================================
+  // LEDGER
+  // ==================================================
 
   await client.query(
     `
@@ -144,7 +234,15 @@ async function applyWalletDelta(
       idempotency_key
     )
     VALUES
-    ($1,$2,$3,$4,$5,$6,$7)
+    (
+      $1,
+      $2,
+      $3,
+      $4,
+      $5,
+      $6,
+      $7
+    )
     `,
     [
       account.user_id,
@@ -156,6 +254,10 @@ async function applyWalletDelta(
       reference.idempotencyKey ?? null
     ]
   );
+
+  // ==================================================
+  // TRANSACTION HISTORY
+  // ==================================================
 
   await client.query(
     `
@@ -170,7 +272,15 @@ async function applyWalletDelta(
       meta
     )
     VALUES
-    ($1,$2,$3,$4,$5,$6,$7)
+    (
+      $1,
+      $2,
+      $3,
+      $4,
+      $5,
+      $6,
+      $7
+    )
     `,
     [
       account.user_id,
@@ -254,6 +364,18 @@ async function debitWallet(
 // ======================================================
 // LOCK FUNDS
 // ======================================================
+//
+// IMPORTANT:
+//
+// balance_cents DOES NOT CHANGE.
+//
+// Only locked_balance_cents increases.
+//
+// This is used for:
+// - active cycles
+// - pending withdrawals
+// - other temporary reservations
+// ======================================================
 
 async function lockFunds(
   client,
@@ -265,29 +387,34 @@ async function lockFunds(
     !Number.isInteger(amountCents) ||
     amountCents <= 0
   ) {
-    throw new Error('Invalid lock amount');
+    throw new Error(
+      'Invalid lock amount'
+    );
   }
 
-  const account = await getWalletForUpdate(
-    client,
-    userId,
-    walletType
-  );
+  const account =
+    await getWalletForUpdate(
+      client,
+      userId,
+      walletType
+    );
 
   const balance =
     Number(account.balance_cents);
 
   const locked =
-    Number(account.locked_balance_cents);
+    Number(
+      account.locked_balance_cents || 0
+    );
 
-  if (balance < amountCents) {
+  const available =
+    balance - locked;
+
+  if (available < amountCents) {
     throw new Error(
       `Insufficient available ${walletType} balance`
     );
   }
-
-  const newBalance =
-    balance - amountCents;
 
   const newLocked =
     locked + amountCents;
@@ -296,12 +423,10 @@ async function lockFunds(
     `
     UPDATE accounts
     SET
-      balance_cents = $1,
-      locked_balance_cents = $2
-    WHERE id = $3
+      locked_balance_cents = $1
+    WHERE id = $2
     `,
     [
-      newBalance,
       newLocked,
       account.id
     ]
@@ -309,15 +434,24 @@ async function lockFunds(
 
   return {
     accountId: account.id,
-    balance: newBalance,
+    accountType: walletType,
+    balance,
     locked: newLocked,
-    available: newBalance
+    available:
+      balance - newLocked
   };
 }
 
 
 // ======================================================
 // UNLOCK FUNDS
+// ======================================================
+//
+// IMPORTANT:
+//
+// balance_cents DOES NOT CHANGE.
+//
+// Only locked_balance_cents decreases.
 // ======================================================
 
 async function unlockFunds(
@@ -330,17 +464,25 @@ async function unlockFunds(
     !Number.isInteger(amountCents) ||
     amountCents <= 0
   ) {
-    throw new Error('Invalid unlock amount');
+    throw new Error(
+      'Invalid unlock amount'
+    );
   }
 
-  const account = await getWalletForUpdate(
-    client,
-    userId,
-    walletType
-  );
+  const account =
+    await getWalletForUpdate(
+      client,
+      userId,
+      walletType
+    );
+
+  const balance =
+    Number(account.balance_cents);
 
   const locked =
-    Number(account.locked_balance_cents);
+    Number(
+      account.locked_balance_cents || 0
+    );
 
   if (locked < amountCents) {
     throw new Error(
@@ -351,19 +493,14 @@ async function unlockFunds(
   const newLocked =
     locked - amountCents;
 
-  const newBalance =
-    Number(account.balance_cents) + amountCents;
-
   await client.query(
     `
     UPDATE accounts
     SET
-      balance_cents = $1,
-      locked_balance_cents = $2
-    WHERE id = $3
+      locked_balance_cents = $1
+    WHERE id = $2
     `,
     [
-      newBalance,
       newLocked,
       account.id
     ]
@@ -371,15 +508,24 @@ async function unlockFunds(
 
   return {
     accountId: account.id,
-    balance: newBalance,
+    accountType: walletType,
+    balance,
     locked: newLocked,
-    available: newBalance
+    available:
+      balance - newLocked
   };
 }
 
 
 // ======================================================
-// TRANSFER
+// TRANSFER BETWEEN ACCOUNTS
+// ======================================================
+//
+// Example:
+//
+// REFERRAL → LIVE
+//
+// Transfers only AVAILABLE funds.
 // ======================================================
 
 async function transferBetweenWallets(
@@ -390,6 +536,15 @@ async function transferBetweenWallets(
   amountCents,
   reference = {}
 ) {
+  if (
+    !fromWallet ||
+    !toWallet
+  ) {
+    throw new Error(
+      'Source and destination accounts are required'
+    );
+  }
+
   if (fromWallet === toWallet) {
     throw new Error(
       'Cannot transfer to same account'
@@ -448,6 +603,10 @@ async function transferBetweenWallets(
 // ======================================================
 // RESET ACCOUNT
 // ======================================================
+//
+// Administrative operation.
+// Resets balance, locked balance and profit.
+// ======================================================
 
 async function resetWallet(
   client,
@@ -464,11 +623,12 @@ async function resetWallet(
     );
   }
 
-  const account = await getWalletForUpdate(
-    client,
-    userId,
-    walletType
-  );
+  const account =
+    await getWalletForUpdate(
+      client,
+      userId,
+      walletType
+    );
 
   await client.query(
     `
@@ -497,7 +657,14 @@ async function resetWallet(
       meta
     )
     VALUES
-    ($1,$2,'WALLET_RESET',$3,$3,$4)
+    (
+      $1,
+      $2,
+      'WALLET_RESET',
+      $3,
+      $3,
+      $4
+    )
     `,
     [
       account.user_id,
