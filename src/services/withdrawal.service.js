@@ -87,35 +87,36 @@ async function createWithdrawalRequest(
     // ==================================================
     // AVAILABLE BALANCE
     //
-    // Total balance stays unchanged.
+    // balance_cents = total account funds
+    // locked_balance_cents = reserved funds
     //
-    // Available =
-    // balance - already locked funds
+    // available = balance - locked
     // ==================================================
 
     const availableCents =
       balanceCents - lockedBalanceCents;
 
     if (availableCents < amountCents) {
-      throw new Error('Insufficient available balance');
+      throw new Error(
+        'Insufficient available balance'
+      );
     }
 
     // ==================================================
     // LOCK WITHDRAWAL FUNDS
     //
-    // IMPORTANT:
-    //
-    // balance_cents DOES NOT change here.
+    // balance_cents DOES NOT change.
     //
     // Example:
     //
-    // balance:  25000
-    // locked:       0
+    // balance:   25000
+    // locked:        0
+    // available: 25000
     //
     // Withdraw 5000
     //
-    // balance:  25000
-    // locked:    5000
+    // balance:   25000
+    // locked:     5000
     // available: 20000
     // ==================================================
 
@@ -515,25 +516,25 @@ async function approveWithdrawal(withdrawalId, adminId) {
     // WITHDRAWAL_APPROVED
     // ==================================================
 
-      await applyWalletDelta(
-        client,
-        withdrawal.user_id,
-        'LIVE',
-        -amountCents,
-        'WITHDRAWAL_APPROVED',
-        {
-          refType: 'withdrawal',
-          refId: withdrawal.id,
-          idempotencyKey: `withdrawal:${withdrawal.id}:approved`,
-          reference: `WITHDRAWAL-${withdrawal.id}`,
-          meta: {
-            withdrawal_id: withdrawal.id,
-            method: withdrawal.method || null,
-            wallet_id: withdrawal.wallet_id,
-            approved_by: adminId
-          }
-        }
-      );
+await applyWalletDelta(
+  client,
+  withdrawal.user_id,
+  'LIVE',
+  -amountCents,
+  'WITHDRAWAL_APPROVED',
+  {
+    refType: 'withdrawal',
+    refId: withdrawal.id,
+    idempotencyKey: `withdrawal:${withdrawal.id}`,
+    reference: `WITHDRAWAL-${withdrawal.id}`,
+    meta: {
+      withdrawal_id: withdrawal.id,
+      method: withdrawal.method || null,
+      wallet_id: withdrawal.wallet_id,
+      approved_by: adminId
+    }
+  }
+);
 
     // ==================================================
     // UPDATE WITHDRAWAL
