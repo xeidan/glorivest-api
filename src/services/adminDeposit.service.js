@@ -2,11 +2,37 @@
 
 const { pool } = require('../config/database');
 
+/**
+ * Approve a user-marked deposit.
+ *
+ * Financial flow:
+ *
+ * deposits
+ *   ↓
+ * accounts.balance_cents
+ *   ↓
+ * ledger
+ *   ↓
+ * transactions
+ *
+ * Deposits always credit the LIVE account.
+ *
+ * IMPORTANT:
+ * - balance_cents = total available LIVE balance
+ * - locked_balance_cents = funds committed elsewhere
+ * - approving a deposit does NOT change locked_balance_cents
+ * - ledger is the immutable financial record
+ * - transactions is the user-facing transaction history
+ */
 async function approveDeposit(depositId, adminId) {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
+
+    // ==================================================
+    // LOCK DEPOSIT
+    // ==================================================
 
     const { rows } = await client.query(
       `
@@ -30,12 +56,25 @@ async function approveDeposit(depositId, adminId) {
 
     const deposit = rows[0];
 
-    if (
-      deposit.expires_at &&
-      new Date(deposit.expires_at) < new Date()
-    ) {
-      throw new Error('Deposit expired');
+    // ==================================================
+    // ALREADY SUCCESSFUL
+    //
+    // Safe idempotent behavior.
+    // ==================================================
+
+    if (deposit.status === 'SUCCESS') {
+      await client.query('COMMIT');
+
+      return {
+        success: true,
+        alreadyProcessed: true,
+        depositId: deposit.id
+      };
     }
+
+    // ==================================================
+    // VALIDATE STATE
+    // ==================================================
 
     if (deposit.status !== 'USER_MARKED_PAID') {
       throw new Error(
@@ -43,10 +82,26 @@ async function approveDeposit(depositId, adminId) {
       );
     }
 
-    /*
-     * Deposits always credit the LIVE account.
-     * DEMO and REFERRAL balances remain untouched.
-     */
+
+
+    // ==================================================
+    // AMOUNT
+    // ==================================================
+
+    const amountCents =
+      Number(deposit.amount_exact_cents);
+
+    if (
+      !Number.isInteger(amountCents) ||
+      amountCents <= 0
+    ) {
+      throw new Error('Invalid deposit amount');
+    }
+
+    // ==================================================
+    // LOCK LIVE ACCOUNT
+    // ==================================================
+
     const accountRes = await client.query(
       `
       SELECT
@@ -54,7 +109,8 @@ async function approveDeposit(depositId, adminId) {
         user_id,
         account_type,
         balance_cents,
-        locked_balance_cents
+        locked_balance_cents,
+        status
       FROM accounts
       WHERE user_id = $1
         AND account_type = 'LIVE'
@@ -70,42 +126,54 @@ async function approveDeposit(depositId, adminId) {
 
     const account = accountRes.rows[0];
 
-    const amountCents =
-      Number(deposit.amount_exact_cents);
-
-    if (
-      !Number.isInteger(amountCents) ||
-      amountCents <= 0
-    ) {
-      throw new Error('Invalid deposit amount');
+    if (account.status !== 'ACTIVE') {
+      throw new Error('LIVE account is not active');
     }
 
+    // ==================================================
+    // IDEMPOTENCY CHECK
+    //
+    // One deposit can produce only one financial
+    // ledger entry.
+    // ==================================================
+
+    const idempotencyKey =
+      `deposit:${deposit.id}`;
+
+    const existingLedger = await client.query(
+      `
+      SELECT
+        id,
+        account_id,
+        amount_cents
+      FROM ledger
+      WHERE idempotency_key = $1
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [idempotencyKey]
+    );
+
+    if (existingLedger.rows.length) {
+      throw new Error(
+        'Deposit has already been processed'
+      );
+    }
+
+    // ==================================================
+    // CALCULATE NEW BALANCE
+    // ==================================================
+
     const currentBalance =
-      Number(account.balance_cents);
+      Number(account.balance_cents || 0);
 
     const newBalance =
       currentBalance + amountCents;
 
-    /*
-     * Idempotency protection.
-     */
-    const existingLedger = await client.query(
-      `
-      SELECT id
-      FROM ledger
-      WHERE idempotency_key = $1
-      LIMIT 1
-      `,
-      [`deposit:${deposit.id}`]
-    );
+    // ==================================================
+    // CREDIT LIVE ACCOUNT
+    // ==================================================
 
-    if (existingLedger.rows.length) {
-      throw new Error('Deposit has already been processed');
-    }
-
-    /*
-     * Update LIVE account balance.
-     */
     await client.query(
       `
       UPDATE accounts
@@ -119,9 +187,10 @@ async function approveDeposit(depositId, adminId) {
       ]
     );
 
-    /*
-     * Immutable ledger entry.
-     */
+    // ==================================================
+    // IMMUTABLE LEDGER ENTRY
+    // ==================================================
+
     await client.query(
       `
       INSERT INTO ledger
@@ -150,13 +219,16 @@ async function approveDeposit(depositId, adminId) {
         account.id,
         amountCents,
         deposit.id,
-        `deposit:${deposit.id}`
+        idempotencyKey
       ]
     );
 
-    /*
-     * User transaction history.
-     */
+    // ==================================================
+    // USER TRANSACTION HISTORY
+    //
+    // This is what the frontend transaction UI can read.
+    // ==================================================
+
     await client.query(
       `
       INSERT INTO transactions
@@ -185,17 +257,19 @@ async function approveDeposit(depositId, adminId) {
         account.id,
         amountCents,
         newBalance,
-        deposit.reference,
+        deposit.reference || null,
         JSON.stringify({
           deposit_id: deposit.id,
-          account_type: 'LIVE'
+          account_type: 'LIVE',
+          approved_by: adminId
         })
       ]
     );
 
-    /*
-     * Mark deposit successful.
-     */
+    // ==================================================
+    // MARK DEPOSIT SUCCESS
+    // ==================================================
+
     await client.query(
       `
       UPDATE deposits
@@ -207,16 +281,7 @@ async function approveDeposit(depositId, adminId) {
       [deposit.id]
     );
 
-    /*
-     * Admin audit log.
-     *
-     * Keep this optional because the table may not exist
-     * in every environment.
-     */
-    console.log(
-      `Deposit ${deposit.id} approved by admin ${adminId} ` +
-      `for LIVE account ${account.id}`
-    );
+
 
     await client.query('COMMIT');
 
