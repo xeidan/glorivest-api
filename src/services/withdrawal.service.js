@@ -466,24 +466,25 @@ async function approveWithdrawal(withdrawalId, adminId) {
     // WITHDRAWAL_APPROVED
     // ==================================================
 
-    await applyWalletDelta(
-      client,
-      withdrawal.user_id,
-      'LIVE',
-      -amountCents,
-      'WITHDRAWAL_APPROVED',
-      {
-        refType: 'withdrawal',
-        refId: withdrawal.id,
-        reference: `WITHDRAWAL-${withdrawal.id}`,
-        meta: {
-          withdrawal_id: withdrawal.id,
-          method: withdrawal.method || null,
-          wallet_id: withdrawal.wallet_id,
-          approved_by: adminId
+      await applyWalletDelta(
+        client,
+        withdrawal.user_id,
+        'LIVE',
+        -amountCents,
+        'WITHDRAWAL_APPROVED',
+        {
+          refType: 'withdrawal',
+          refId: withdrawal.id,
+          idempotencyKey: `withdrawal:${withdrawal.id}:approved`,
+          reference: `WITHDRAWAL-${withdrawal.id}`,
+          meta: {
+            withdrawal_id: withdrawal.id,
+            method: withdrawal.method || null,
+            wallet_id: withdrawal.wallet_id,
+            approved_by: adminId
+          }
         }
-      }
-    );
+      );
 
     // ==================================================
     // UPDATE WITHDRAWAL
