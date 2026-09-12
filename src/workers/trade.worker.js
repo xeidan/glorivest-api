@@ -8,7 +8,7 @@ const {
 const cycleService = require('../services/cycle.service');
 
 const INTERVAL = Number(
-  process.env.TRADE_WORKER_INTERVAL_MS || 60000
+  process.env.TRADE_WORKER_INTERVAL_MS || 5000
 );
 
 async function runOnce() {
