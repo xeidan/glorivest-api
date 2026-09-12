@@ -2,38 +2,74 @@
 
 const { pool } = require('../config/database');
 
-const SYMBOLS = [
-  'BTCUSDT',
-  'ETHUSDT',
-  'XAUUSD',
-  'EURUSD'
-];
+/*
+|--------------------------------------------------------------------------
+| MOCK MARKET
+|--------------------------------------------------------------------------
+| These are simulated reference prices.
+| The engine applies a small random movement to create realistic-looking
+| entry and exit prices.
+|--------------------------------------------------------------------------
+*/
+
+const MARKET = {
+  BTCUSDT: 112000,
+  ETHUSDT: 4300,
+  XAUUSD: 3650,
+  EURUSD: 1.17
+};
+
+const SYMBOLS = Object.keys(MARKET);
+
+const MAX_TRADES_PER_DAY = 7;
+const RISK_PERCENT = 0.002; // 0.2%
+const WIN_RATE = 0.70;
 
 function randomBetween(min, max) {
   return Math.random() * (max - min) + min;
 }
 
-async function fetchLatestPrice(client, symbol) {
-  const { rows } = await client.query(
-    `
-    SELECT price
-    FROM market_prices
-    WHERE symbol = $1
-    ORDER BY recorded_at DESC
-    LIMIT 1
-    `,
-    [symbol]
-  );
+function getMockPrice(symbol) {
+  const basePrice = MARKET[symbol];
 
-  if (!rows.length) {
+  if (!basePrice) {
     return null;
   }
 
-  return Number(rows[0].price);
+  /*
+   * Small random market movement around the reference price.
+   * This prevents every trade from having the exact same price.
+   */
+  const marketMove = randomBetween(-0.001, 0.001);
+
+  return basePrice * (1 + marketMove);
+}
+
+function calculatePnl(
+  side,
+  entryPrice,
+  exitPrice,
+  qty
+) {
+  if (side === 'LONG') {
+    return (
+      (exitPrice - entryPrice) *
+      qty
+    );
+  }
+
+  if (side === 'SHORT') {
+    return (
+      (entryPrice - exitPrice) *
+      qty
+    );
+  }
+
+  return 0;
 }
 
 async function generateTradesForCycle(cycle) {
-  if (cycle.status !== 'RUNNING') {
+  if (!cycle || cycle.status !== 'RUNNING') {
     return;
   }
 
@@ -41,6 +77,12 @@ async function generateTradesForCycle(cycle) {
 
   try {
     await client.query('BEGIN');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Lock the cycle
+    |--------------------------------------------------------------------------
+    */
 
     const cycleRes = await client.query(
       `
@@ -60,14 +102,29 @@ async function generateTradesForCycle(cycle) {
 
     const lockedCycle = cycleRes.rows[0];
 
-    if (new Date() >= new Date(lockedCycle.ends_at)) {
+    /*
+    |--------------------------------------------------------------------------
+    | Check cycle expiry
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+      lockedCycle.ends_at &&
+      new Date() >= new Date(lockedCycle.ends_at)
+    ) {
       await client.query('COMMIT');
       return;
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | Maximum trades per cycle per day
+    |--------------------------------------------------------------------------
+    */
+
     const todayTrades = await client.query(
       `
-      SELECT COUNT(*)
+      SELECT COUNT(*) AS count
       FROM positions
       WHERE cycle_id = $1
         AND DATE(opened_at) = CURRENT_DATE
@@ -75,10 +132,19 @@ async function generateTradesForCycle(cycle) {
       [lockedCycle.id]
     );
 
-    if (Number(todayTrades.rows[0].count) >= 7) {
+    if (
+      Number(todayTrades.rows[0].count) >=
+      MAX_TRADES_PER_DAY
+    ) {
       await client.query('COMMIT');
       return;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Calculate simulated trading balance
+    |--------------------------------------------------------------------------
+    */
 
     let balance =
       Number(lockedCycle.capital_cents) / 100;
@@ -89,7 +155,8 @@ async function generateTradesForCycle(cycle) {
         side,
         qty,
         entry_price,
-        exit_price
+        exit_price,
+        pnl
       FROM positions
       WHERE cycle_id = $1
         AND status = 'CLOSED'
@@ -99,9 +166,15 @@ async function generateTradesForCycle(cycle) {
 
     for (const trade of closedTrades.rows) {
       const pnl =
-        trade.side === 'LONG'
-          ? (Number(trade.exit_price) - Number(trade.entry_price)) * Number(trade.qty)
-          : (Number(trade.entry_price) - Number(trade.exit_price)) * Number(trade.qty);
+        trade.pnl !== null &&
+        trade.pnl !== undefined
+          ? Number(trade.pnl)
+          : calculatePnl(
+              trade.side,
+              Number(trade.entry_price),
+              Number(trade.exit_price),
+              Number(trade.qty)
+            );
 
       balance += pnl;
     }
@@ -111,60 +184,96 @@ async function generateTradesForCycle(cycle) {
       return;
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | Select simulated asset
+    |--------------------------------------------------------------------------
+    */
+
     const symbol =
-      SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+      SYMBOLS[
+        Math.floor(
+          Math.random() * SYMBOLS.length
+        )
+      ];
 
     const entryPrice =
-      await fetchLatestPrice(client, symbol);
+      getMockPrice(symbol);
 
-    if (!entryPrice) {
+    if (!entryPrice || entryPrice <= 0) {
       await client.query('COMMIT');
       return;
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Select direction
+    |--------------------------------------------------------------------------
+    */
 
     const side =
-      Math.random() >= 0.5 ? 'LONG' : 'SHORT';
+      Math.random() >= 0.5
+        ? 'LONG'
+        : 'SHORT';
 
-    const riskAmount = balance * 0.002;
+    /*
+    |--------------------------------------------------------------------------
+    | Position sizing
+    |--------------------------------------------------------------------------
+    */
 
-    const qty = riskAmount / entryPrice;
+    const riskAmount =
+      balance * RISK_PERCENT;
 
-    if (qty <= 0) {
+    const qty =
+      riskAmount / entryPrice;
+
+    if (!Number.isFinite(qty) || qty <= 0) {
       await client.query('COMMIT');
       return;
     }
 
-    const isWin = Math.random() < 0.70;
+    /*
+    |--------------------------------------------------------------------------
+    | Simulate trade result
+    |--------------------------------------------------------------------------
+    */
 
-    const movePct = randomBetween(
-      0.0005,
-      0.0015
+    const isWin =
+      Math.random() < WIN_RATE;
+
+    const movePct =
+      randomBetween(0.0005, 0.0015);
+
+    let exitPrice;
+
+    if (side === 'LONG') {
+      exitPrice = isWin
+        ? entryPrice * (1 + movePct)
+        : entryPrice * (1 - movePct);
+    } else {
+      exitPrice = isWin
+        ? entryPrice * (1 - movePct)
+        : entryPrice * (1 + movePct);
+    }
+
+    const pnl = calculatePnl(
+      side,
+      entryPrice,
+      exitPrice,
+      qty
     );
 
-    const exitPrice =
-      side === 'LONG'
-        ? (
-            isWin
-              ? entryPrice * (1 + movePct)
-              : entryPrice * (1 - movePct)
-          )
-        : (
-            isWin
-              ? entryPrice * (1 - movePct)
-              : entryPrice * (1 + movePct)
-          );
-
-    const pnl =
-      side === 'LONG'
-        ? (exitPrice - entryPrice) * qty
-        : (entryPrice - exitPrice) * qty;
+    /*
+    |--------------------------------------------------------------------------
+    | Insert simulated position
+    |--------------------------------------------------------------------------
+    */
 
     await client.query(
       `
       INSERT INTO positions
       (
-        account_id,
-        cycle_id,
         user_id,
         symbol,
         side,
@@ -172,10 +281,15 @@ async function generateTradesForCycle(cycle) {
         entry_price,
         exit_price,
         pnl,
+        fees,
         status,
         opened_at,
         closed_at,
-        source
+        duration_sec,
+        strategy,
+        notes,
+        cycle_id,
+        account_id
       )
       VALUES
       (
@@ -187,27 +301,45 @@ async function generateTradesForCycle(cycle) {
         $6,
         $7,
         $8,
-        $9,
         'CLOSED',
         NOW(),
         NOW(),
-        'SIMULATION'
+        $9,
+        $10,
+        $11,
+        $12,
+        $13
       )
       `,
       [
-        lockedCycle.account_id,
-        lockedCycle.id,
         lockedCycle.user_id,
         symbol,
         side,
         qty,
         entryPrice,
         exitPrice,
-        pnl
+        pnl,
+        0,
+        60,
+        'MOCK_BOT',
+        isWin
+          ? 'Simulated winning position'
+          : 'Simulated losing position',
+        lockedCycle.id,
+        lockedCycle.account_id
       ]
     );
 
     await client.query('COMMIT');
+
+    console.log(
+      `[MOCK TRADE] Cycle ${lockedCycle.id} | ` +
+      `${symbol} ${side} | ` +
+      `Entry ${entryPrice.toFixed(2)} | ` +
+      `Exit ${exitPrice.toFixed(2)} | ` +
+      `P/L ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`
+    );
+
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
