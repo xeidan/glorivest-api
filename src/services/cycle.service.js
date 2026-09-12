@@ -124,33 +124,7 @@ async function startCycle({
       );
     }
 
-    // -------------------------------------------------
-    // Prevent multiple active cycles
-    // -------------------------------------------------
 
-    const running = await client.query(
-      `
-      SELECT id
-      FROM cycles
-      WHERE account_id = $1
-        AND status = 'RUNNING'
-      LIMIT 1
-      FOR UPDATE
-      `,
-      [account.id]
-    );
-
-    if (running.rows.length) {
-      throw new Error(
-        'An active cycle already exists'
-      );
-    }
-
-    const currentBalance =
-      Number(account.balance_cents);
-
-    const currentLocked =
-      Number(account.locked_balance_cents || 0);
 
     // -------------------------------------------------
     // DEMO
