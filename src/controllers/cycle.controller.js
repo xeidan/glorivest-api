@@ -8,14 +8,14 @@ const cycleService = require('../services/cycle.service');
 
 async function startCycle({
   userId,
-  walletId,
+  accountType,
   capitalAmount,
   expectedProfit,
   durationMonths
 }) {
   return cycleService.startCycle({
     userId,
-    walletId,
+    accountType,
     capitalAmount,
     expectedProfit,
     durationMonths
