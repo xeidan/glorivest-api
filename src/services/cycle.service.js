@@ -124,6 +124,12 @@ async function startCycle({
       );
     }
 
+    const currentBalance =
+      Number(account.balance_cents);
+
+    const currentLocked =
+      Number(account.locked_balance_cents || 0);
+
 
 
     // -------------------------------------------------
