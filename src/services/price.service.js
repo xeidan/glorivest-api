@@ -1,12 +1,15 @@
+// src/services/price.service.js
+
 'use strict';
 
 const fetch = require('node-fetch');
 
-const BINANCE_BASE_URL = 'https://api.binance.com/api/v3';
+const BINANCE_API = 'https://api.binance.com';
+const BINANCE_DATA_API = 'https://data-api.binance.vision';
 
 async function getLatestPrice(symbol) {
   const res = await fetch(
-    `${BINANCE_BASE_URL}/ticker/price?symbol=${encodeURIComponent(symbol)}`
+    `${BINANCE_API}/api/v3/ticker/price?symbol=${encodeURIComponent(symbol)}`
   );
 
   if (!res.ok) {
@@ -23,48 +26,30 @@ async function getLatestPrice(symbol) {
   return price;
 }
 
-async function getHistoricalCandles(
-  symbol,
-  interval = '1m',
-  limit = 100
-) {
-  const allowedIntervals = [
-    '1m',
-    '5m',
-    '15m',
-    '30m',
-    '1h',
-    '4h',
-    '1d',
-    '1w',
-    '1M'
-  ];
-
-  if (!allowedIntervals.includes(interval)) {
-    throw new Error(`Unsupported Binance interval: ${interval}`);
-  }
-
-  const safeLimit = Math.min(
-    Math.max(Number(limit) || 100, 1),
-    1000
-  );
-
+async function getHistoricalCandles(symbol, interval, limit = 100) {
   const url =
-    `${BINANCE_BASE_URL}/klines` +
+    `${BINANCE_DATA_API}/api/v3/klines` +
     `?symbol=${encodeURIComponent(symbol)}` +
     `&interval=${encodeURIComponent(interval)}` +
-    `&limit=${safeLimit}`;
+    `&limit=${limit}`;
 
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Glorivest/1.0'
+    }
+  });
 
   if (!res.ok) {
-    throw new Error(`Binance candles request failed: ${res.status}`);
+    const body = await res.text().catch(() => '');
+    throw new Error(
+      `Binance candles request failed: ${res.status}${body ? ` - ${body}` : ''}`
+    );
   }
 
   const data = await res.json();
 
   if (!Array.isArray(data)) {
-    throw new Error(`Invalid Binance candles response for ${symbol}`);
+    throw new Error('Invalid Binance candles response');
   }
 
   return data.map(candle => ({
