@@ -1,77 +1,97 @@
-'use strict';
-
-const { pool } = require('../config/database');
-
-const MIN_INTERVAL_MS = 5_000;          // anti-spam
-const MAX_PRICE_AGE_MS = 60_000;        // reject stale data
-const MAX_REASONABLE_PRICES = {
-  BTCUSDT: [20000, 200000],
-  ETHUSDT: [500, 20000],
-  XAUUSD:  [1000, 10000],
-  EURUSD:  [0.5, 2]
-};
-
-async function recordMarketSnapshot(req, res) {
+async function getMarketCandles(req, res) {
   try {
-    const { symbol, price, source = 'external' } = req.body;
+    const symbol = String(req.query.symbol || '').toUpperCase();
+    const interval = String(req.query.interval || '1min').toLowerCase();
+    const limit = Math.min(
+      Math.max(Number.parseInt(req.query.limit || '100', 10), 1),
+      500
+    );
 
-    /* ---------------- VALIDATION ---------------- */
+    const supportedSymbols = Object.keys(MAX_REASONABLE_PRICES);
+    const supportedIntervals = ['1min'];
 
-    if (!symbol || typeof symbol !== 'string') {
-      return res.status(400).json({ message: 'Invalid or missing symbol' });
-    }
-
-    if (typeof price !== 'number' || !Number.isFinite(price)) {
-      return res.status(400).json({ message: 'Invalid price' });
-    }
-
-    if (!MAX_REASONABLE_PRICES[symbol]) {
-      return res.status(400).json({ message: `Unsupported symbol ${symbol}` });
-    }
-
-    const [min, max] = MAX_REASONABLE_PRICES[symbol];
-    if (price < min || price > max) {
+    if (!supportedSymbols.includes(symbol)) {
       return res.status(400).json({
-        message: `Price ${price} outside sane range for ${symbol}`
+        message: `Unsupported symbol ${symbol}`
       });
     }
 
-    /* ---------------- RATE LIMIT ---------------- */
+    if (!supportedIntervals.includes(interval)) {
+      return res.status(400).json({
+        message: `Unsupported interval ${interval}`
+      });
+    }
 
     const { rows } = await pool.query(
       `
-      SELECT recorded_at
+      SELECT
+        recorded_at,
+        price
       FROM market_prices
       WHERE symbol = $1
       ORDER BY recorded_at DESC
-      LIMIT 1
+      LIMIT $2
       `,
-      [symbol]
+      [symbol, limit]
     );
 
-    if (rows.length) {
-      const lastTs = new Date(rows[0].recorded_at).getTime();
-      if (Date.now() - lastTs < MIN_INTERVAL_MS) {
-        return res.json({ ok: true, skipped: true });
+    /*
+     * Convert market snapshots into 1-minute OHLC candles.
+     */
+    const candles = new Map();
+
+    for (const row of rows) {
+      const timestamp = new Date(row.recorded_at);
+      const price = Number(row.price);
+
+      if (!Number.isFinite(price)) continue;
+
+      const minute = new Date(
+        Math.floor(timestamp.getTime() / 60_000) * 60_000
+      );
+
+      const key = minute.getTime();
+
+      if (!candles.has(key)) {
+        candles.set(key, {
+          time: Math.floor(key / 1000),
+          open: price,
+          high: price,
+          low: price,
+          close: price
+        });
+      } else {
+        const candle = candles.get(key);
+
+        candle.high = Math.max(candle.high, price);
+        candle.low = Math.min(candle.low, price);
+
+        // Because rows are newest -> oldest,
+        // the first price encountered is the close.
+        candle.open = price;
       }
     }
 
-    /* ---------------- INSERT ---------------- */
+    const result = Array.from(candles.values())
+      .sort((a, b) => a.time - b.time)
+      .slice(-limit);
 
-    await pool.query(
-      `
-      INSERT INTO market_prices (symbol, price, source)
-      VALUES ($1, $2, $3)
-      `,
-      [symbol, price, source]
-    );
-
-    return res.json({ ok: true });
+    return res.json({
+      symbol,
+      interval,
+      candles: result
+    });
 
   } catch (err) {
-    console.error('❌ recordMarketSnapshot error:', err);
-    return res.status(500).json({ message: 'Snapshot failed' });
+    console.error('❌ getMarketCandles error:', err);
+
+    return res.status(500).json({
+      message: 'Failed to load market candles'
+    });
   }
 }
 
-module.exports = { recordMarketSnapshot };
+module.exports = {
+  recordMarketSnapshot,
+  getMarketCandles
+};
