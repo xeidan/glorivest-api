@@ -31,7 +31,6 @@ const corsOptions = {
   origin: function (origin, callback) {
 
     // Allow requests with no Origin header
-    // such as server-to-server requests.
     if (!origin) {
       return callback(null, true);
     }
@@ -40,14 +39,9 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    console.warn(
-      '[CORS] Blocked origin:',
-      origin
-    );
+    console.warn('[CORS] Blocked origin:', origin);
 
-    return callback(
-      new Error('Not allowed by CORS')
-    );
+    return callback(new Error('Not allowed by CORS'));
   },
 
   credentials: true,
@@ -71,7 +65,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
+app.options('*', cors(corsOptions));
 /* ======================================================
    BODY PARSERS
 ====================================================== */
