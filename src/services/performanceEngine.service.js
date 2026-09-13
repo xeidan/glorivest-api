@@ -6,9 +6,9 @@ const { pool } = require('../config/database');
 |--------------------------------------------------------------------------
 | MOCK MARKET
 |--------------------------------------------------------------------------
-| These are simulated reference prices.
-| The engine applies a small random movement to create realistic-looking
-| entry and exit prices.
+| Simulated reference prices.
+| These prices are only used for displaying realistic entry/exit prices.
+| They do NOT determine the user's actual cycle entitlement.
 |--------------------------------------------------------------------------
 */
 
@@ -21,9 +21,30 @@ const MARKET = {
 
 const SYMBOLS = Object.keys(MARKET);
 
+/*
+|--------------------------------------------------------------------------
+| MOCK BOT CONFIGURATION
+|--------------------------------------------------------------------------
+*/
+
 const MAX_TRADES_PER_DAY = 7;
-const RISK_PERCENT = 0.002; // 0.2%
-const WIN_RATE = 0.70;
+
+// Probability that a simulated trade is profitable.
+const WIN_RATE = 0.60;
+
+// Winning trades generate a percentage return based on current equity.
+const WIN_RETURN_MIN = 0.004; // +0.40%
+const WIN_RETURN_MAX = 0.012; // +1.20%
+
+// Losing trades lose a percentage of current equity.
+const LOSS_RETURN_MIN = 0.002; // -0.20%
+const LOSS_RETURN_MAX = 0.006; // -0.60%
+
+/*
+|--------------------------------------------------------------------------
+| Helpers
+|--------------------------------------------------------------------------
+*/
 
 function randomBetween(min, max) {
   return Math.random() * (max - min) + min;
@@ -36,10 +57,7 @@ function getMockPrice(symbol) {
     return null;
   }
 
-  /*
-   * Small random market movement around the reference price.
-   * This prevents every trade from having the exact same price.
-   */
+  // Simulate small market movement around reference price.
   const marketMove = randomBetween(-0.001, 0.001);
 
   return basePrice * (1 + marketMove);
@@ -51,14 +69,14 @@ function calculatePnl(
   exitPrice,
   qty
 ) {
-  if (side === 'LONG') {
+  if (side === 'BUY') {
     return (
       (exitPrice - entryPrice) *
       qty
     );
   }
 
-  if (side === 'SHORT') {
+  if (side === 'SELL') {
     return (
       (entryPrice - exitPrice) *
       qty
@@ -67,6 +85,12 @@ function calculatePnl(
 
   return 0;
 }
+
+/*
+|--------------------------------------------------------------------------
+| Generate one simulated trade
+|--------------------------------------------------------------------------
+*/
 
 async function generateTradesForCycle(cycle) {
   if (!cycle || cycle.status !== 'RUNNING') {
@@ -80,7 +104,7 @@ async function generateTradesForCycle(cycle) {
 
     /*
     |--------------------------------------------------------------------------
-    | Lock the cycle
+    | Lock cycle
     |--------------------------------------------------------------------------
     */
 
@@ -142,7 +166,20 @@ async function generateTradesForCycle(cycle) {
 
     /*
     |--------------------------------------------------------------------------
-    | Calculate simulated trading balance
+    | Calculate current simulated equity
+    |--------------------------------------------------------------------------
+    |
+    | IMPORTANT:
+    |
+    | The bot's simulated P/L compounds from the cycle's capital.
+    |
+    | Example:
+    |
+    | $100 cycle +1% = +$1
+    | $500 cycle +1% = +$5
+    | $10,000 cycle +1% = +$100
+    |
+    | This is completely independent of the user's actual entitlement.
     |--------------------------------------------------------------------------
     */
 
@@ -152,34 +189,25 @@ async function generateTradesForCycle(cycle) {
     const closedTrades = await client.query(
       `
       SELECT
-        side,
-        qty,
-        entry_price,
-        exit_price,
         pnl
       FROM positions
       WHERE cycle_id = $1
         AND status = 'CLOSED'
+      ORDER BY id ASC
       `,
       [lockedCycle.id]
     );
 
     for (const trade of closedTrades.rows) {
-      const pnl =
+      if (
         trade.pnl !== null &&
         trade.pnl !== undefined
-          ? Number(trade.pnl)
-          : calculatePnl(
-              trade.side,
-              Number(trade.entry_price),
-              Number(trade.exit_price),
-              Number(trade.qty)
-            );
-
-      balance += pnl;
+      ) {
+        balance += Number(trade.pnl);
+      }
     }
 
-    if (balance <= 0) {
+    if (!Number.isFinite(balance) || balance <= 0) {
       await client.query('COMMIT');
       return;
     }
@@ -200,69 +228,122 @@ async function generateTradesForCycle(cycle) {
     const entryPrice =
       getMockPrice(symbol);
 
-    if (!entryPrice || entryPrice <= 0) {
+    if (
+      !entryPrice ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0
+    ) {
       await client.query('COMMIT');
       return;
     }
 
     /*
     |--------------------------------------------------------------------------
-    | Select direction
+    | Select BUY / SELL
     |--------------------------------------------------------------------------
     */
 
     const side =
       Math.random() >= 0.5
-        ? 'LONG'
-        : 'SHORT';
-
-    /*
-    |--------------------------------------------------------------------------
-    | Position sizing
-    |--------------------------------------------------------------------------
-    */
-
-    const riskAmount =
-      balance * RISK_PERCENT;
-
-    const qty =
-      riskAmount / entryPrice;
-
-    if (!Number.isFinite(qty) || qty <= 0) {
-      await client.query('COMMIT');
-      return;
-    }
+        ? 'BUY'
+        : 'SELL';
 
     /*
     |--------------------------------------------------------------------------
     | Simulate trade result
+    |--------------------------------------------------------------------------
+    |
+    | P/L is based directly on current cycle equity.
+    | It is NOT a hard-coded dollar amount.
     |--------------------------------------------------------------------------
     */
 
     const isWin =
       Math.random() < WIN_RATE;
 
-    const movePct =
-      randomBetween(0.0005, 0.0015);
+    const returnPct = isWin
+      ? randomBetween(
+          WIN_RETURN_MIN,
+          WIN_RETURN_MAX
+        )
+      : -randomBetween(
+          LOSS_RETURN_MIN,
+          LOSS_RETURN_MAX
+        );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Capital-based P/L
+    |--------------------------------------------------------------------------
+    */
+
+    const pnl =
+      balance * returnPct;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Simulated position size
+    |--------------------------------------------------------------------------
+    |
+    | Position size is calculated separately because the P/L model
+    | is based on account equity rather than quantity.
+    |
+    | This keeps the displayed position realistic without allowing
+    | quantity to distort the intended simulated return.
+    |--------------------------------------------------------------------------
+    */
+
+    const notionalValue =
+      balance *
+      randomBetween(0.25, 1.0);
+
+    const qty =
+      notionalValue / entryPrice;
+
+    if (
+      !Number.isFinite(qty) ||
+      qty <= 0
+    ) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Calculate exit price from the intended P/L
+    |--------------------------------------------------------------------------
+    |
+    | This ensures:
+    |
+    | displayed entry price
+    | +
+    | displayed exit price
+    | +
+    | displayed quantity
+    |
+    | mathematically produce the same P/L recorded in the database.
+    |--------------------------------------------------------------------------
+    */
 
     let exitPrice;
 
-    if (side === 'LONG') {
-      exitPrice = isWin
-        ? entryPrice * (1 + movePct)
-        : entryPrice * (1 - movePct);
+    if (side === 'BUY') {
+      exitPrice =
+        entryPrice +
+        (pnl / qty);
     } else {
-      exitPrice = isWin
-        ? entryPrice * (1 - movePct)
-        : entryPrice * (1 + movePct);
+      exitPrice =
+        entryPrice -
+        (pnl / qty);
     }
 
-    const pnl = calculatePnl(
-      side,
-      entryPrice,
-      exitPrice,
-      qty
-    );
+    if (
+      !Number.isFinite(exitPrice) ||
+      exitPrice <= 0
+    ) {
+      await client.query('COMMIT');
+      return;
+    }
 
     /*
     |--------------------------------------------------------------------------
@@ -332,12 +413,18 @@ async function generateTradesForCycle(cycle) {
 
     await client.query('COMMIT');
 
+    /*
+    |--------------------------------------------------------------------------
+    | Logging
+    |--------------------------------------------------------------------------
+    */
+
     console.log(
       `[MOCK TRADE] Cycle ${lockedCycle.id} | ` +
       `${symbol} ${side} | ` +
-      `Entry ${entryPrice.toFixed(2)} | ` +
-      `Exit ${exitPrice.toFixed(2)} | ` +
-      `P/L ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`
+      `Capital $${balance.toFixed(2)} | ` +
+      `Return ${(returnPct * 100).toFixed(2)}% | ` +
+      `P/L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`
     );
 
   } catch (err) {

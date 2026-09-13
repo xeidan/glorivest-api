@@ -1,5 +1,7 @@
 'use strict';
 
+require('dotenv').config();
+
 if (process.env.ENABLE_WORKER !== 'true') {
   console.log('[worker] disabled');
   process.exit(0);
