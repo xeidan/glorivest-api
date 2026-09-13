@@ -93,7 +93,7 @@ app.use(morgan('dev'));
 ====================================================== */
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false
 });
