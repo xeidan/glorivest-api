@@ -116,69 +116,89 @@ async function getMarketCandles(req, res) {
       });
     }
 
-    if (interval !== '1min') {
+    const intervalSeconds = {
+      '1min': 60,
+      '5min': 300,
+      '15min': 900,
+      '30min': 1800,
+      '1h': 3600,
+      '4h': 14400,
+      '1day': 86400,
+      '1week': 604800
+    };
+
+    const bucketSeconds = intervalSeconds[interval];
+
+    if (!bucketSeconds) {
       return res.status(400).json({
         message: `Unsupported interval ${interval}`
       });
     }
 
-    /*
-     * Get recent market snapshots.
-     */
     const { rows } = await pool.query(
       `
-      SELECT recorded_at, price
-      FROM market_prices
-      WHERE symbol = $1
-      ORDER BY recorded_at DESC
-      LIMIT $2
+      WITH bucketed AS (
+        SELECT
+          to_timestamp(
+            floor(extract(epoch FROM recorded_at) / $2) * $2
+          ) AS candle_time,
+          price,
+          recorded_at
+        FROM market_prices
+        WHERE symbol = $1
+      ),
+
+      candles AS (
+        SELECT
+          candle_time,
+
+          (
+            SELECT b2.price
+            FROM bucketed b2
+            WHERE b2.candle_time = b1.candle_time
+            ORDER BY b2.recorded_at ASC
+            LIMIT 1
+          ) AS open,
+
+          MAX(price) AS high,
+          MIN(price) AS low,
+
+          (
+            SELECT b3.price
+            FROM bucketed b3
+            WHERE b3.candle_time = b1.candle_time
+            ORDER BY b3.recorded_at DESC
+            LIMIT 1
+          ) AS close
+
+        FROM bucketed b1
+        GROUP BY candle_time
+        ORDER BY candle_time DESC
+        LIMIT $3
+      )
+
+      SELECT
+        EXTRACT(EPOCH FROM candle_time)::BIGINT AS time,
+        open,
+        high,
+        low,
+        close
+      FROM candles
+      ORDER BY candle_time ASC
       `,
-      [symbol, limit * 10]
+      [symbol, bucketSeconds, limit]
     );
-
-    /*
-     * Convert snapshots into 1-minute OHLC candles.
-     */
-    const candles = new Map();
-
-    for (const row of rows) {
-      const timestamp = new Date(row.recorded_at).getTime();
-      const price = Number(row.price);
-
-      if (!Number.isFinite(timestamp) || !Number.isFinite(price)) {
-        continue;
-      }
-
-      const minuteTimestamp =
-        Math.floor(timestamp / 60000) * 60000;
-
-      const key = minuteTimestamp;
-
-      if (!candles.has(key)) {
-        candles.set(key, {
-          time: Math.floor(minuteTimestamp / 1000),
-          open: price,
-          high: price,
-          low: price,
-          close: price
-        });
-      } else {
-        const candle = candles.get(key);
-
-        candle.open = price;
-        candle.high = Math.max(candle.high, price);
-        candle.low = Math.min(candle.low, price);
-      }
-    }
-
-    const result = Array.from(candles.values())
-      .sort((a, b) => a.time - b.time)
-      .slice(-limit);
 
     return res.json({
       symbol,
       interval,
-      candles: result
+      candles: rows.map(row => ({
+        time: Number(row.time),
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close)
+      }))
     });
 
   } catch (err) {

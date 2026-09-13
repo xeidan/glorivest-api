@@ -29,6 +29,7 @@ router.use('/transactions', require('./transactions.routes'));
 router.use('/performance', require('./performance.routes'));
 router.use('/leaderboard', require('./leaderboard.routes'));
 router.use('/rates', require('./rates.routes'));
+router.use('/market', require('./marketSnapshot.routes'));
 
 
 /*
