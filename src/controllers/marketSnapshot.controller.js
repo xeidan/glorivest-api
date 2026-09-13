@@ -12,7 +12,9 @@ const {
 
 const SUPPORTED_SYMBOLS = [
   'BTCUSDT',
-  'ETHUSDT'
+  'ETHUSDT',
+  'XRPUSDT',
+  'SOLUSDT'
 ];
 
 /*
