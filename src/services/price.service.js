@@ -2,42 +2,82 @@
 
 const fetch = require('node-fetch');
 
+/* ======================================================
+   API ENDPOINTS
+====================================================== */
+
 const BINANCE_API = 'https://api.binance.com';
 const BINANCE_DATA_API = 'https://data-api.binance.vision';
 
 const TWELVE_DATA_API = 'https://api.twelvedata.com';
 const SIFTING_API = 'https://api.sifting.io';
 
-const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
-const SIFTING_API_KEY = process.env.SIFTING_API_KEY;
+/* ======================================================
+   API KEYS
+====================================================== */
+
+const TWELVE_DATA_API_KEY =
+  process.env.TWELVE_DATA_API_KEY;
+
+const SIFTING_API_KEY =
+  process.env.SIFTING_API_KEY;
 
 /* ======================================================
-   BINANCE
+   BINANCE — LATEST PRICE
 ====================================================== */
 
 async function getLatestPrice(symbol) {
-  const res = await fetch(
-    `${BINANCE_API}/api/v3/ticker/price?symbol=${encodeURIComponent(symbol)}`
-  );
+  const normalized =
+    String(symbol).trim().toUpperCase();
+
+  const url =
+    `${BINANCE_API}/api/v3/ticker/price` +
+    `?symbol=${encodeURIComponent(normalized)}`;
+
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Glorivest/1.0'
+    }
+  });
 
   if (!res.ok) {
-    throw new Error(`Binance price request failed: ${res.status}`);
+    const body =
+      await res.text().catch(() => '');
+
+    throw new Error(
+      `Binance price request failed: ${res.status}` +
+      `${body ? ` - ${body}` : ''}`
+    );
   }
 
   const data = await res.json();
+
   const price = Number(data.price);
 
   if (!Number.isFinite(price)) {
-    throw new Error(`Invalid Binance price for ${symbol}`);
+    throw new Error(
+      `Invalid Binance price for ${normalized}`
+    );
   }
 
   return price;
 }
 
-async function getHistoricalCandles(symbol, interval, limit = 100) {
+/* ======================================================
+   BINANCE — HISTORICAL CANDLES
+====================================================== */
+
+async function getHistoricalCandles(
+  symbol,
+  interval,
+  limit = 100
+) {
+  const normalized =
+    String(symbol).trim().toUpperCase();
+
   const url =
     `${BINANCE_DATA_API}/api/v3/klines` +
-    `?symbol=${encodeURIComponent(symbol)}` +
+    `?symbol=${encodeURIComponent(normalized)}` +
     `&interval=${encodeURIComponent(interval)}` +
     `&limit=${limit}`;
 
@@ -48,7 +88,8 @@ async function getHistoricalCandles(symbol, interval, limit = 100) {
   });
 
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
+    const body =
+      await res.text().catch(() => '');
 
     throw new Error(
       `Binance candles request failed: ${res.status}` +
@@ -59,21 +100,44 @@ async function getHistoricalCandles(symbol, interval, limit = 100) {
   const data = await res.json();
 
   if (!Array.isArray(data)) {
-    throw new Error('Invalid Binance candles response');
+    throw new Error(
+      'Invalid Binance candles response'
+    );
   }
 
-  return data.map(candle => ({
-    time: Math.floor(Number(candle[0]) / 1000),
-    open: Number(candle[1]),
-    high: Number(candle[2]),
-    low: Number(candle[3]),
-    close: Number(candle[4]),
-    volume: Number(candle[5])
-  }));
+  const candles = data
+    .map(candle => ({
+      time: Math.floor(
+        Number(candle[0]) / 1000
+      ),
+      open: Number(candle[1]),
+      high: Number(candle[2]),
+      low: Number(candle[3]),
+      close: Number(candle[4]),
+      volume: Number(candle[5])
+    }))
+    .filter(candle =>
+      Number.isFinite(candle.time) &&
+      Number.isFinite(candle.open) &&
+      Number.isFinite(candle.high) &&
+      Number.isFinite(candle.low) &&
+      Number.isFinite(candle.close)
+    )
+    .sort((a, b) =>
+      a.time - b.time
+    );
+
+  if (!candles.length) {
+    throw new Error(
+      `No valid Binance candles returned for ${normalized}`
+    );
+  }
+
+  return candles;
 }
 
 /* ======================================================
-   TWELVE DATA
+   TWELVE DATA — HISTORICAL CANDLES
 ====================================================== */
 
 async function getTwelveDataCandles(
@@ -87,13 +151,18 @@ async function getTwelveDataCandles(
     );
   }
 
+  const normalized =
+    String(symbol).trim().toUpperCase();
+
   const url =
     `${TWELVE_DATA_API}/time_series` +
-    `?symbol=${encodeURIComponent(symbol)}` +
+    `?symbol=${encodeURIComponent(normalized)}` +
     `&interval=${encodeURIComponent(interval)}` +
     `&outputsize=${limit}` +
     `&timezone=UTC` +
-    `&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
+    `&apikey=${encodeURIComponent(
+      TWELVE_DATA_API_KEY
+    )}`;
 
   const res = await fetch(url, {
     headers: {
@@ -111,29 +180,43 @@ async function getTwelveDataCandles(
 
   if (data.status === 'error') {
     throw new Error(
-      data.message || 'Twelve Data request failed'
+      data.message ||
+      'Twelve Data request failed'
     );
   }
 
   if (!Array.isArray(data.values)) {
     throw new Error(
-      `No candle data returned for ${symbol}`
+      `No candle data returned for ${normalized}`
     );
   }
 
   const candles = data.values
-    .map(row => ({
-      time: Math.floor(
-        new Date(`${row.datetime}Z`).getTime() / 1000
-      ),
-      open: Number(row.open),
-      high: Number(row.high),
-      low: Number(row.low),
-      close: Number(row.close),
-      volume: row.volume != null
-        ? Number(row.volume)
-        : 0
-    }))
+    .map(row => {
+      const datetime =
+        String(row.datetime || '');
+
+      const parsedTime =
+        new Date(
+          `${datetime}Z`
+        ).getTime();
+
+      return {
+        time: Number.isFinite(parsedTime)
+          ? Math.floor(parsedTime / 1000)
+          : NaN,
+
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+
+        volume:
+          row.volume != null
+            ? Number(row.volume)
+            : 0
+      };
+    })
     .filter(candle =>
       Number.isFinite(candle.time) &&
       Number.isFinite(candle.open) &&
@@ -141,11 +224,13 @@ async function getTwelveDataCandles(
       Number.isFinite(candle.low) &&
       Number.isFinite(candle.close)
     )
-    .sort((a, b) => a.time - b.time);
+    .sort((a, b) =>
+      a.time - b.time
+    );
 
   if (!candles.length) {
     throw new Error(
-      `No valid candles returned for ${symbol}`
+      `No valid Twelve Data candles returned for ${normalized}`
     );
   }
 
@@ -153,10 +238,11 @@ async function getTwelveDataCandles(
 }
 
 /* ======================================================
-   SIFTINGIO — SILVER
+   SIFTINGIO — GOLD + SILVER
 ====================================================== */
 
-async function getSiftingSilverCandles(
+async function getSiftingCommodityCandles(
+  symbol,
   interval,
   limit = 100
 ) {
@@ -166,11 +252,25 @@ async function getSiftingSilverCandles(
     );
   }
 
+  const normalized =
+    String(symbol).trim().toUpperCase();
+
+  const supportedSymbols = [
+    'XAUUSD',
+    'XAGUSD'
+  ];
+
+  if (!supportedSymbols.includes(normalized)) {
+    throw new Error(
+      `Unsupported SiftingIO commodity: ${normalized}`
+    );
+  }
+
   /*
    * SiftingIO requires a start date.
    *
-   * We request a sufficiently wide historical window
-   * and then keep the latest `limit` candles.
+   * Request a 30-day window and return
+   * the latest requested number of candles.
    */
 
   const startDate = new Date();
@@ -183,7 +283,8 @@ async function getSiftingSilverCandles(
     startDate.toISOString();
 
   const url =
-    `${SIFTING_API}/v1/hist/commodities/XAGUSD/bars` +
+    `${SIFTING_API}/v1/hist/commodities/` +
+    `${encodeURIComponent(normalized)}/bars` +
     `?interval=${encodeURIComponent(interval)}` +
     `&limit=${limit}` +
     `&start=${encodeURIComponent(start)}`;
@@ -201,13 +302,17 @@ async function getSiftingSilverCandles(
   if (!res.ok) {
     throw new Error(
       `SiftingIO candles request failed: ${res.status}` +
-      `${data?.error ? ` - ${data.error}` : ''}`
+      `${data?.error
+        ? ` - ${data.error}`
+        : ''}`
     );
   }
 
   /*
-   * SiftingIO response validation.
+   * SiftingIO may return the bars directly
+   * or inside data/bars.
    */
+
   const rows =
     Array.isArray(data)
       ? data
@@ -219,7 +324,7 @@ async function getSiftingSilverCandles(
 
   if (!rows.length) {
     throw new Error(
-      'No Silver candles returned by SiftingIO'
+      `No ${normalized} candles returned by SiftingIO`
     );
   }
 
@@ -232,16 +337,35 @@ async function getSiftingSilverCandles(
         row.t;
 
       return {
-        time: normalizeTimestamp(timeValue),
-        open: Number(row.open ?? row.o),
-        high: Number(row.high ?? row.h),
-        low: Number(row.low ?? row.l),
-        close: Number(row.close ?? row.c),
-        volume: Number(
-          row.volume ??
-          row.v ??
-          0
-        )
+        time:
+          normalizeTimestamp(timeValue),
+
+        open:
+          Number(
+            row.open ?? row.o
+          ),
+
+        high:
+          Number(
+            row.high ?? row.h
+          ),
+
+        low:
+          Number(
+            row.low ?? row.l
+          ),
+
+        close:
+          Number(
+            row.close ?? row.c
+          ),
+
+        volume:
+          Number(
+            row.volume ??
+            row.v ??
+            0
+          )
       };
     })
     .filter(candle =>
@@ -251,11 +375,13 @@ async function getSiftingSilverCandles(
       Number.isFinite(candle.low) &&
       Number.isFinite(candle.close)
     )
-    .sort((a, b) => a.time - b.time);
+    .sort((a, b) =>
+      a.time - b.time
+    );
 
   if (!candles.length) {
     throw new Error(
-      'No valid Silver candles returned by SiftingIO'
+      `No valid ${normalized} candles returned by SiftingIO`
     );
   }
 
@@ -267,17 +393,23 @@ async function getSiftingSilverCandles(
 ====================================================== */
 
 function normalizeTimestamp(value) {
+  /* -----------------------------------------------
+     Numeric timestamp
+  ----------------------------------------------- */
+
   if (typeof value === 'number') {
-    /*
-     * Handle milliseconds vs seconds.
-     */
     return value > 100000000000
       ? Math.floor(value / 1000)
       : Math.floor(value);
   }
 
+  /* -----------------------------------------------
+     String timestamp
+  ----------------------------------------------- */
+
   if (typeof value === 'string') {
-    const numeric = Number(value);
+    const numeric =
+      Number(value);
 
     if (Number.isFinite(numeric)) {
       return numeric > 100000000000
@@ -289,7 +421,9 @@ function normalizeTimestamp(value) {
       new Date(value).getTime();
 
     if (Number.isFinite(parsed)) {
-      return Math.floor(parsed / 1000);
+      return Math.floor(
+        parsed / 1000
+      );
     }
   }
 
@@ -297,20 +431,47 @@ function normalizeTimestamp(value) {
 }
 
 /* ======================================================
-   SYMBOL HELPERS
+   TWELVE DATA SYMBOL CONVERTER
 ====================================================== */
 
 function toTwelveDataSymbol(symbol) {
-  const normalized = String(symbol)
-    .trim()
-    .toUpperCase();
+  const normalized =
+    String(symbol)
+      .trim()
+      .toUpperCase();
 
   const symbolMap = {
+
+    /* -----------------------------------------------
+       Forex
+    ----------------------------------------------- */
+
+    EURUSD: 'EUR/USD',
+    GBPUSD: 'GBP/USD',
+    USDJPY: 'USD/JPY',
+    AUDUSD: 'AUD/USD',
+    USDCAD: 'USD/CAD',
+    USDCHF: 'USD/CHF',
+    NZDUSD: 'NZD/USD',
+    EURGBP: 'EUR/GBP',
+    EURJPY: 'EUR/JPY',
+    GBPJPY: 'GBP/JPY',
+
+    /* -----------------------------------------------
+       Metals
+       Kept here for compatibility, although
+       Glorivest currently routes metals through
+       SiftingIO.
+    ----------------------------------------------- */
+
     XAUUSD: 'XAU/USD',
     XAGUSD: 'XAG/USD'
   };
 
-  return symbolMap[normalized] || normalized;
+  return (
+    symbolMap[normalized] ||
+    normalized
+  );
 }
 
 /* ======================================================
@@ -321,6 +482,6 @@ module.exports = {
   getLatestPrice,
   getHistoricalCandles,
   getTwelveDataCandles,
-  getSiftingSilverCandles,
+  getSiftingCommodityCandles,
   toTwelveDataSymbol
 };

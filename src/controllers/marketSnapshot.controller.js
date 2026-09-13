@@ -3,12 +3,12 @@
 const {
   getHistoricalCandles,
   getTwelveDataCandles,
-  getSiftingSilverCandles,
+  getSiftingCommodityCandles,
   toTwelveDataSymbol
 } = require('../services/price.service');
 
 /* ======================================================
-   BINANCE ASSETS
+   BINANCE ASSETS — CRYPTO
 ====================================================== */
 
 const BINANCE_SYMBOLS = [
@@ -19,12 +19,21 @@ const BINANCE_SYMBOLS = [
 ];
 
 /* ======================================================
-   TWELVE DATA ASSETS
+   TWELVE DATA ASSETS — FOREX + STOCKS
 ====================================================== */
 
 const TWELVE_DATA_SYMBOLS = [
-  // Gold
-  'XAUUSD',
+  // Forex
+  'EURUSD',
+  'GBPUSD',
+  'USDJPY',
+  'AUDUSD',
+  'USDCAD',
+  'USDCHF',
+  'NZDUSD',
+  'EURGBP',
+  'EURJPY',
+  'GBPJPY',
 
   // Stocks
   'AAPL',
@@ -39,10 +48,11 @@ const TWELVE_DATA_SYMBOLS = [
 ];
 
 /* ======================================================
-   SIFTINGIO ASSETS
+   SIFTINGIO ASSETS — GOLD + SILVER
 ====================================================== */
 
 const SIFTING_SYMBOLS = [
+  'XAUUSD',
   'XAGUSD'
 ];
 
@@ -63,6 +73,46 @@ const INTERVAL_MAP = {
 };
 
 /* ======================================================
+   SIFTINGIO INTERVAL CONVERSION
+====================================================== */
+
+function toSiftingInterval(interval) {
+  const intervalMap = {
+    '1min': '1m',
+    '5min': '5m',
+    '15min': '15m',
+    '30min': '30m',
+    '1h': '1h',
+    '4h': '4h',
+    '1day': '1d',
+    '1week': '1w',
+    '1month': '1mo'
+  };
+
+  return intervalMap[interval] || interval;
+}
+
+/* ======================================================
+   BINANCE INTERVAL CONVERSION
+====================================================== */
+
+function toBinanceInterval(interval) {
+  const intervalMap = {
+    '1min': '1m',
+    '5min': '5m',
+    '15min': '15m',
+    '30min': '30m',
+    '1h': '1h',
+    '4h': '4h',
+    '1day': '1d',
+    '1week': '1w',
+    '1month': '1M'
+  };
+
+  return intervalMap[interval] || interval;
+}
+
+/* ======================================================
    MARKET CANDLES
 ====================================================== */
 
@@ -70,30 +120,49 @@ async function getMarketCandles(req, res) {
   try {
     const symbol = String(
       req.query.symbol || ''
-    ).toUpperCase();
+    ).trim().toUpperCase();
 
     const requestedInterval = String(
       req.query.interval || '1min'
-    ).toLowerCase();
+    ).trim().toLowerCase();
 
-    const interval =
-      INTERVAL_MAP[requestedInterval];
+    const interval = INTERVAL_MAP[requestedInterval];
+
+    const parsedLimit = Number.parseInt(
+      req.query.limit || '100',
+      10
+    );
 
     const limit = Math.min(
       Math.max(
-        Number.parseInt(
-          req.query.limit || '100',
-          10
-        ),
+        Number.isFinite(parsedLimit) ? parsedLimit : 100,
         1
       ),
       1000
     );
 
+    /* ==================================================
+       VALIDATE INTERVAL
+    ================================================== */
+
     if (!interval) {
       return res.status(400).json({
-        message:
-          `Unsupported interval ${requestedInterval}`
+        message: `Unsupported interval ${requestedInterval}`
+      });
+    }
+
+    /* ==================================================
+       VALIDATE SYMBOL
+    ================================================== */
+
+    const supported =
+      BINANCE_SYMBOLS.includes(symbol) ||
+      SIFTING_SYMBOLS.includes(symbol) ||
+      TWELVE_DATA_SYMBOLS.includes(symbol);
+
+    if (!supported) {
+      return res.status(400).json({
+        message: `Unsupported market symbol ${symbol}`
       });
     }
 
@@ -103,13 +172,7 @@ async function getMarketCandles(req, res) {
 
     if (BINANCE_SYMBOLS.includes(symbol)) {
       const binanceInterval =
-        interval === '1day'
-          ? '1d'
-          : interval === '1week'
-            ? '1w'
-            : interval === '1month'
-              ? '1M'
-              : interval;
+        toBinanceInterval(interval);
 
       const candles =
         await getHistoricalCandles(
@@ -127,33 +190,16 @@ async function getMarketCandles(req, res) {
     }
 
     /* ==================================================
-       SIFTINGIO — SILVER
+       SIFTINGIO — GOLD + SILVER
     ================================================== */
 
     if (SIFTING_SYMBOLS.includes(symbol)) {
       const siftingInterval =
-        interval === '1min'
-          ? '1m'
-          : interval === '5min'
-            ? '5m'
-            : interval === '15min'
-              ? '15m'
-              : interval === '30min'
-                ? '30m'
-                : interval === '1h'
-                  ? '1h'
-                  : interval === '4h'
-                    ? '4h'
-                    : interval === '1day'
-                      ? '1d'
-                      : interval === '1week'
-                        ? '1w'
-                        : interval === '1month'
-                          ? '1mo'
-                          : interval;
+        toSiftingInterval(interval);
 
       const candles =
-        await getSiftingSilverCandles(
+        await getSiftingCommodityCandles(
+          symbol,
           siftingInterval,
           limit
         );
@@ -167,7 +213,7 @@ async function getMarketCandles(req, res) {
     }
 
     /* ==================================================
-       TWELVE DATA — GOLD + STOCKS
+       TWELVE DATA — FOREX + STOCKS
     ================================================== */
 
     if (TWELVE_DATA_SYMBOLS.includes(symbol)) {
@@ -190,12 +236,11 @@ async function getMarketCandles(req, res) {
     }
 
     /* ==================================================
-       UNSUPPORTED
+       FALLBACK
     ================================================== */
 
     return res.status(400).json({
-      message:
-        `Unsupported market symbol ${symbol}`
+      message: `Unsupported market symbol ${symbol}`
     });
 
   } catch (err) {
